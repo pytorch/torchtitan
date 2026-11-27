@@ -11,12 +11,16 @@ Suffixes: T tokens, N blocks, D model dim.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any, cast
 
 import torch
 from torch.distributed.fsdp import FSDPModule
-from torch.distributed.pipelining import PipelineStage
+from torch.distributed.pipelining import PipelineStage, PipelineStageInfo
 from torch.distributed.pipelining._utils import flatten_args
+from torch.utils.hooks import RemovableHandle
 
 from .cache import PPRankLocalCache
 from .layout import BlockLayoutTables
@@ -87,13 +91,55 @@ def _split_stack_grad(
 class AttnResPipelineStage(PipelineStage):
     """``PipelineStage`` whose hops carry the block residual's delta."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        submodule: torch.nn.Module,
+        stage_index: int,
+        num_stages: int,
+        device: torch.device,
+        *,
+        input_args: tuple[torch.Tensor, ...],
+        output_args: tuple[torch.Tensor, ...],
+        **kwargs: Any,
+    ) -> None:
+        # Static metadata is required: dynamic metadata inference would run the
+        # stage outside its block routing and its forward context.
+        super().__init__(
+            submodule,
+            stage_index,
+            num_stages,
+            device,
+            input_args=input_args,
+            output_args=output_args,
+            **kwargs,
+        )
         self._layout: BlockLayoutTables | None = None
         self._store: PPRankLocalCache | None = None
         # per micro-batch: the stack's block order and the blocks the delta carried in
         self._order: dict[int, list[int]] = {}
         self._delta_in: dict[int, list[int]] = {}
+        # OrderedDict, not dict: RemovableHandle holds a weak reference to it.
+        self._forward_context_factories: OrderedDict[
+            int, Callable[[PipelineStageInfo], AbstractContextManager[None]]
+        ] = OrderedDict()
+
+    def register_forward_context(
+        self,
+        context_factory: Callable[[PipelineStageInfo], AbstractContextManager[None]],
+    ) -> RemovableHandle:
+        """Wrap each forward of this stage in ``context_factory(info)``.
+
+        Same contract as ``PipelineStage.register_forward_context``, including one
+        context at a time. PyTorch enters the context in the ``forward_one_chunk``
+        this class replaces, so the stage keeps and enters it itself.
+        """
+        if self._forward_context_factories:
+            raise RuntimeError(
+                f"stage {self.stage_index}: a forward context is already registered"
+            )
+        handle = RemovableHandle(self._forward_context_factories)
+        self._forward_context_factories[handle.id] = context_factory
+        return handle
 
     def set_routing(self, layout: BlockLayoutTables, store: PPRankLocalCache) -> None:
         self._layout = layout
@@ -179,7 +225,17 @@ class AttnResPipelineStage(PipelineStage):
         if isinstance(self.submod, FSDPModule) and self.has_backward:
             self.submod.set_manual_backward_finalization(True)
 
-        output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
+        context_factory = next(iter(self._forward_context_factories.values()), None)
+        with (
+            nullcontext()
+            if context_factory is None
+            else context_factory(
+                PipelineStageInfo(
+                    stage_index=self.stage_index, microbatch_index=fwd_chunk_id
+                )
+            )
+        ):
+            output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
 
         if self.is_last:
             output_tuple = (
@@ -218,13 +274,6 @@ class AttnResPipelineStage(PipelineStage):
         if not committed:
             return (grad_hidden, grad_delta)
         if grad_delta is None:
-            outputs_meta = self._stage_meta.outputs
-            if outputs_meta is not None and not outputs_meta[1].requires_grad:
-                # Nothing upstream of the payload's blocks is trainable (a frozen embedding under LoRA):
-                # no gradient channel, nowhere for the deposits to go.
-                for j in committed:
-                    self._collect_into(None, bwd_chunk_id, out_blocks[j])
-                return (grad_hidden, None)
             raise RuntimeError(
                 f"stage {self.stage_index} micro-batch {bwd_chunk_id}: no gradient "
                 f"arrived for the payload carrying its own blocks "
@@ -235,7 +284,7 @@ class AttnResPipelineStage(PipelineStage):
             self._collect_into(grad_delta[:, j], bwd_chunk_id, out_blocks[j])
         return (grad_hidden, grad_delta)
 
-    def _collect_into(self, grad_col_TD: torch.Tensor | None, mb: int, b: int) -> None:
+    def _collect_into(self, grad_col_TD: torch.Tensor, mb: int, b: int) -> None:
         # Collect block b's deposits, one per later stage on this rank holding b;
         # each such stage needs a stack gradient: a layer, the aggregation or a sent delta.
         layout, store = self.layout(), self.store()
@@ -247,7 +296,7 @@ class AttnResPipelineStage(PipelineStage):
                 f"{count} gradient deposit(s) but {expected} expected; a "
                 "later stage on this rank did not run its backward"
             )
-        if deposit is not None and grad_col_TD is not None:
+        if deposit is not None:
             grad_col_TD.add_(deposit)
 
     def backward_one_chunk(
@@ -309,36 +358,3 @@ class AttnResPipelineStage(PipelineStage):
                 f"stage {self.stage_index} micro-batch {bwd_chunk_id}: gradient "
                 "deposits left uncollected after the rank's last backward"
             )
-
-    def _compute_outputs(
-        self, *args: torch.Tensor, module: torch.nn.Module, **kwargs: Any
-    ):
-        layout = self.layout()
-        if self.is_first:
-            output = module(*args, **kwargs)
-            order_in: list[int] = []
-        else:
-            hidden_TD, delta_TND = args
-            delta_blocks = layout.delta_to_send(self.stage_index - 1)
-            held = {
-                b: hidden_TD.new_zeros(hidden_TD.shape)
-                for b in layout.cache_at_entry(self.stage_index)
-            }
-            stack_TND, order_in = _assemble_stack(
-                hidden_TD, delta_TND, delta_blocks, held
-            )
-            output = module(hidden_TD, stack_TND, **kwargs)
-        if self.is_last:
-            return output
-        hidden_out_TD, stack_out_TND = output
-        order_out = order_in + layout.commits_at(self.stage_index)
-        payload_TND = _pack_outgoing_delta(
-            stack_out_TND, order_out, layout.delta_to_send(self.stage_index)
-        )
-        return hidden_out_TD, payload_TND
-
-    def _compute_input_grads(self, outputs, all_fwd_inputs, grad_outputs=None):
-        grads = super()._compute_input_grads(outputs, all_fwd_inputs, grad_outputs)
-        return tuple(
-            g.contiguous() if isinstance(g, torch.Tensor) else g for g in grads
-        )

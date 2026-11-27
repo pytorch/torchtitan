@@ -25,7 +25,9 @@ We actively welcome your pull requests.
 Area experts are requested as reviewers automatically from
 [.github/area_reviewers.yml](.github/area_reviewers.yml). Maintainers can ask for
 an AI review by commenting `@claude review`; it follows
-[.claude/skills/pr-review](.claude/skills/pr-review/SKILL.md).
+[.claude/skills/pr-review](.claude/skills/pr-review/SKILL.md). A code owner can
+overrule its findings by commenting `@claude override` (optionally
+`@claude override 2,3: <reason>`); approving the PR does not overrule them.
 
 ### AI-assisted contributions
 We follow the PyTorch [AI policy](https://github.com/pytorch/pytorch/blob/main/AI_POLICY.md).

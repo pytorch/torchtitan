@@ -5,18 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
-import dataclasses
 import json
 import logging
 import os
 import time
 from collections.abc import Iterable, Iterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
@@ -32,6 +29,7 @@ from torchtitan.config import (
     OverrideConfig,
     PrecisionConfig,
 )
+from torchtitan.config.format import format_config
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.base.model import BaseModel
@@ -120,23 +118,9 @@ class Trainer(Configurable):
                     "load_only=False."
                 )
 
-        def to_dict(self) -> dict[str, Any]:
-            d = {}
-            for f in dataclasses.fields(self):
-                val = getattr(self, f.name)
-                if hasattr(val, "to_dict"):
-                    d[f.name] = val.to_dict()
-                elif dataclasses.is_dataclass(val):
-                    d[f.name] = asdict(val)
-                else:
-                    d[f.name] = val
-            return d
-
         def maybe_log(self) -> None:
             if self.debug.print_config:
-                logger.info(
-                    f"Running with configs: {json.dumps(self.to_dict(), indent=2, ensure_ascii=False)}"
-                )
+                logger.info(f"Running with configs: {format_config(self)}")
 
             if self.debug.save_config_file is not None:
                 config_file = os.path.join(
@@ -165,8 +149,6 @@ class Trainer(Configurable):
     gradient_accumulation_steps: int
     num_pp_microbatches: int
 
-    # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
-    @record
     def __init__(self, config: Config):
         self.config = config
         config.model = copy.deepcopy(config.model)
@@ -190,8 +172,9 @@ class Trainer(Configurable):
         if parallelism_context.dp_enabled:
             dp_mesh = parallelism_context.get_mesh("dp")
             dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
+            dp_ranks = torch.distributed.get_process_group_ranks(dp_mesh.get_group())
         else:
-            dp_degree, dp_rank = 1, 0
+            dp_degree, dp_rank, dp_ranks = 1, 0, None
 
         # metrics logging
         self.metrics_processor = config.metrics.build(
@@ -244,6 +227,7 @@ class Trainer(Configurable):
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
             vision_processor=self.vision_processor,
+            dp_ranks=dp_ranks,
         )
 
         try:
@@ -510,7 +494,6 @@ class Trainer(Configurable):
             num_flops=mean_num_flops,
         )
 
-    @record
     def train(self):
         config = self.config
         engine = self.engine

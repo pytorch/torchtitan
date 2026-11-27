@@ -37,9 +37,9 @@ from .base import (
     BaseCheckpointManager,
     EMA,
     export_state_dict,
+    FilesystemCheckpointStorage,
     LR_SCHEDULER,
     MODEL,
-    ModelWrapper,
     OPTIMIZER,
     purge_thread,
 )
@@ -64,27 +64,6 @@ class AsyncMode(str, enum.Enum):
     DISABLED = "disabled"
     ASYNC = "async"
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
-
-
-class _FilesystemCheckpointStorage:
-    """``CheckpointStorage`` backed by ``torchtitan.tools.filesystem``.
-
-    Local paths go through ``os``/``shutil`` and remote fsspec URIs through
-    fsspec, so DCP keeps reading and writing remote checkpoint folders exactly
-    as it did before.
-    """
-
-    def isdir(self, path: str) -> bool:
-        return filesystem.isdir(path)
-
-    def isfile(self, path: str) -> bool:
-        return filesystem.isfile(path)
-
-    def listdir(self, path: str) -> list[str]:
-        return filesystem.listdir(path)
-
-    def remove(self, path: str) -> None:
-        filesystem.rmtree(path)
 
 
 class CheckpointManager(BaseCheckpointManager):
@@ -136,7 +115,26 @@ class CheckpointManager(BaseCheckpointManager):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseCheckpointManager.Config):
-        pass
+        def __post_init__(self) -> None:
+            BaseCheckpointManager.Config.__post_init__(self)
+            # DCP's Hugging Face storage reads and writes local paths only, so
+            # reject a remote URI up front instead of failing deep in DCP.
+            # TODO: drop once https://github.com/pytorch/pytorch/issues/205015
+            # is fixed in the nightly CI uses.
+            if self.last_save_in_hf and filesystem.is_remote(self.folder):
+                raise ValueError(
+                    "last_save_in_hf is not supported with a remote "
+                    f"checkpointer.folder: {self.folder}"
+                )
+            if (
+                self.initial_load_in_hf
+                and self.initial_load_path
+                and filesystem.is_remote(self.initial_load_path)
+            ):
+                raise ValueError(
+                    "initial_load_in_hf is not supported with a remote "
+                    f"initial_load_path: {self.initial_load_path}"
+                )
 
     def __init__(
         self,
@@ -153,13 +151,18 @@ class CheckpointManager(BaseCheckpointManager):
 
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
-        self._storage = _FilesystemCheckpointStorage()
+        self._storage = FilesystemCheckpointStorage()
 
         self._validate_extra_state_keys(extra_states)
+        (
+            model,
+            self._resume_base_model_view,
+            self._fresh_start_model_view,
+        ) = self._build_model_views(model_parts, config)
         self.states = dict(extra_states)
         self.states.update(
             {
-                MODEL: ModelWrapper(model_parts),
+                MODEL: model,
                 OPTIMIZER: optimizers,
                 LR_SCHEDULER: lr_schedulers,
             }
@@ -626,7 +629,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
-            model = self.states[MODEL]
+            model = self._full_model()
             states = export_state_dict(
                 model.state_dict(), dtype=self.export_dtype, model_parts=model.model
             )

@@ -15,6 +15,7 @@ from typing import Any
 
 import torchstore as ts
 from monarch.actor import ProcMesh
+from monarch.rdma import get_rdma_backend
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
@@ -36,14 +37,14 @@ from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.actors.system import ActorSystem, ServiceHandle, TrainerHandle
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.model_state_dict_transport import (
-    ModelStateDictTransport,
-    shared_rank_layouts,
-)
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.transport.model_state_dict import (
+    ModelStateDictTransport,
+    shared_rank_layouts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +172,13 @@ class MonarchActorSystem(ActorSystem):
         )
 
     async def spawn_batcher(self, config: Batcher.Config, **kwargs: Any) -> Any:
+        if config.rdma_min_tensor_bytes is not None and get_rdma_backend() == "none":
+            raise ValueError(
+                f"async_loop.batcher.rdma_min_tensor_bytes={config.rdma_min_tensor_bytes}, but "
+                "Monarch has no RDMA backend (no RDMA bindings, or no ibverbs with TCP fallback "
+                "off). Set it to None, or set MONARCH_RDMA_ALLOW_TCP_FALLBACK=1."
+            )
+
         assert self._batcher_mesh is not None, "provision before spawning"
         return self._batcher_mesh.spawn("batcher", BatcherActor, config, **kwargs)
 

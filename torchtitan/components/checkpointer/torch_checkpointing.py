@@ -42,8 +42,9 @@ from torch_checkpointing.metadata_serialization import (
 )
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
-from torch_checkpointing.storage.base_storage import Storage, StorageConfig
+from torch_checkpointing.storage.base_storage import StorageConfig
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
+from torch_checkpointing.storage.fsspec_storage import FsspecStorageConfig
 from torchtitan.components.optim import (  # noqa: N811
     EMA as EMAContainer,
     LRSchedulersContainer,
@@ -59,9 +60,9 @@ from .base import (
     BaseCheckpointManager,
     EMA,
     export_state_dict,
+    FilesystemCheckpointStorage,
     LR_SCHEDULER,
     MODEL,
-    ModelWrapper,
     OPTIMIZER,
     purge_thread,
 )
@@ -77,39 +78,38 @@ _DEFAULT_ITEM_SPEC = ItemSpec(requires_copy=False)
 CHECKPOINTING_LOGGER_NAME = "torch_checkpointing"
 
 
-class _BackendCheckpointStorage:
-    """``CheckpointStorage`` backed by a ``torch_checkpointing`` ``Storage``.
+# TODO: torch_checkpointing wraps checkpoint ids in Path(), which collapses the
+# "//" of a URI, and a backend manager takes a single StorageConfig. So a path
+# reaches it without its scheme, on a storage built from its protocol. Delete
+# _split_uri, _backend_path, _storage_config and the path-segment check in
+# __init__ once torch_checkpointing settles on scheme-preserving paths or
+# per-path storage:
+# https://github.com/meta-pytorch/torch_checkpointing/issues/12#issuecomment-6967273963
+def _split_uri(path: str) -> tuple[str | None, str]:
+    """Split a checkpoint path into its protocol and the path the backend uses.
 
-    Path probes have to go through the same ``Storage`` the backend saves and
-    loads with, or a caller-supplied remote storage would be written by the
-    backend and read by something else.
-
-    ``Storage`` has no ``isfile``, so it is composed from the two halves it does
-    have. ``exists`` covers files and directories alike, so excluding
-    directories leaves exactly the existing non-directory entries.
-
-    ``Path`` would mangle a remote URI -- it collapses the double slash in
-    ``gs://bucket/x`` -- but every path arriving here is joined off
-    ``checkpointer.folder`` or ``checkpointer.initial_load_path``, and the manager
-    rejects a remote value for either at construction. So there is nothing left
-    to guard against by the time a path reaches this class.
+    ``gs://bucket/run`` -> ``("gs", "bucket/run")``; a local path ->
+    ``(None, path)``. The backend wraps every path in ``Path``, which would
+    collapse the double slash of a URI, so the protocol travels in the storage
+    config instead.
     """
+    if not filesystem.is_remote(path):
+        return None, path
+    protocol, _, backend_path = path.partition("://")
+    return protocol, backend_path
 
-    def __init__(self, storage: Storage) -> None:
-        self._storage = storage
 
-    def isdir(self, path: str) -> bool:
-        return self._storage.isdir(Path(path))
+def _backend_path(path: str) -> str:
+    return _split_uri(path)[1]
 
-    def isfile(self, path: str) -> bool:
-        target = Path(path)
-        return self._storage.exists(target) and not self._storage.isdir(target)
 
-    def listdir(self, path: str) -> list[str]:
-        return self._storage.ls(Path(path))
+def _storage_config(path: str) -> StorageConfig | None:
+    """Backend storage for ``path``: fsspec storage for a URI's protocol.
 
-    def remove(self, path: str) -> None:
-        self._storage.rmdir(Path(path))
+    ``None`` for a local path, which keeps the backend's own local default.
+    """
+    protocol, _ = _split_uri(path)
+    return None if protocol is None else FsspecStorageConfig(protocol=protocol)
 
 
 def _init_subprocess_logging(
@@ -218,12 +218,11 @@ def _default_backend_config(
 class TorchCheckpointingManager(BaseCheckpointManager):
     """TorchTitan checkpoint manager backed by ``torch_checkpointing``.
 
-    Args:
-        storage_config: Backend storage for reading and writing checkpoints.
-            Defaults to the local filesystem. This is an init parameter rather
-            than a ``Config`` field because the backend is a live storage object,
-            not declarative configuration; callers that need remote storage pass
-            it programmatically.
+    Each path is saved to and loaded from the storage its own scheme names:
+    the local filesystem for a local path, fsspec storage for a URI such as
+    ``gs://bucket/run``. So ``initial_load_path``, or the local
+    ``hf_assets_path`` an HF initial load reads, may be on other storage than
+    ``checkpointer.folder``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -249,31 +248,45 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         extra_states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
-        storage_config: StorageConfig | None = None,
     ) -> None:
         self.save_future: Future[Any] | None = None
         self.purge_thread: threading.Thread | None = None
 
         self.folder = filesystem.join(base_folder, config.folder)
-        # Checked here, not just in the storage adapter: a save runs no path
-        # probe when retention is off, so it would otherwise reach the backend
-        # and be mangled by Path() rather than failing.
-        for label, candidate in (
+        # The backend wraps a path in Path(), which drops empty and "." segments,
+        # while probes and retention use the URI as written. With such a segment
+        # a save lands where a later resume does not look.
+        for label, path in (
             ("checkpointer.folder", self.folder),
             ("checkpointer.initial_load_path", config.initial_load_path),
         ):
-            if candidate and filesystem.is_remote(candidate):
-                raise ValueError(
-                    f"{label} is a remote URI ({candidate!r}); remote URIs are "
-                    "not yet supported by torch_checkpointing. Use the DCP "
-                    "checkpoint manager for remote storage."
-                )
+            if path and filesystem.is_remote(path):
+                backend_path = _backend_path(path).removesuffix("/")
+                if str(Path(backend_path)) != backend_path:
+                    raise ValueError(
+                        f"{label} ({path!r}) must not contain empty or '.' "
+                        "path segments, such as '//' or '/./'."
+                    )
+        # fsspec expands glob characters in the path of a recursive delete, so
+        # retention would delete what the pattern matches instead of the stale
+        # checkpoint. The backend also refuses to commit a save to such a path.
+        if filesystem.is_remote(self.folder) and any(c in self.folder for c in "*?["):
+            raise ValueError(
+                f"checkpointer.folder ({self.folder!r}) must not contain the "
+                "glob characters '*', '?' or '['."
+            )
+        self._storage = FilesystemCheckpointStorage()
         self.interval = config.interval
         self._validate_extra_state_keys(extra_states)
+        (
+            model,
+            self._resume_base_model_view,
+            self._fresh_start_model_view,
+        ) = self._build_model_views(model_parts, config)
         self.states = dict(extra_states)
         self.states.update(
             {
-                MODEL: ModelWrapper(model_parts),
+                MODEL: model,
                 OPTIMIZER: optimizers,
                 LR_SCHEDULER: lr_schedulers,
             }
@@ -304,13 +317,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             save_config = _async_save_config()
         manager_config = _default_backend_config(
             save_config,
-            storage_config=storage_config,
+            storage_config=_storage_config(self.folder),
         )
         self._manager_config = manager_config
-        storage_config = (
-            self._manager_config.storage_config or LocalFileSystemStorageConfig()
-        )
-        self._storage = _BackendCheckpointStorage(storage_config.create_storage())
         self._prewarmed = False
 
         self.sd_adapter = sd_adapter
@@ -390,16 +399,15 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                 resharder=model_spec.resharder,
                 required=model_spec.required,
             )
-            hf_config = _default_backend_config(
+            hf_manager = _default_backend_config(
                 _sync_save_config(use_barrier=False),
-                storage_config=self._manager_config.storage_config,
+                storage_config=_storage_config(checkpoint_id),
                 items={item_key: hf_model_spec},
                 default=None,
-            )
-            hf_manager = hf_config.build()
+            ).build()
             try:
                 hf_manager.load(
-                    checkpoint_id,
+                    _backend_path(checkpoint_id),
                     into={item_key: hf_state},
                     # Covers only the weights to_hf maps. Parameters an export
                     # does not carry, such as new LoRA adapters, are not in
@@ -411,14 +419,21 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                 hf_manager.close()
             states[MODEL].load_state_dict(self.sd_adapter.from_hf(hf_state))
         else:
-            # TODO: Initializing a LoRA model from a native base checkpoint fails
-            # here: the checkpoint lacks the new adapter parameters. Exempt them
-            # on an initial load, as the HF path above already does.
-            loaded = self._manager.load(
-                checkpoint_id,
-                into=state_dict,
-                strict=True,
-            )
+            # An initial_load_path may be on other storage than the folder,
+            # which the folder's manager cannot read.
+            manager = self._manager
+            if _split_uri(checkpoint_id)[0] != _split_uri(self.folder)[0]:
+                manager = _default_backend_config(
+                    _sync_save_config(use_barrier=False),
+                    storage_config=_storage_config(checkpoint_id),
+                ).build()
+            try:
+                loaded = manager.load(
+                    _backend_path(checkpoint_id), into=state_dict, strict=True
+                )
+            finally:
+                if manager is not self._manager:
+                    manager.close()
             for key, target in states.items():
                 if isinstance(target, Stateful):
                     target.load_state_dict(state_dict[key])
@@ -456,7 +471,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             self._save_last_step(curr_step)
         else:
             self.save_future = self._manager.save(
-                self._create_checkpoint_id(curr_step),
+                _backend_path(self._create_checkpoint_id(curr_step)),
                 _stateful_to_state_dict(self.states),
             )
             self._prewarmed = True
@@ -470,6 +485,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         Hugging Face checkpoint loading has not landed in torch_checkpointing yet,
         so automatic loading cannot select those exports.
         """
+        # TODO: On a flat (non-HNS) GCS bucket the commit rename copies each
+        # object and is not atomic, so a preempted commit can leave a step-N that
+        # has metadata.pkl but not all of its shards, and this accepts it. Fixed
+        # once torch_checkpointing's fsspec backend moves metadata.pkl last:
+        # https://github.com/meta-pytorch/torch_checkpointing/issues/17
         return self._storage.isfile(
             filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
         )
@@ -537,7 +557,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
     def _save_last_step(self, curr_step: int) -> None:
         checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
-            model = self.states[MODEL]
+            model = self._full_model()
             model_state = export_state_dict(
                 model.state_dict(), dtype=self.export_dtype, model_parts=model.model
             )
@@ -580,6 +600,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             hf_storage_config = storage_config or LocalFileSystemStorageConfig(
                 use_direct_io=False
             )
+            output_dir = _backend_path(checkpoint_id)
 
             # The backend invokes the callback after each rank finishes writing
             # but before the write barrier and the atomic rename of the
@@ -592,7 +613,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                     dist.barrier()
                 consolidate_hf_safetensors_checkpoint(
                     args.path,
-                    output_dir=checkpoint_id,
+                    output_dir=output_dir,
                     item_key=MODEL,
                     fqn_to_index_mapping=fqn_to_index_mapping,
                     storage_config=hf_storage_config,
@@ -607,7 +628,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         manager = manager_config.build()
         try:
             manager.save(
-                input_checkpoint_id,
+                _backend_path(input_checkpoint_id),
                 _stateful_to_state_dict(states),
             )
         finally:

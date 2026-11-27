@@ -34,7 +34,12 @@ and can change outputs and gradients.
 
 CI already runs CP and PP on the debug model:
 - `gpt_oss_pp+fsdp+cp+ep+sacop` (`gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac`)
-- `gpt_oss_pp+fsdp+ep+sacop`
+- `gpt_oss_pp+fsdp+ep+sacop` (varlen, B200 suite)
+
+The attention sinks rescale the output by `sigmoid(lse - sinks)`, so training
+backpropagates through the attention lse. With the default `varlen` backend
+only FA4 (SM100) supports that backward, and other hardware raises a
+`ValueError`; use the flex recipes (`attn_backend="flex"`) there.
 
 Those jobs use Interleaved1F1B. FlexInnerAttention zero-bubble / split-backward PP
 tests are disabled in `tests/integration_tests/features.py` because

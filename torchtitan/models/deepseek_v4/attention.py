@@ -67,7 +67,6 @@ class DSV4InnerAttention(InnerAttention):
         window_size: int
         compress_ratio: int
         softmax_scale: float
-        index_topk: int
         aux_loss: SparseIndexerLoss.Config | None = None
 
         def build_attention_metadata(
@@ -127,7 +126,6 @@ class DSV4InnerAttention(InnerAttention):
         self.window_size = config.window_size
         self.compress_ratio = config.compress_ratio
         self.softmax_scale = config.softmax_scale
-        self.index_topk = config.index_topk
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
 
     def _gather_attn(
@@ -273,31 +271,19 @@ class CompressedSparseAttention(DSV4InnerAttention):
         q,
         swa_k,
         cmp_k,
-        idx_q,
-        idx_k,
-        idx_w,
+        topk_indices,
+        topk_scores: torch.Tensor,
         attn_sink,
         *,
         attention_metadata: DeepSeekV4CompressedSparseAttentionMetadata,
         aux_loss_denominator=None,
         padding_mask_T=None,
     ) -> torch.Tensor:
-        with spmd.no_typecheck():
-            cmp_topk, topk_scores = Indexer.select(
-                idx_q,
-                idx_k,
-                idx_w,
-                max_seqlen=attention_metadata.max_k,
-                ratio=self.compress_ratio,
-                topk=self.index_topk,
-                attention_metadata=attention_metadata,
-                return_scores=self.training and self.aux_loss is not None,
-            )
         return self._gather_attn(
             q,
             swa_k,
             cmp_k,
-            cmp_topk,
+            topk_indices,
             attn_sink,
             attention_metadata,
             topk_scores_TK=topk_scores,
@@ -348,37 +334,43 @@ class DeepSeekV4Attention(Attention):
         compressor_128: Compressor.Config | None = None
         indexer: Indexer.Config | None = None
 
-        def flops_per_token(self, seq_len: int) -> int:
-            from torchtitan.models.common.flops import (
-                quadratic_attention_flops_per_token,
-            )
+        def flops(self, positions: torch.Tensor) -> int:
+            from torchtitan.models.common.flops import quadratic_attention_flops
 
             inner_attention = self.inner_attention
-            attention_op_flops = quadratic_attention_flops_per_token(
+            # A causal query at document position p attends to p + 1 keys,
+            # at most window_size of them uncompressed.
+            num_keys = positions + 1
+            attention_op_flops = quadratic_attention_flops(
                 num_heads=self.n_heads,
                 qk_head_dim=self.head_dim,
                 v_head_dim=self.head_dim,
-                seq_len=seq_len,
-                sliding_window_size=inner_attention.window_size,
+                num_keys=num_keys.clamp(max=inner_attention.window_size),
             )
 
             if self.compress_ratio > 1:
-                compressed_seq_len = seq_len // self.compress_ratio
+                num_compressed_keys = num_keys // self.compress_ratio
                 if self.compress_ratio == 4:
-                    attention_op_flops += (
-                        6
-                        * self.index_n_heads
-                        * self.index_head_dim
-                        * compressed_seq_len
+                    # The indexer scores every compressed key without grad
+                    # (forward only); attention reads only the top-k.
+                    index_dim = self.index_n_heads * self.index_head_dim
+                    attention_op_flops += 2 * index_dim * int(num_compressed_keys.sum())
+                    assert self.indexer is not None
+                    num_compressed_keys = num_compressed_keys.clamp(
+                        max=self.indexer.inner_indexer.topk
                     )
-                    compressed_seq_len = min(
-                        compressed_seq_len, inner_attention.index_topk
-                    )
-                attention_op_flops += quadratic_attention_flops_per_token(
+                    # The indexer loss recomputes the top-k scores with grad.
+                    # The forward repeats the scoring pass, so only the
+                    # backward is new work.
+                    if inner_attention.aux_loss is not None:
+                        attention_op_flops += (
+                            4 * index_dim * int(num_compressed_keys.sum())
+                        )
+                attention_op_flops += quadratic_attention_flops(
                     num_heads=self.n_heads,
                     qk_head_dim=self.head_dim,
                     v_head_dim=self.head_dim,
-                    seq_len=compressed_seq_len,
+                    num_keys=num_compressed_keys,
                 )
             return attention_op_flops
 
@@ -464,38 +456,38 @@ class DeepSeekV4Attention(Attention):
         q = torch.cat([q_nope, q_rope], dim=-1)
         kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
 
-        cmp_k = idx_q = idx_k = idx_w = None
-        if self.compress_ratio > 1 and hasattr(self, "indexer"):
-            idx_q, idx_k, idx_w = self.indexer(
-                x.detach(),
-                qr.detach(),
-                positions=positions,
-                attention_metadata=attention_metadata,
-            )
+        attn_sink_param = self.attn_sink.weight.squeeze(-1)
         if self.compress_ratio == 4:
+            return_scores = (
+                self.inner_attention.training
+                and self.inner_attention.aux_loss is not None
+            )
+            with torch.set_grad_enabled(torch.is_grad_enabled() and return_scores):
+                topk_indices, topk_scores = self.indexer(
+                    x.detach(),
+                    qr.detach(),
+                    positions=positions,
+                    attention_metadata=attention_metadata,
+                    return_scores=return_scores,
+                )
             cmp_k = self.compressor(
                 x, positions=positions, attention_metadata=attention_metadata
             )
-        elif self.compress_ratio > 1:
-            cmp_k = self.compressor_128(
-                x, positions=positions, attention_metadata=attention_metadata
-            )
-
-        attn_sink_param = self.attn_sink.weight.squeeze(-1)
-        if self.compress_ratio == 4:
             o = self.inner_attention(
                 q,
                 kv,
                 cmp_k,
-                idx_q,
-                idx_k,
-                idx_w,
+                topk_indices,
+                topk_scores,
                 attn_sink_param,
                 attention_metadata=attention_metadata,
                 aux_loss_denominator=aux_loss_denominator,
                 padding_mask_T=padding_mask,
             )
         elif self.compress_ratio > 1:
+            cmp_k = self.compressor_128(
+                x, positions=positions, attention_metadata=attention_metadata
+            )
             o = self.inner_attention(
                 q,
                 kv,

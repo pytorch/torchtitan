@@ -116,8 +116,12 @@ class Attention(Module):
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
 
-        def flops_per_token(self, seq_len: int) -> int:
-            """Training attention contractions, excluding parameter-based work."""
+        def flops(self, positions: torch.Tensor) -> int:
+            """Training attention contractions, excluding parameter-based work.
+
+            ``positions`` holds each non-padding query's position in its
+            document, e.g. ``[0, 1, 2, 0, 1]`` for documents of lengths 3 and 2.
+            """
             raise NotImplementedError(type(self).__qualname__)
 
 
@@ -228,28 +232,25 @@ class GQAttention(Attention):
                     f"n_kv_heads ({n_kv_heads})"
                 )
 
-        def flops_per_token(self, seq_len: int) -> int:
-            from torchtitan.models.common.flops import (
-                quadratic_attention_flops_per_token,
-            )
+        def flops(self, positions: torch.Tensor) -> int:
+            from torchtitan.models.common.flops import quadratic_attention_flops
 
             head_dim = self.head_dim or self.dim // self.n_heads
-            return quadratic_attention_flops_per_token(
+            # A causal query at document position p attends to p + 1 keys.
+            num_keys = positions + 1
+            if isinstance(
+                self.inner_attention,
+                (
+                    SlidingWindowFlexInnerAttention.Config,
+                    SlidingWindowVarlenInnerAttention.Config,
+                ),
+            ):
+                num_keys = num_keys.clamp(max=self.inner_attention.sliding_window_size)
+            return quadratic_attention_flops(
                 num_heads=self.n_heads,
                 qk_head_dim=head_dim,
                 v_head_dim=head_dim,
-                seq_len=seq_len,
-                sliding_window_size=(
-                    self.inner_attention.sliding_window_size
-                    if isinstance(
-                        self.inner_attention,
-                        (
-                            SlidingWindowFlexInnerAttention.Config,
-                            SlidingWindowVarlenInnerAttention.Config,
-                        ),
-                    )
-                    else None
-                ),
+                num_keys=num_keys,
             )
 
     def __init__(self, config: Config):
@@ -391,10 +392,11 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
         )
         """ Backend priority order for varlen_attn, as ``SDPBackend`` member
             names, applied via ``sdpa_kernel(..., set_priority=True)``.
-            Names keep the config plain data: ``SDPBackend`` is a pybind11
-            enum, which ``pprint`` (``--print-config``) cannot format.
+            Names keep the config plain data for ``to_dict()`` and JSON
+            serialization, since ``SDPBackend`` is a pybind11 enum.
             Deterministic mode skips cuDNN, whose backward is not
-            deterministic.
+            deterministic, and so does a backward through the lse that an
+            ``out_transform`` consumes, which only Flash with FA4 supports.
         """
 
         @property
@@ -509,10 +511,21 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
         attn_dtype = _varlen_attn_dtype(v_THV.dtype)
 
         sdpa_backends = self.sdpa_backends
-        if torch.are_deterministic_algorithms_enabled():
-            # TODO: Remove once the cuDNN varlen backward honors
-            # use_deterministic_algorithms (upstream issue not filed yet). It
-            # neither raises nor runs deterministically, so repeated runs differ.
+        # TODO: Remove the deterministic case once the cuDNN varlen backward
+        # honors use_deterministic_algorithms (upstream issue not filed yet). It
+        # neither raises nor runs deterministically, so repeated runs differ.
+        # TODO: Relax the lse case once other kernels implement the backward
+        # for the lse that out_transform consumes. Since pytorch/pytorch#206398
+        # only Flash with FA4 does; cuDNN, FA2 and FA3 raise in backward, where
+        # detaching the lse would silently drop part of the q/k gradient.
+        lse_needs_grad = out_transform is not None and torch.is_grad_enabled()
+        if lse_needs_grad and fa_impl != "FA4":
+            raise ValueError(
+                "Backpropagating through out_transform's lse with varlen attention "
+                "needs the FA4 flash attention implementation (SM100). Use "
+                "FlexInnerAttention (attn_backend='flex') on this hardware."
+            )
+        if torch.are_deterministic_algorithms_enabled() or lse_needs_grad:
             sdpa_backends = [
                 backend
                 for backend in sdpa_backends
@@ -520,7 +533,8 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
             ]
             if not sdpa_backends:
                 raise ValueError(
-                    "Deterministic mode needs a varlen backend other than cuDNN. "
+                    "Deterministic mode and backpropagating through out_transform's "
+                    "lse need a varlen backend other than cuDNN. "
                     'Add "FLASH_ATTENTION" to sdpa_backends.'
                 )
 
@@ -545,6 +559,19 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
             return result.to(q_THK.dtype)
 
         out_THV, lse_HT = result
+        # TODO: Remove once every torch torchtitan installs includes
+        # pytorch/pytorch#206398; RL still pins an older one
+        # (scripts/install_rl_env.sh). Before it, varlen_attn returned a
+        # non-differentiable lse, so q and k would silently miss the gradient
+        # through out_transform.
+        if q_THK.requires_grad and not lse_HT.requires_grad:
+            raise ValueError(
+                "This torch returns a non-differentiable lse from varlen_attn, so "
+                "backpropagating through out_transform would drop part of the q/k "
+                "gradient. Use a torch that includes pytorch/pytorch#206398 "
+                "(nightly 2.16.0.dev20261125 or later), or FlexInnerAttention "
+                "(attn_backend='flex')."
+            )
         out_THV = out_THV.to(q_THK.dtype)
         lse_TH = lse_HT.transpose(0, 1)
         return out_transform(out_THV, lse_TH)

@@ -23,11 +23,11 @@ dependency of its own: it declares the service's methods as
 | `generator.py` | `GeneratorActor`, the endpoints of `rl/generator/generator.py`'s `Generator`; supplies `Channel.open` for the data-parallel result fan-in. |
 | `router.py` | `InterGeneratorRouterActor`, the endpoints of `rl/routing/inter_generator.py`'s `InterGeneratorRouter`; enforces that the router is a singleton. |
 | `batcher.py` | `BatcherActor`, the endpoints of `rl/trainer/batcher.py`'s `Batcher`, in its own CPU process; supplies `MonarchRDMAMicrobatch.register`. |
-| `rdma_microbatch.py` | `MonarchRDMAMicrobatch`, the `RDMAMicrobatch` (`rl/trainer/rdma_microbatch.py`) on Monarch RDMA buffers: the batcher keeps a microbatch's large tensors and each trainer rank reads its column. |
+| `rdma_microbatch.py` | `MonarchRDMAMicrobatch`, the `RDMAMicrobatch` (`rl/transport/rdma_microbatch.py`) on Monarch RDMA buffers: the batcher keeps a microbatch's large tensors and each trainer rank reads its column. |
 | `rollout_worker.py` | `RolloutWorkerActor`, a rollout worker in the controller-host CPU pool. |
 | `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), and the Monarch client's `shutdown`. |
 | `torch_elastic.py` | Sets the torch-elastic env vars (`RANK`, `MASTER_PORT`, ...) on a proc mesh before `init_process_group`; rank 0 keeps its rendezvous store port open so no other socket takes it. |
-| `launcher/` | Scheduler launchers: `MonarchLauncher`, `MonarchControllerWithLauncher` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), and the submit command (`submit.py`). |
+| `launcher/` | Scheduler launchers: `MonarchLauncher`, `MonarchControllerWithLauncher` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), `PBSLauncher` (`pbs.py`), and the submit command (`submit.py`). |
 
 ## Launchers
 
@@ -94,6 +94,32 @@ def my_rl_slurm():
     config.launcher.slurm_args += ["--account=my-account", "--partition=gpu"]
     return config
 ```
+
+### PBS
+
+`PBSLauncher` is submitted the same way. It passes the submit environment with
+`qsub -V`; site settings such as the queue, project and walltime go in
+`pbs_args`, and Cray PALS clusters set the `mpiexec` options. A launch recipe
+wraps an RL recipe with it:
+
+```python
+def my_rl_pbs():
+    return MonarchControllerWithLauncher.Config.from_controller_config(
+        rl_grpo_qwen3_0_6b_flex(),
+        launcher=PBSLauncher.Config(
+            gpus_per_node=4,
+            pbs_args=["-q debug", "-A my_project", "-l walltime=01:00:00"],
+            mpiexec_args=["--cpu-bind=none"],
+        ),
+    )
+```
+
+Every node starts `python_exe`, so on clusters that set up the environment with
+modules, point it at a script that loads them and then runs `exec python "$@"`.
+That script is also the place to set `TMPDIR` to a short path such as `/tmp`:
+PBS sets it to `/var/tmp/pbs.<job id>/...`, which makes Monarch's unix socket
+paths longer than Linux allows (meta-pytorch/monarch#5415; drop this once it is
+fixed).
 
 The launcher's `env` values are part of the config, which the controller may log
 and save (`print_config`, `save_config_file`), so don't put secrets there; set them

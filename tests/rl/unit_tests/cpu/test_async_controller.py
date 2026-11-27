@@ -8,6 +8,7 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import dataclasses
 import itertools
 import json
 import logging
@@ -61,6 +62,93 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     with open(tmp_path / "config.json") as file:
         saved_config = json.load(file)
     assert saved_config["trainer"]["model"]["max_context_length"] == 128
+
+
+def _controller_config_with_groups(
+    *, num_groups: int, group_size: int, rollouts_per_worker: int = 128
+) -> Controller.Config:
+    """A CI recipe with `num_groups` training groups of `group_size` in flight."""
+    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
+
+    config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
+    async_loop = dataclasses.replace(
+        config.async_loop,
+        target_offpolicy_steps=0,
+        num_prompts_per_train_step=num_groups,
+        num_samples_per_prompt=group_size,
+    )
+    rollouter = dataclasses.replace(
+        config.rollouter, rollouts_per_worker=rollouts_per_worker
+    )
+    # `replace` reruns `__post_init__`, so the group-size check runs.
+    return dataclasses.replace(config, async_loop=async_loop, rollouter=rollouter)
+
+
+# rollouts_per_worker=0 must raise this ValueError too: `Rollouter.setup_async` divides by it.
+@pytest.mark.parametrize("group_size, rollouts_per_worker", [(256, 128), (8, 0)])
+def test_a_group_larger_than_rollouts_per_worker_raises(
+    group_size, rollouts_per_worker
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"num_samples_per_prompt \({group_size}\) is larger than "
+        rf"rollouter.rollouts_per_worker \({rollouts_per_worker}\)",
+    ):
+        _controller_config_with_groups(
+            num_groups=16,
+            group_size=group_size,
+            rollouts_per_worker=rollouts_per_worker,
+        )
+
+
+def test_greedy_training_sampling_raises() -> None:
+    # The batcher hands this temperature to the loss, which divides the logits by it.
+    config = _controller_config_with_groups(num_groups=16, group_size=8)
+    generator = dataclasses.replace(
+        config.generator,
+        sampling=dataclasses.replace(config.generator.sampling, temperature=0.0),
+    )
+    with pytest.raises(ValueError, match="generator.sampling.temperature"):
+        dataclasses.replace(config, generator=generator)
+
+
+def test_rollout_loop_keeps_the_metrics_a_worker_sent_with_its_group() -> None:
+    """A rollout worker adds its own metrics to each training group (e.g. its event-loop lag).
+    The controller adds the rollout metrics next to them."""
+    work = SimpleNamespace(sample="prompt", group_id=7)
+    claims = [work, None]
+    finalized: list[RolloutGroup] = []
+
+    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+        worker_metric = m.Metric("rollout_worker/event_loop_lag_ms", m.Max(5.0))
+        return RolloutGroup(group_id=group_id, rollouts=[], metrics=[worker_metric])
+
+    async def claim_next():
+        return claims.pop(0)
+
+    async def finalize_work(group: RolloutGroup) -> None:
+        finalized.append(group)
+
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(num_samples_per_prompt=1)
+    )
+    controller._sampling = SamplingConfig()
+    controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+    controller.rollout_recorder = SimpleNamespace(record=lambda **kwargs: None)
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+    group_buffer = SimpleNamespace(claim_next=claim_next, finalize_work=finalize_work)
+
+    asyncio.run(
+        controller._rollout_loop(
+            group_buffer=group_buffer, generate_fn=None, release_session_fn=None
+        )
+    )
+
+    keys = m.MetricsProcessor._aggregate_metrics(finalized[0].metrics)
+    assert keys["rollout_worker/event_loop_lag_ms/max"] == 5.0
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
@@ -124,7 +212,7 @@ def _untrainable_group(group_id: int) -> TrainingSampleGroup:
 def _build_batcher(
     *, num_prompts_per_train_step: int, num_mtp_layers: int = 0
 ) -> Batcher:
-    config = Batcher.Config()
+    config = Batcher.Config(rdma_min_tensor_bytes=None)
     config.num_mtp_layers = num_mtp_layers
     return config.build(
         num_tokens_per_microbatch_per_dp_rank=16384,
@@ -243,7 +331,7 @@ def test_batcher_raises_at_consecutive_untrainable_group_limit() -> None:
 def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
     # Five two-token samples need four rank inputs across two microbatches.
     # Redistributing one sample keeps every rank input trainable.
-    batcher = Batcher.Config(max_num_documents=4).build(
+    batcher = Batcher.Config(max_num_documents=4, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=2,
         num_prompts_per_train_step=1,
@@ -270,7 +358,7 @@ def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
 
 
 def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -296,7 +384,9 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
 
 
 def test_flat_rank_packing_preserves_padding_mask() -> None:
-    batcher = Batcher.Config(per_sample_pad_multiple=4).build(
+    batcher = Batcher.Config(
+        per_sample_pad_multiple=4, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -325,7 +415,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
 
 
 def test_batcher_balances_packing_across_dp_ranks() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -349,7 +439,7 @@ def test_batcher_balances_packing_across_dp_ranks() -> None:
 
 
 def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=40,
         max_context_length=40,
         num_prompts_per_train_step=1,
@@ -370,7 +460,7 @@ def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
 
 
 def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -387,7 +477,7 @@ def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
 
 
 def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -414,7 +504,7 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
 
 
 def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
-    batcher = Batcher.Config(max_num_documents=1).build(
+    batcher = Batcher.Config(max_num_documents=1, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -440,7 +530,7 @@ def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
 
 
 def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> None:
-    batcher = Batcher.Config(max_num_documents=3).build(
+    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=6,
         max_context_length=3,
         num_prompts_per_train_step=1,
@@ -467,7 +557,7 @@ def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> No
 def test_document_limit_applies_to_each_local_microbatch() -> None:
     # A local microbatch is capped at three documents. The batcher must keep all
     # five documents and distribute them 2 + 3 across two microbatches.
-    batcher = Batcher.Config(max_num_documents=3).build(
+    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -491,7 +581,7 @@ def test_document_limit_applies_to_each_local_microbatch() -> None:
 
 
 def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
-    batcher = Batcher.Config(max_num_documents=1).build(
+    batcher = Batcher.Config(max_num_documents=1, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=2,
         num_prompts_per_train_step=1,
@@ -511,7 +601,7 @@ def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
 
 
 def test_batcher_filters_training_samples_longer_than_context() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -623,7 +713,7 @@ def test_untrainable_group_releases_before_training() -> None:
         buffer = RolloutGroupWorkBuffer.Config().build(
             max_active_rollout_groups=1, window_size=None
         )
-        batcher = Batcher.Config().build(
+        batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
             num_tokens_per_microbatch_per_dp_rank=16384,
             max_context_length=2048,
             num_prompts_per_train_step=1,
@@ -825,6 +915,7 @@ def _run_with_generator_watcher(
     )
     controller.start_step = 0
     controller._validation_tasks = []
+    controller._model_state_dict_pull_tasks = []
     controller._has_pending_validation = False
     controller.metrics_processor = Mock()
     controller.trainer = None
@@ -971,6 +1062,7 @@ def test_validation_schedule(
         )
     )
     controller._validation_tasks = []
+    controller._model_state_dict_pull_tasks = []
     controller._has_pending_validation = False
     controller.validate = validate
     controller.metrics_processor = Mock()
@@ -1164,3 +1256,25 @@ def test_validation_config_rejects_bad_sampling() -> None:
         ValidationConfig(num_samples_per_prompt=0)
     with pytest.raises(ValueError, match="greedy"):
         ValidationConfig(temperature=0.0, num_samples_per_prompt=4)
+
+
+def test_run_cancels_the_in_flight_pull_when_the_trainer_loop_fails() -> None:
+    events: list[str] = []
+    buffer_closed = asyncio.Event()
+
+    async def pull() -> None:
+        await buffer_closed.wait()
+        events.append("released groups after close")
+
+    async def failing_trainer_loop(self, *args, **kwargs) -> None:
+        self._model_state_dict_pull_tasks = [asyncio.create_task(pull())]
+        raise RuntimeError("forward/backward failed")
+
+    with pytest.raises(RuntimeError, match="forward/backward failed"):
+        _run_with_generator_watcher(
+            _block_forever,
+            trainer_loop=failing_trainer_loop,
+            on_close=buffer_closed.set,
+        )
+
+    assert events == []

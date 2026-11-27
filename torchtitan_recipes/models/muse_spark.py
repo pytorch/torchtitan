@@ -36,7 +36,12 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import OverrideConfig, PrecisionConfig, TrainingConfig
+from torchtitan.config import (
+    CallableFunction,
+    OverrideConfig,
+    PrecisionConfig,
+    TrainingConfig,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -657,7 +662,9 @@ def apply_gb300_lora_dist_moe(
 
     Sets local compile of the loss only, remat that saves the Dist-MoE save
     regions, the Dist-MoE runtime budgets and 1800 s comm timeouts, drops the
-    fused SwiGLU override import, then applies the Dist-MoE and LoRA transforms.
+    fused SwiGLU override import, applies the Dist-MoE and LoRA transforms, then
+    sets the checkpointer's ``model_param_checkpoint_type_map`` from ``lora`` so
+    step checkpoints leave out the frozen base.
     """
     from torchtitan.config.transform.dist_moe import DistMoeTransform
     from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
@@ -674,10 +681,15 @@ def apply_gb300_lora_dist_moe(
     config.comm.init_timeout_seconds = 1800
     config.comm.train_timeout_seconds = 1800
     config.override.imports = []
-    return apply_transforms(
+    config = apply_transforms(
         config,
         [DistMoeTransform(expert_precision="bf16", inplace_wgrad_accum=False), lora],
     )
+    if config.checkpointer is not None:
+        config.checkpointer.model_param_checkpoint_type_map = CallableFunction.Config(
+            fn=lora.param_checkpoint_type
+        )
+    return config
 
 
 def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
@@ -695,7 +707,8 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     or override the pattern with ``MUSE_SPARK_ULTRADATA_JSONL_PATTERN``.
 
     Native torch_checkpointing checkpoints retain LoRA adapters and training state;
-    HF export (``last_save_in_hf``) raises for LoRA models. The default
+    HF export (``last_save_in_hf``) raises for LoRA models. Checkpoints leave
+    out the frozen base, so a resume also loads the HF base. The default
     checkpoint folder is ``muse_spark_ultradata_lora_cp16_128k`` under
     ``--output-dir`` (default: ``outputs``). ``MUSE_SPARK_CHECKPOINT_FOLDER`` overrides it and accepts
     an absolute path. Existing native checkpoints take precedence over

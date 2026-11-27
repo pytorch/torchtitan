@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -155,6 +156,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         def __post_init__(self) -> None:
             if (
+                self.profiler.kernel_spans is not None
+                and self.training.disable_accelerator_graphs
+            ):
+                raise ValueError(
+                    "profiler.kernel_spans requires accelerator graphs: kernels "
+                    "are named from their CUDA graph nodes. Set "
+                    "training.disable_accelerator_graphs=False."
+                )
+            if (
                 self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
             ):
@@ -173,6 +183,21 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     "parallelism.fsdp_enable_cpu_offloading requires 'dp_shard' in "
                     "debug.distinct_seed_mesh_axes; otherwise every FSDP shard "
                     "is initialized with the same CPU RNG stream."
+                )
+
+            if self.parallelism.fsdp_enable_cpu_offloading and (
+                self.parallelism.tensor_parallel_degree > 1
+                or self.parallelism.context_parallel_degree > 1
+            ):
+                # Init draws from per-rank CPU seeds, which differ only along
+                # distinct_seed_mesh_axes. TP and CP each hold both sharded and
+                # replicated params (MoE router gate is Replicate(tp); multimodal
+                # encoders are FSDP-sharded over dp_shard only, so Replicate(cp)),
+                # so no choice of distinct axes initializes both correctly.
+                raise ValueError(
+                    "parallelism.fsdp_enable_cpu_offloading does not support "
+                    "tensor_parallel_degree > 1 or context_parallel_degree > 1: "
+                    "TP and CP ranks would initialize identical parameter shards."
                 )
 
             if self.parallelism.num_pp_microbatches <= 0:
@@ -451,10 +476,21 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.pp_has_first_stage = True
             self.pp_has_last_stage = True
 
+        # Under create_seed_checkpoint the params are plain tensors, not DTensors.
+        init_dtensor_params_on_cpu = (
+            self.config.parallelism.fsdp_enable_cpu_offloading
+            and not create_seed_checkpoint
+        )
         with self.parallelism_context.activate_spmd():
             for model_part in self.model_parts:
                 model_part.to_empty(device=init_device)
-                with torch.no_grad():
+                with torch.no_grad(), (
+                    dist_utils.dtensor_rng_tracker_off(
+                        self.parallelism_context.spmd_dense_mesh()
+                    )
+                    if init_dtensor_params_on_cpu
+                    else contextlib.nullcontext()
+                ):
                     model_part.init_weights(buffer_device=buffer_device)
                 model_part.train()
 

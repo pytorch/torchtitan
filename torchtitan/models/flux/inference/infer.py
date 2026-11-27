@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 
 @torch.no_grad()
-@record
 def inference(config: FluxTrainer.Config):
     # Reuse trainer to perform forward passes
     trainer = FluxTrainer(config)
@@ -102,7 +101,12 @@ def inference(config: FluxTrainer.Config):
     torch.distributed.destroy_process_group()
 
 
-if __name__ == "__main__":
+@record
+def main() -> None:
     init_logger()
     config = ConfigLoader().load()
     inference(config)  # pyrefly: ignore [bad-argument-type]
+
+
+if __name__ == "__main__":
+    main()

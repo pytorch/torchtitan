@@ -28,13 +28,13 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.rl.controller.metrics import combine_microbatch_metrics
-from torchtitan.rl.model_state_dict_transport import (
+from torchtitan.rl.trainer.batcher import TrainingMicrobatch
+from torchtitan.rl.transport.model_state_dict import (
     ModelStateDictTransport,
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.trainer.batcher import TrainingMicrobatch
-from torchtitan.rl.trainer.rdma_microbatch import (
+from torchtitan.rl.transport.rdma_microbatch import (
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )
@@ -272,8 +272,8 @@ class Trainer(Configurable):
         Args:
             microbatch_groups: This rank's column of the batcher's
                 `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
-                as one pipeline step. `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set,
-                read a few ahead of training.
+                as one pipeline step. `RDMAMicrobatch`es unless `rdma_min_tensor_bytes` is None. With
+                `preprocess_microbatch_groups_lazily`, they are read a few ahead of training.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token

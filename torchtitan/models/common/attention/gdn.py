@@ -27,7 +27,7 @@ from torchtitan.models.common.attn_gym import (
     _ChunkGDN,
     causal_conv1d,
     chunk_gdn,
-    ChunkGdnCudnnPacked,
+    ChunkGdnWarpdrivePacked,
     ContextParallelRouting,
     is_missing_kernel,
     l2norm,
@@ -47,7 +47,7 @@ from .linear_attention import (
 # The Attention Gym kernels run on rank-local heads inside local SPMD regions.
 # ContextParallelInnerGDN handles cross-rank sequence dependencies
 # before invoking them.
-for _kernel_function in (_ChunkGDN, ChunkGdnCudnnPacked):
+for _kernel_function in (_ChunkGDN, ChunkGdnWarpdrivePacked):
     if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
 
@@ -481,8 +481,7 @@ class InnerGDN(InnerAttention):
             cu_seqlens=convolution_offsets,
             routing=routing,
         ).reshape(num_tokens, -1, value_head_dim)
-        g_TH = -torch.exp(A_log_H.float()) * F.softplus(a_TH.float() + dt_bias_H)
-        beta_TH = torch.sigmoid(b_TH)
+        g_TH, beta_TH = self._compute_gdn_gates(a_TH, b_TH, A_log_H, dt_bias_H)
         return self.gdn_core(
             xq_THK,
             xk_THK,
@@ -492,6 +491,19 @@ class InnerGDN(InnerAttention):
             cu_seqlens=cu_seqlens if use_varlen_kernels else None,
             routing=routing,
         )
+
+    @staticmethod
+    @local_compile("gdn_gate", batch_invariant=True)
+    def _compute_gdn_gates(
+        a_TH: torch.Tensor,
+        b_TH: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_H: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fuse the decay ``g_TH`` and the update gate ``beta_TH``."""
+        g_TH = -torch.exp(A_log_H.float()) * F.softplus(a_TH.float() + dt_bias_H)
+        beta_TH = torch.sigmoid(b_TH)
+        return g_TH, beta_TH
 
     def short_convolution(
         self,
@@ -620,10 +632,11 @@ class GDN(LinearAttention):
                     f"n_key_heads * sum(in_proj_split_sizes) ({in_proj_rows})"
                 )
 
-        def flops_per_token(self, seq_len: int) -> int:
+        def flops(self, positions: torch.Tensor) -> int:
             from torchtitan.models.common.flops import delta_rule_flops_per_token
 
-            return delta_rule_flops_per_token(
+            # The recurrent state has a fixed size, so every query costs the same.
+            return positions.numel() * delta_rule_flops_per_token(
                 num_heads=self.n_heads,
                 key_head_dim=self.key_head_dim,
                 v_head_dim=self.value_head_dim,

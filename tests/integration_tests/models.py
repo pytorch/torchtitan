@@ -37,10 +37,7 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_mtp,
 )
-from torchtitan_recipes.tests.models.gpt_oss import (
-    gpt_oss_debugmodel,
-    gpt_oss_debugmodel_flex,
-)
+from torchtitan_recipes.tests.models.gpt_oss import gpt_oss_debugmodel_flex
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 from torchtitan_recipes.tests.models.multimodal import (
     set_rank_conditional_image_presence,
@@ -250,10 +247,10 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2_pp2() -> Trainer.Config:
     return config
 
 
-def deepseek_v4_debugmodel_fsdp4_ep4() -> Trainer.Config:
-    from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
+def deepseek_v4_mtp_debugmodel_fsdp4_ep4() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_mtp_debugmodel
 
-    config = deepseek_v4_debugmodel(
+    config = deepseek_v4_mtp_debugmodel(
         seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=4)
     )
     _set_spmd_typechecking(config, typechecking=False)
@@ -385,8 +382,10 @@ def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
     return config
 
 
-def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
-    config = gpt_oss_debugmodel(
+def gpt_oss_debugmodel_flex_fsdp4_tp2_ep4() -> Trainer.Config:
+    # Varlen can't backpropagate through the lse that the sinks consume without
+    # FA4, which A10G and MI350X lack.
+    config = gpt_oss_debugmodel_flex(
         seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=4)
     )
     assert isinstance(config.dataloader, GrainDataLoader.Config)
@@ -447,22 +446,6 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
             )
         ],
     )
-
-
-def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
-    config = gpt_oss_debugmodel(
-        seq_len=2048, parallelism=ParallelismConfig(expert_parallel_degree=4)
-    )
-    _set_spmd_typechecking(config, typechecking=False)
-    config.training.num_tokens_per_microbatch_per_dp_rank = 1024
-    config.training.num_tokens_per_train_step = 131072
-    config.parallelism.data_parallel_shard_degree = 4
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.num_pp_microbatches = 8
-    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-    config.activation_remat = DefaultActivationRematConfig()
-    config.training.disable_accelerator_graphs = True
-    return config
 
 
 def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
@@ -734,8 +717,8 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
-            configs=[deepseek_v4_debugmodel_fsdp4_ep4],
-            test_descr="DeepSeek V4 DistMuon FSDP+EP",
+            configs=[deepseek_v4_mtp_debugmodel_fsdp4_ep4],
+            test_descr="DeepSeek V4 MTP DistMuon FSDP+EP",
             test_name="deepseek_v4_dist_muon_fsdp+ep",
             ngpu=4,
             # DistMuon optimizer-state redistribution requires real collectives.
@@ -786,7 +769,7 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
         ),
         # Integration Test Cases for gpt-oss
         IntegrationTestDefinition(
-            configs=[gpt_oss_debugmodel_fsdp4_tp2_ep4],
+            configs=[gpt_oss_debugmodel_flex_fsdp4_tp2_ep4],
             test_descr="GPT-OSS FSDP+TP+EP",
             test_name="gpt_oss_fsdp+tp+ep",
             ngpu=8,
@@ -801,13 +784,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             ngpu=8,
             golden_numerics_path="tests/assets/losses/real_pg/{gpu_arch}/gpt_oss_pp.txt",
             loss_compare_seed_config=gpt_oss_debugmodel_flex_expert_bias_seed,
-            use_real_pg=True,
-        ),
-        IntegrationTestDefinition(
-            configs=[gpt_oss_debugmodel_fsdp4_pp2_ep4_sac],
-            test_descr="GPT-OSS PP+FSDP+EP+selective AC with VarlenInnerAttention",
-            test_name="gpt_oss_pp+fsdp+ep+sacop",
-            ngpu=8,
             use_real_pg=True,
         ),
         # Integration Test Cases for Kimi K2.7

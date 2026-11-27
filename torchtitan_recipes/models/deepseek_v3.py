@@ -6,8 +6,6 @@
 
 """Verified DeepSeek V3 model recipes."""
 
-from importlib import import_module
-from types import ModuleType
 from typing import cast
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
@@ -19,13 +17,13 @@ from torchtitan.components.optim import (
     Optim,
     OptimizersContainer,
 )
-from torchtitan.config import Configurable, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    MXFP8LinearConverter,
-    NVFP4GroupedLinearConverter,
-    NVFP4LinearConverter,
+    MXFP8LinearTransform,
+    NVFP4GroupedLinearTransform,
+    NVFP4LinearTransform,
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
@@ -35,36 +33,13 @@ from torchtitan.models.deepseek_v3 import build_model_config, DeepSeekV3Model
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 from torchtitan.trainer import Trainer
 
-
-def _require_dist_moe() -> ModuleType:
-    """Import the optional Dist-MoE package for a selected Dist-MoE recipe."""
-    try:
-        return import_module("dist_moe")
-    except ModuleNotFoundError as error:
-        if error.name != "dist_moe":
-            raise
-        raise ModuleNotFoundError(
-            "This recipe requires the optional dist_moe package. Install "
-            "it from git+https://github.com/meta-pytorch/dist_moe.git@main "
-            "before selecting it.",
-            name="dist_moe",
-        ) from error
+from torchtitan_recipes.dist_moe import dist_moe_runtime_config, require_dist_moe
 
 
-def _dist_moe_runtime_config(*, scratch_capacity_factor: float) -> Configurable.Config:
-    """Build the rank-wide activation and scratch policy for Dist-MoE."""
-    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
-
-    return DistMoeRuntime.Config(
-        activation_slot_capacity_factor=1.0,
-        scratch_capacity_factor=scratch_capacity_factor,
-    )
-
-
-def deepseek_v3_mxfp8_linear_converter_config(
+def deepseek_v3_mxfp8_linear_transform(
     *,
     include_lm_head: bool = False,
-) -> MXFP8LinearConverter.Config:
+) -> MXFP8LinearTransform:
     """Build the dense MXFP8 policy shared by eager and GraphTrainer recipes.
 
     KV up and FFN down projections have single-consumer inputs that no other
@@ -76,7 +51,7 @@ def deepseek_v3_mxfp8_linear_converter_config(
     fqns = ["attention", "shared_experts", "feed_forward.w13", "feed_forward.w2"]
     if include_lm_head:
         fqns.append("lm_head")
-    return MXFP8LinearConverter.Config(
+    return MXFP8LinearTransform(
         fqns=fqns,
         linears_saving_inputs_for_backward_in_mxfp8=[
             "attention.inner_attention.wkv_b",
@@ -131,7 +106,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
 
 def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
     """Build the verified 671B BF16 Dist-MoE training recipe."""
-    _require_dist_moe()
+    require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_671b(seq_len=seq_len)
@@ -167,13 +142,13 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
-    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(config, [DistMoeTransform()])
 
 
 def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
     """Build the verified 671B MXFP8 Dist-MoE training recipe."""
-    dist_moe = _require_dist_moe()
+    dist_moe = require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_671b(seq_len=seq_len)
@@ -188,9 +163,6 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
         "671B",
         seq_len=seq_len,
         parallelism=config.parallelism,
-        converters=[
-            deepseek_v3_mxfp8_linear_converter_config(include_lm_head=True),
-        ],
     )
     config.loss = CrossEntropyLoss.Config(
         global_vocab_size=decoder_vocab_size(config.model)
@@ -212,14 +184,15 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
-    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(
         config,
         [
+            deepseek_v3_mxfp8_linear_transform(include_lm_head=True),
             DistMoeTransform(
                 expert_precision="mxfp8",
                 block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
-            )
+            ),
         ],
     )
 
@@ -230,29 +203,18 @@ def deepseek_v3_671b_nvfp4_ffn_mxfp8_attn(
     config = deepseek_v3_671b(seq_len=seq_len)
     model_config = cast(DeepSeekV3Model.Config, config.model)
     layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
-    config.model = build_model_config(
-        "671B",
-        seq_len=seq_len,
-        parallelism=config.parallelism,
-        converters=[
-            NVFP4LinearConverter.Config(
+    config = apply_transforms(
+        config,
+        [
+            NVFP4LinearTransform(
                 fqns=[
                     f"{layer}{submodule}"
                     for layer in layer_fqns
                     for submodule in nvfp4_ffn_submodules(model_config.layers)
                 ],
             ),
-            NVFP4GroupedLinearConverter.Config(
-                fqns=layer_fqns,
-            ),
-            MXFP8LinearConverter.Config(
-                fqns=["attention.wq", "attention.wo"],
-            ),
-        ],
-    )
-    config = apply_transforms(
-        config,
-        [
+            NVFP4GroupedLinearTransform(fqns=layer_fqns),
+            MXFP8LinearTransform(fqns=["attention.wq", "attention.wo"]),
             TokenDispatcherTransform(
                 dispatcher=HybridEPTokenDispatcher,
                 # Each EP rank dispatches one CP x TP shard of a microbatch.
@@ -264,7 +226,7 @@ def deepseek_v3_671b_nvfp4_ffn_mxfp8_attn(
                     )
                 ),
                 kwargs={"non_blocking_capacity_factor": 0.03125, "pad_multiple": 128},
-            )
+            ),
         ],
     )
     config.model.local_compile.regions = ["loss"]

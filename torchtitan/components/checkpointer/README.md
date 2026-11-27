@@ -82,6 +82,72 @@ checkpointer=CheckpointManager.Config(
 
 A more exhaustive and up-to-date list of checkpoint config options can be found in `torchtitan/components/checkpointer/base.py` (`BaseCheckpointManager.Config`). That includes `async_mode`: the DCP manager supports all three modes, and `TorchCheckpointingManager` supports `disabled` and `async_with_pinned_mem`.
 
+## Remote storage with `TorchCheckpointingManager`
+
+`TorchCheckpointingManager` can keep checkpoints on a remote store through fsspec.
+Point `folder` at a URI and install its driver, e.g. `gcsfs` for `gs://`:
+
+```python
+checkpointer=TorchCheckpointingManager.Config(
+    folder="gs://my-bucket/run-1/checkpoint",
+    interval=500,
+),
+```
+
+Only `gs://` is verified. A URI that carries a host or port, such as
+`hdfs://host:8020/path`, is not supported: the host would be read as part of the path.
+
+Interval saves, the final save, resume, `keep_latest_k` retention, Hugging Face export
+(`last_save_in_hf`), and Hugging Face load (`initial_load_in_hf`) all go through the
+remote store. `initial_load_path` may be on other storage than `folder`, and a local
+`hf_assets_path` works with a remote `folder`, e.g. HF weights on local disk with
+checkpoints on `gs://`.
+
+Keep `hf_assets_path` on local disk, and include the safetensors index even when the
+weights are remote:
+```bash
+python scripts/download_hf_assets.py --repo_id <repo_id> --assets tokenizer index
+```
+State dict adapters read `model.safetensors.index.json` from `hf_assets_path`, not from
+`initial_load_path`.
+
+On GCS, use a bucket with hierarchical namespace (HNS). On a flat bucket a checkpoint is
+committed by copying each object, so a job preempted mid-commit can leave a `step-N` that
+resume selects and fails to load.
+
+## Leaving base weights out of checkpoints
+`checkpointer.model_param_checkpoint_type_map` is a `CallableFunction.Config` whose function maps a parameter's canonical FQN to a `ParamCheckpointType`: where the parameter is loaded from and saved to. It requires a base: `initial_load_path`, or `hf_assets_path` with `initial_load_in_hf=True`.
+
+| `ParamCheckpointType` | Saved in step checkpoints | Fresh start loads it from | Resume loads it from | Example |
+|---|---|---|---|---|
+| `BASE` | no | base | base | frozen pretrained weights |
+| `CHECKPOINT` | yes | base | checkpoint | pretrained weights that are trained |
+| `NEW` | yes | (keeps its initial value) | checkpoint | LoRA adapters |
+
+Buffers are saved in step checkpoints and read by every base load, so a fresh start takes them from the base and a resume from the checkpoint. Step checkpoints also hold the optimizer and other training state. For a LoRA model this keeps the frozen base weights out of every checkpoint:
+```python
+lora = LoRATransform(rank=8, trainable_modules=["vision_encoder"])
+config.checkpointer.model_param_checkpoint_type_map = CallableFunction.Config(
+    fn=lora.param_checkpoint_type
+)
+config = apply_transforms(config, [lora])
+```
+`LoRATransform.param_checkpoint_type` puts the adapters in `NEW`, the `trainable_modules` in `CHECKPOINT`, and the rest in `BASE`.
+
+```
+fresh start:  base (all but NEW)                   -> train -> step-500/
+resume:       base (BASE), then step-500/ (the rest)
+                                                   -> train -> step-1000/
+```
+- Loads from a native base and from step checkpoints are strict: a missing key raises. For an HF base, the load covers the keys that the state dict adapter's `to_hf` maps.
+- A base without the `NEW` keys (e.g. without LoRA keys) can start and resume the run.
+- The base must stay present and unchanged. Nothing checks it.
+- Model-only exports (`last_save_model_only`), including the default seed checkpoint, keep every parameter.
+- A step-0 seed checkpoint in the folder cannot be loaded and raises: it holds the initial weights, which would override the base. The base supplies the initial weights.
+- Do not change `model_param_checkpoint_type_map` within one checkpoint folder: a parameter moved from `CHECKPOINT` to `BASE` takes the base value, and its trained value is ignored.
+- Building the checkpointer raises if a trainable parameter is in `BASE`, since its training would be lost on resume, or if there is no base.
+- State that changes without gradients must be a buffer, or a `CHECKPOINT` or `NEW` parameter.
+
 ## Creating a seed checkpoint
 Sometimes one needs to create a seed checkpoint to initialize a model from step 0.
 E.g. it is hard, if not impossible, for meta initialization on multiple devices to reproduce the initialization on a single device.
@@ -96,7 +162,7 @@ parallelism degree set to 1. Then run that configuration on one device.
 ### HuggingFace
 `torchtitan` offers two ways to work with Hugging Face models: either by directly saving and loading a Hugging Face checkpoint during training, or by using an example conversion script to directly reformat the model weights on cpu.
 
-1. You can directly save Hugging Face model weights during training by setting `checkpointer.last_save_in_hf` and `checkpointer.last_save_model_only` in the recipe. The final save is written to `<checkpointer.folder>/exports/step-<N>`. To directly load a `torchtitan` training session from a Hugging Face safetensors file, set `checkpointer.initial_load_in_hf`, and set either `hf_assets_path` or `checkpointer.initial_load_path` to the directory containing the Hugging Face checkpoint. `checkpointer.initial_load_path` overrides `hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart). The first run (empty folder) uses the initial load.
+1. You can directly save Hugging Face model weights during training by setting `checkpointer.last_save_in_hf` and `checkpointer.last_save_model_only` in the recipe. The final save is written to `<checkpointer.folder>/exports/step-<N>`. To directly load a `torchtitan` training session from a Hugging Face safetensors file, set `checkpointer.initial_load_in_hf`, and set either `hf_assets_path` or `checkpointer.initial_load_path` to the directory containing the Hugging Face checkpoint. `checkpointer.initial_load_path` overrides `hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart), except for the `BASE` parameters of `checkpointer.model_param_checkpoint_type_map`. The first run (empty folder) uses the initial load.
 
 2. To directly reformat the weights without the need to run a training loop, run the corresponding conversion script. The naming scheme is `torchtitan`-centric, e.g. convert_from_hf means convert hf->tt. `convert_ema_to_hf` exports the EMA weights instead of the trained ones, from the same checkpoint; it takes the same arguments plus `--ema_key` to pick one EMA copy (e.g. `--ema_key half_life_0p05`; optional when the checkpoint holds a single copy), and errors out if the checkpoint holds no EMA state. Note that `last_save_model_only` (the default) writes only model weights at the last step, so export the EMA from an interval checkpoint, or set it to `False`.
 

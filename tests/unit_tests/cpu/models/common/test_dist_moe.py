@@ -366,14 +366,42 @@ def test_transform_propagates_plain_swiglu_to_annex_config() -> None:
     assert context_config.activation == "swiglu"
 
 
-def test_transform_rejects_unsupported_source_activation() -> None:
-    """Unsupported source semantics fail instead of silently changing."""
-    source = replace(
-        _stock_config(dim=64),
-        activation_fn=SiTUGLU.Config(),
+@pytest.mark.parametrize("expert_precision", ["bf16", "mxfp8"])
+def test_transform_preserves_situglu_configuration(
+    expert_precision: Literal["bf16", "mxfp8"],
+) -> None:
+    """Both expert paths translate model bounds to the public SiTU-GLU API."""
+    # Not the annex defaults (4.0, 25.0), so a dropped bound fails.
+    gate_beta, up_beta = 3.5, 20.0
+    stock = _stock_config(dim=64)
+    stock.activation_fn = SiTUGLU.Config(beta=gate_beta, linear_beta=up_beta)
+
+    transformed = DistMoeTransform(expert_precision=expert_precision).transform(stock)
+    assert isinstance(transformed, DistMoeRoutedExperts.Config)
+    assert transformed.activation == "situ_glu"
+    assert transformed.situ_glu_gate_beta == gate_beta
+    assert transformed.situ_glu_up_beta == up_beta
+
+    module = cast(DistMoeRoutedExperts, transformed.build())
+    context_config = _runtime()._resolve_context_config(
+        module,
+        max_num_local_input_tokens=128,
+        max_live_activation_slots=1,
+        max_moe_layers_per_activation_slot=2,
     )
-    with pytest.raises(TypeError, match="supports SwiGLU.Config or ClampedSwiGLU"):
-        DistMoeTransform().transform(source)
+    assert context_config.activation == "situ_glu"
+    assert context_config.situ_glu_gate_beta == gate_beta
+    assert context_config.situ_glu_up_beta == up_beta
+    assert (context_config.block_scaled is not None) == (expert_precision == "mxfp8")
+
+
+def test_transform_rejects_unbounded_situglu_up_projection() -> None:
+    """The annex SiTU-GLU contract requires both clipping bounds."""
+    stock = _stock_config()
+    stock.activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=None)
+
+    with pytest.raises(ValueError, match="requires linear_beta"):
+        DistMoeTransform().transform(stock)
 
 
 @pytest.mark.parametrize("targets", [("w13",), ("w2",), ("w13", "w2")])
