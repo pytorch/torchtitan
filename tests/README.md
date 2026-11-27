@@ -6,7 +6,8 @@ This directory contains tests for the torchtitan project, including unit tests a
 
 - `unit_tests/cpu/`: Unit tests that run without a GPU
 - `unit_tests/gpu/`: Tests that require GPUs; multi-GPU tests use the
-  `multi_gpu` pytest marker
+  `multi_gpu` pytest marker. CI runs them on 4 GPUs, and a test that skips
+  there for lack of GPUs fails the job.
 
   Both mirror the source tree: a test for `torchtitan/<path>/<module>.py` lives
   under `unit_tests/{cpu,gpu}/<path>/` (e.g. `models/common/`,

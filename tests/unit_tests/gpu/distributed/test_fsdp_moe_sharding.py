@@ -131,7 +131,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
     @property
     def world_size(self):
-        return 8
+        return 4
 
     @with_comms
     def test_no_ep_fsdp_gt_num_experts_shards_feature_dimensions(self):
@@ -139,7 +139,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         dp_mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
         )
-        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=2).to(self.device_type)
 
         apply_fsdp_to_decoder(
             model,
@@ -154,11 +154,11 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
     @with_comms
     def test_no_ep_fsdp_le_num_experts_shards_dim0(self):
-        """ep_degree=1, fsdp_size(8) <= num_experts(8) → Shard(0)."""
+        """ep_degree=1, fsdp_size(4) <= num_experts(4) -> Shard(0)."""
         dp_mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
         )
-        model = _build_qwen3_moe_model(num_experts=8).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
 
         apply_fsdp_to_decoder(
             model,
@@ -174,14 +174,14 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
     @with_comms
     def test_with_ep_fsdp_gt_num_experts_shards_feature_dimensions(self):
         """Sparse FSDP also falls back to each projection's feature dim."""
-        # edp_mesh: 2D mesh [edp_shard=4, ep=2], dp_mesh: 1D mesh [8]
+        # edp_mesh: 2D mesh [edp_shard=2, ep=2], dp_mesh: 1D mesh [4]
         edp_mesh = init_device_mesh(
-            self.device_type, (4, 2), mesh_dim_names=("edp_shard", "ep")
+            self.device_type, (2, 2), mesh_dim_names=("edp_shard", "ep")
         )
         dp_mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
         )
-        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=2).to(self.device_type)
 
         apply_fsdp_to_decoder(
             model,
@@ -194,6 +194,30 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         )
 
         self.assertEqual(_get_expert_shard_dims(model), (2, 1))
+
+    @with_comms
+    def test_with_ep_fsdp_le_num_experts_shards_dim0(self):
+        """edp_shard(1) * ep(4) = 4 <= num_experts(4) -> Shard(0)."""
+        # Not square: a bug that reads the ep axis size for edp_shard fails here.
+        edp_mesh = init_device_mesh(
+            self.device_type, (1, 4), mesh_dim_names=("edp_shard", "ep")
+        )
+        dp_mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
+        )
+        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            ep_degree=4,
+            edp_mesh=edp_mesh,
+        )
+
+        self.assertEqual(_get_expert_shard_dims(model), (0, 0))
 
     @with_comms
     def test_with_ep_preserves_model_specific_expert_layout(self):
@@ -211,7 +235,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             layer_config.feed_forward.routed_experts.w2.in_features = 16
         model = config.build().to(self.device_type)
         edp_mesh = init_device_mesh(
-            self.device_type, (4, 2), mesh_dim_names=("edp_shard", "ep")
+            self.device_type, (2, 2), mesh_dim_names=("edp_shard", "ep")
         )
         dp_mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
@@ -251,7 +275,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
         assert edp_mesh is not None
 
-        for num_experts in (4, 8):
+        for num_experts in (2, 4):
             with self.subTest(num_experts=num_experts):
                 config = _qwen3_moe_config(
                     num_experts=num_experts, enable_sp=False, enable_ep=True
@@ -348,15 +372,15 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
     def test_no_ep_hsdp_ignores_dp_replicate(self):
         """ep_degree=1 under HSDP: dp_replicate must not count as shard degree.
 
-        The mesh is (dp_replicate=2, dp_shard=4), so FSDP cuts dim 0 of the
-        expert weights 4 ways, and 4 <= num_experts(4) -> Shard(0). Counting
-        dp_replicate gives 2*4=8 > 4 -> Shard(1), which pads dim 0 needlessly
+        The mesh is (dp_replicate=2, dp_shard=2), so FSDP cuts dim 0 of the
+        expert weights 2 ways, and 2 <= num_experts(2) -> Shard(0). Counting
+        dp_replicate gives 2*2=4 > 2 -> Shard(1), which pads dim 0 needlessly
         and changes the on-disk checkpoint layout.
         """
         dp_mesh = init_device_mesh(
-            self.device_type, (2, 4), mesh_dim_names=("dp_replicate", "dp_shard")
+            self.device_type, (2, 2), mesh_dim_names=("dp_replicate", "dp_shard")
         )
-        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=2).to(self.device_type)
 
         apply_fsdp_to_decoder(
             model,
