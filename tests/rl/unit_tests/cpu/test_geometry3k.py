@@ -142,19 +142,21 @@ def test_recipe_vision_processor_matches_vision_encoder() -> None:
 
 
 def test_recipe_gives_image_tokens_the_positions_its_model_takes() -> None:
-    """The batcher gives the trainer M-RoPE positions exactly when the model takes them, as
+    """The training batch builder gives the trainer M-RoPE positions exactly when the model takes them, as
     the generator does; Controller.Config rejects a mismatch."""
     from torchtitan_recipes.rl.geometry3k import rl_grpo_qwen3_5_0_8b_geometry3k
 
     config = rl_grpo_qwen3_5_0_8b_geometry3k()
-    batcher = config.async_loop.batcher
+    training_batch_builder = config.async_loop.training_batch_builder
 
-    assert batcher.build_mrope_positions
+    assert training_batch_builder.build_mrope_positions
     with pytest.raises(ValueError, match="build_mrope_positions=False.*M-RoPE"):
         dataclasses.replace(
             config,
             async_loop=dataclasses.replace(
                 config.async_loop,
-                batcher=dataclasses.replace(batcher, build_mrope_positions=False),
+                training_batch_builder=dataclasses.replace(
+                    training_batch_builder, build_mrope_positions=False
+                ),
             ),
         )

@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """Collects trainable `TrainingSample`s until a group-count training batch is ready, then packs it.
-`Batcher` packs a `TrainerStepBatch` of `[num_microbatches][dp_degree]`
+`TrainingBatchBuilder` packs a `TrainingBatch` of `[num_microbatches][dp_degree]`
 `TrainingMicrobatch`es;
 """
 
@@ -53,9 +53,9 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
     N-1), matching the pre-training dataloader convention.
 
     With images, ``model_kwargs`` holds each distinct image of the microbatch once
-    (`Batcher._pack_image_inputs`, whose example draws the dedup):
+    (`TrainingBatchBuilder._pack_image_inputs`, whose example draws the dedup):
 
-        from the batcher         image_files, image_file_sizes   the files, concatenated
+        from the builder         image_files, image_file_sizes   the files, concatenated
                                  grid_thw                        one row per distinct image
                                  image_vision_bank_indices_T     each token's row in the image
                                                                  embeddings, -1 for text
@@ -84,7 +84,7 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
         """This microbatch with its image files turned into pixel values, as the generator's
         `_preprocess_images` does for a request; unchanged without images.
 
-        The batcher ships each distinct image file once, concatenated into one uint8 tensor
+        The training batch builder ships each distinct image file once, concatenated into one uint8 tensor
         (``image_files``, split by ``image_file_sizes``): a Geometry3K file is ~15 KB, its
         float32 pixel values ~2.4 MB. The trainer calls this on each microbatch it receives
         (on the read-ahead thread with RDMA), and each file becomes pixel values on the CPU,
@@ -227,7 +227,7 @@ def _pack_kept_sets(
 
 
 @dataclass(frozen=True, slots=True)
-class TrainerStepBatch:
+class TrainingBatch:
     """Packed microbatches for one optimizer step.
 
     Example:
@@ -325,14 +325,14 @@ def assign_sorted_bins_to_dp_ranks(
     return assignments
 
 
-class Batcher(Configurable):
+class TrainingBatchBuilder(Configurable):
     """Accumulate `num_prompts_per_train_step` groups and packs
     `[num_microbatches][dp_degree]` flat `TrainingMicrobatch`es.
 
     Example:
         # num_prompts_per_train_step=2, dp_degree=2, 256 tokens/rank
         # The trigger is 2 trainable GROUPS, regardless of how many samples/tokens each contains.
-        batcher = Batcher.Config().build(
+        training_batch_builder = TrainingBatchBuilder.Config().build(
             num_tokens_per_microbatch_per_dp_rank=256,
             max_context_length=128,
             num_prompts_per_train_step=2,
@@ -343,8 +343,8 @@ class Batcher(Configurable):
             max_kept_set_size=None,
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
         )
-        pending, _ = batcher.add_training_samples(training_sample_group=group0)
-        batch, _ = batcher.add_training_samples(training_sample_group=group1)
+        pending, _ = training_batch_builder.add_training_samples(training_sample_group=group0)
+        batch, _ = training_batch_builder.add_training_samples(training_sample_group=group1)
         # pending is None; batch.microbatch_groups: [num_groups][1][2 ranks];
         # each RDMAMicrobatch reads back a TrainingMicrobatch with input: [256 tokens]
 
@@ -375,10 +375,10 @@ class Batcher(Configurable):
         """Send microbatch tensors of at least this many bytes as RDMA buffers (the actor system's
         `RDMAMicrobatch`), not in the RPC message:
             None: every tensor in the message.
-            1024 (default): tensors >= 1 KiB stay in the batcher; token counts (8 B) and empty
+            1024 (default): tensors >= 1 KiB stay in the training batch builder; token counts (8 B) and empty
             tensors go in the message.
         1 KiB because registering a buffer costs far more than sending a few bytes.
-        Monarch uses ibverbs where the host has it, else TCP. With neither, spawning the batcher raises.
+        Monarch uses ibverbs where the host has it, else TCP. With neither, spawning the training batch builder raises.
         A host that lists ibverbs devices it can't use fails at the first batch: set None, or
         MONARCH_RDMA_DISABLE_IBVERBS=1 (TCP in every process, weight sync included)."""
         build_mrope_positions: bool = False
@@ -430,7 +430,7 @@ class Batcher(Configurable):
             raise ValueError(
                 f"rdma_min_tensor_bytes={config.rdma_min_tensor_bytes} needs register_rdma_microbatch, "
                 "which only an actor system provides. Set rdma_min_tensor_bytes=None for an "
-                "in-process batcher."
+                "in-process training batch builder."
             )
         self._training_sample_builder = config.training_sample_builder.build()
         self.seq_len = max_context_length
@@ -504,27 +504,27 @@ class Batcher(Configurable):
 
     def add_group(
         self, *, rollout_group: RolloutGroup
-    ) -> tuple[TrainerStepBatch | None, bool]:
+    ) -> tuple[TrainingBatch | None, bool]:
         """Build one rollout group's training samples and add them; see `add_training_samples`."""
         with sl.log_trace_span("training_sample_builder"):
             training_sample_group = self._training_sample_builder.build_from_group(
                 rollout_group=rollout_group
             )
-        with sl.log_trace_span("batcher_pack"):
+        with sl.log_trace_span("training_batch_builder_pack"):
             return self.add_training_samples(
                 training_sample_group=training_sample_group
             )
 
     def add_training_samples(
         self, *, training_sample_group: TrainingSampleGroup
-    ) -> tuple[TrainerStepBatch | None, bool]:
-        """Add one group and report whether any samples survive batcher filtering.
+    ) -> tuple[TrainingBatch | None, bool]:
+        """Add one group and report whether any samples survive training batch builder filtering.
 
         Args:
             training_sample_group: One rollout group's trainable samples plus rollout metrics.
 
         Example:
-            batcher = Batcher.Config().build(
+            training_batch_builder = TrainingBatchBuilder.Config().build(
                 num_tokens_per_microbatch_per_dp_rank=16384,
                 max_context_length=2048,
                 num_prompts_per_train_step=2,
@@ -534,8 +534,8 @@ class Batcher(Configurable):
                 num_topk_logprobs=0,
                 register_rdma_microbatch=MonarchRDMAMicrobatch.register,
             )
-            batcher.add_training_samples(training_sample_group=group0)  # -> (None, True)
-            batcher.add_training_samples(training_sample_group=group1)  # -> (TrainerStepBatch, True)
+            training_batch_builder.add_training_samples(training_sample_group=group0)  # -> (None, True)
+            training_batch_builder.add_training_samples(training_sample_group=group1)  # -> (TrainingBatch, True)
         """
         # Drop samples longer than seq_len, the model's context length
         samples = training_sample_group.training_samples
@@ -543,7 +543,7 @@ class Batcher(Configurable):
         num_dropped = len(samples) - len(kept)
         if num_dropped:
             logger.warning(
-                "Batcher dropped %d/%d sample(s) exceeding seq_len=%d.",
+                "TrainingBatchBuilder dropped %d/%d sample(s) exceeding seq_len=%d.",
                 num_dropped,
                 len(samples),
                 self.seq_len,
@@ -554,7 +554,7 @@ class Batcher(Configurable):
                 metrics=[
                     *training_sample_group.metrics,
                     m.Metric(
-                        "batcher/num_samples_dropped_oversized",
+                        "training_batch_builder/num_samples_dropped_oversized",
                         m.Sum(float(num_dropped)),
                     ),
                 ],
@@ -562,7 +562,7 @@ class Batcher(Configurable):
 
         group_is_trainable = bool(training_sample_group.training_samples)
         # Keep every group, including groups made empty by rollout, builder, or
-        # batcher filtering. Empty groups do not count toward the trainable-group
+        # training batch builder filtering. Empty groups do not count toward the trainable-group
         # target, but they ride with the next training batch so its `group_ids`
         # covers every terminal input. The controller commits those IDs only
         # at the optimizer/checkpoint boundary; dropping an empty group here would
@@ -622,7 +622,7 @@ class Batcher(Configurable):
             )
         )
 
-    def _pack_one_training_batch(self) -> TrainerStepBatch:
+    def _pack_one_training_batch(self) -> TrainingBatch:
         """Pack the oldest accumulated groups (up to `num_prompts_per_train_step` trainable groups) into one batch."""
         (
             training_samples,
@@ -661,7 +661,7 @@ class Batcher(Configurable):
             for microbatch in rank_microbatches
         )
         num_pp_microbatches = self._num_pp_microbatches
-        return TrainerStepBatch(
+        return TrainingBatch(
             microbatch_groups=[
                 microbatches[start : start + num_pp_microbatches]
                 for start in range(0, len(microbatches), num_pp_microbatches)
@@ -671,7 +671,7 @@ class Batcher(Configurable):
             metrics=[
                 *metrics,
                 # Keep this response-level metric exact without adding a second
-                # token-count field to TrainerStepBatch.
+                # token-count field to TrainingBatch.
                 m.Metric(
                     "loss/generator_logprob_nan_frac",
                     m.NoReduce(
@@ -1003,7 +1003,7 @@ class Batcher(Configurable):
         num_tokens = len(training_sample.token_ids) - 1
         return round_up(num_tokens, self._per_sample_pad_multiple)
 
-    # TODO(async-rl): make packing pluggable -- a `Packer` protocol on `Batcher.Config` (e.g. `TextPacker`)
+    # TODO(async-rl): make packing pluggable -- a `Packer` protocol on `TrainingBatchBuilder.Config` (e.g. `TextPacker`)
     #   so callers swap logic per modality, and move the image path (`_pack_image_inputs`, the
     #   `images` branches) into an image packer.
     def _pack_training_samples(
@@ -1126,7 +1126,7 @@ class Batcher(Configurable):
         model_kwargs = {}
         vision_processor = None
         if any(sample.images for sample in training_samples):
-            # The controller gives the batcher the renderer's vision processor.
+            # The controller gives the training batch builder the renderer's vision processor.
             assert self._vision_processor is not None
             model_kwargs = self._pack_image_inputs(
                 training_samples,
@@ -1167,7 +1167,7 @@ class Batcher(Configurable):
         grid, each placeholder token's row in the image embeddings (-1 for text), and with
         `build_mrope_positions` 3D M-RoPE positions.
 
-        The samples of a GRPO group show the same images. The batcher dedups them in two
+        The samples of a GRPO group show the same images. The training batch builder dedups them in two
         steps: it packs a group's samples into the same microbatch (step 1), then ships and
         encodes each distinct image of a microbatch once (step 2, here). Example: one step of
         2 groups x 2 samples on 2 DP ranks, image k in group g0 and image m in group g1, each

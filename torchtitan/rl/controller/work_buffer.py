@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Active work buffer shared between the data-input, rollout, and batcher loops.
+"""Active work buffer shared between the data-input, rollout, and training batch builder loops.
 NOTE: The buffer holds work slots, and not the finalized RolloutGroups necessarily.
 
 """
@@ -52,16 +52,16 @@ class RolloutGroupWork:
 
 
 class RolloutGroupWorkBuffer(Configurable):
-    """Buffer of `RolloutGroupWork` shared between the data-input, rollout, and batcher loops.
+    """Buffer of `RolloutGroupWork` shared between the data-input, rollout, and training batch builder loops.
 
     Each entry is a RolloutGroupWork moving WAITING -> CLAIMED -> FINALIZED. An active-slot budget caps
-    the pipeline at `max_active_rollout_groups` active slots. With `window_size=None`, the batcher takes
+    the pipeline at `max_active_rollout_groups` active slots. With `window_size=None`, the training batch builder takes
     the oldest finalized group anywhere in the buffer. A finite `window_size` restricts it to a look-ahead
     range anchored at the oldest entry.
 
     For details on the buffer's callers, check the diagram in the controller.py file.
 
-    NOTE: a work slot is **NOT** released when marked as FINALIZED or taken by the batcher.
+    NOTE: a work slot is **NOT** released when marked as FINALIZED or taken by the training batch builder.
     Instead, it is only released on `release_active_groups` calls by the trainer
     or data filtering. This is done this way so that we can guarantee we never have more
     than `max_active_rollout_groups` in the entire pipeline (buffer+queue+training).
@@ -106,7 +106,7 @@ class RolloutGroupWorkBuffer(Configurable):
         self._condition = asyncio.Condition()
         self._closed = False
         # TODO(async-rl): warm start — admit a small number of groups at first and grow the effective cap as the
-        # batcher consumes, so a cold start doesn't fill the whole off-policy window at policy version 0.
+        # training batch builder consumes, so a cold start doesn't fill the whole off-policy window at policy version 0.
 
     def _has_active_slot_available(self) -> bool:
         return self._active_rollout_groups < self._max_active_rollout_groups
@@ -155,7 +155,8 @@ class RolloutGroupWorkBuffer(Configurable):
                 await self._condition.wait()
 
     async def finalize_work(self, rollout_group: RolloutGroup) -> None:
-        """Rollout loop: store the produced RolloutGroup on its work entry (CLAIMED -> FINALIZED) and wake the batcher."""
+        """Rollout loop: store the produced RolloutGroup on its work entry (CLAIMED -> FINALIZED) and
+        wake the training batch builder."""
         async with self._condition:
             work = self._work_by_group_id.get(rollout_group.group_id)
             if work is None:
@@ -167,7 +168,7 @@ class RolloutGroupWorkBuffer(Configurable):
 
     @sl.log_trace_span("take_finalized")
     async def take_finalized(self) -> RolloutGroup | None:
-        """Batcher loop: return the oldest FINALIZED group the window allows.
+        """Training batch builder loop: return the oldest FINALIZED group the window allows.
 
         Cases:
             window_size is None: every finalized group is eligible; the oldest is returned.
@@ -206,7 +207,7 @@ class RolloutGroupWorkBuffer(Configurable):
                 await self._condition.wait()  # nothing finalized inside the window -> stall
 
     async def release_active_groups(self, count: int, *, reason: str) -> None:
-        """Free active slots: the trainer releases trained slots after its model state dict pull; the batcher
+        """Free active slots: the trainer releases trained slots after its model state dict pull; the training batch builder
         releases untrainable/filtered slots immediately.
 
         Args:
@@ -216,7 +217,7 @@ class RolloutGroupWorkBuffer(Configurable):
         Example:
             # trainer pulled weights after a step over 8 groups -> free their 8 slots
             await buffer.release_active_groups(8, reason="trained")
-            # batcher dropped one zero-std group -> free its single slot
+            # training batch builder dropped one zero-std group -> free its single slot
             await buffer.release_active_groups(1, reason="untrainable_group")
         """
         if count < 0:

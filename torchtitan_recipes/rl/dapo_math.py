@@ -68,9 +68,9 @@ from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
-from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.losses import DAPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.trainer.training_batch_builder import TrainingBatchBuilder
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
@@ -301,7 +301,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             validation=ValidationConfig(steps=0),
             # Keep all-pass / all-fail groups so every step trains exactly
             # num_prompts_per_train_step groups.
-            batcher=Batcher.Config(
+            training_batch_builder=TrainingBatchBuilder.Config(
                 training_sample_builder=TrainingSampleBuilder.Config(
                     drop_zero_std_reward_groups=False
                 )

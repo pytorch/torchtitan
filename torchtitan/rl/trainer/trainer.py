@@ -33,11 +33,11 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )
+from torchtitan.rl.trainer.training_batch_builder import TrainingMicrobatch
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
 
@@ -82,7 +82,7 @@ class Trainer(Configurable):
         config: Trainer.Config with all model/optimizer/parallelism settings.
         precision: Parameter, compute, and gradient-reduction dtypes, from
             ``Controller.Config.precision``.
-        max_num_documents: Fixed varlen metadata capacity configured by the batcher.
+        max_num_documents: Fixed varlen metadata capacity configured by the training batch builder.
         hf_assets_path: Path to HF assets folder for checkpoint loading.
             Shared with the generator (both load from the same HF checkpoint).
     """
@@ -270,7 +270,7 @@ class Trainer(Configurable):
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
-            microbatch_groups: This rank's column of the batcher's
+            microbatch_groups: This rank's column of the training batch builder's
                 `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
                 as one pipeline step. `RDMAMicrobatch`es unless `rdma_min_tensor_bytes` is None. With
                 `preprocess_microbatch_groups_lazily`, they are read a few ahead of training.
@@ -298,7 +298,7 @@ class Trainer(Configurable):
         microbatches = [
             microbatch for group in microbatch_groups for microbatch in group
         ]
-        # The batcher pads every microbatch to the same token count.
+        # The training batch builder pads every microbatch to the same token count.
         self._step_num_tokens_per_dp_rank = (
             len(microbatches)
             * self.config.training.num_tokens_per_microbatch_per_dp_rank

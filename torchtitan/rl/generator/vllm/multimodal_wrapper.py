@@ -458,7 +458,7 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
         every token after the prompt.
 
         `get_mrope_positions` computes them from each image's placeholder offset and grid,
-        as the batcher does for the trainer, so the generator's and the trainer's positions
+        as the training batch builder does for the trainer, so the generator's and the trainer's positions
         match.
         """
         vision_items = []

@@ -277,15 +277,19 @@ def _trainer(actor) -> TrainerHandle:
     return TrainerHandle(all_ranks=actor, rank0=actor, by_dp_rank=[actor])
 
 
-def _actor_system(*mesh_names, events, batcher_mesh_name=None) -> MonarchActorSystem:
+def _actor_system(
+    *mesh_names, events, training_batch_builder_mesh_name=None
+) -> MonarchActorSystem:
     """A Monarch actor system holding stub meshes: the router's, the trainer's, then
-    one per generator; and the batcher's if named."""
+    one per generator; and the training batch builder's if named."""
     actor_system = MonarchActorSystem(MonarchActorSystem.Config())
     meshes = [_StubMesh(name, events) for name in mesh_names]
     actor_system._router_mesh, actor_system._trainer_mesh = meshes[0], meshes[1]
     actor_system._generator_meshes = meshes[2:]
-    if batcher_mesh_name is not None:
-        actor_system._batcher_mesh = _StubMesh(batcher_mesh_name, events)
+    if training_batch_builder_mesh_name is not None:
+        actor_system._training_batch_builder_mesh = _StubMesh(
+            training_batch_builder_mesh_name, events
+        )
     return actor_system
 
 
@@ -322,7 +326,7 @@ def test_shutdown_calls_actor_close_before_mesh_stop(tmp_path):
         "mesh.stop[trainer]",
         "mesh.stop[generator]",
         events=events,
-        batcher_mesh_name="mesh.stop[batcher]",
+        training_batch_builder_mesh_name="mesh.stop[training_batch_builder]",
     )
 
     asyncio.run(rl_trainer.close())
@@ -333,7 +337,7 @@ def test_shutdown_calls_actor_close_before_mesh_stop(tmp_path):
         "generator.close",
         "rollouter.close",
         "mesh.stop[router]",
-        "mesh.stop[batcher]",
+        "mesh.stop[training_batch_builder]",
         "mesh.stop[trainer]",
         "mesh.stop[generator]",
     ]
@@ -545,7 +549,7 @@ def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
 
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):
     """`provision` spawns the GPU meshes on the launcher's hosts, then the router's and
-    the batcher's procs, then sets up torch elastic on each GPU mesh, before any actor
+    the training batch builder's procs, then sets up torch elastic on each GPU mesh, before any actor
     is spawned."""
     events: list[str] = []
 

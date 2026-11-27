@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""BatcherActor, in its own process, returns the same batches as an in-process Batcher."""
+"""TrainingBatchBuilderActor, in its own process, returns the same batches as an in-process TrainingBatchBuilder."""
 
 import asyncio
 import dataclasses
@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import torch
 from monarch.actor import ActorError, this_host
-from torchtitan.rl.actors.monarch.batcher import BatcherActor
+from torchtitan.rl.actors.monarch.training_batch_builder import TrainingBatchBuilderActor
 from torchtitan.rl.actors.monarch.rdma_microbatch import _TensorRef
 from torchtitan.rl.rollout.types import (
     Rollout,
@@ -23,9 +23,9 @@ from torchtitan.rl.rollout.types import (
     RolloutTurnID,
 )
 
-from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.training_batch_builder import TrainingBatchBuilder
 
-_BATCHER_KWARGS = dict(
+_TRAINING_BATCH_BUILDER_KWARGS = dict(
     num_tokens_per_microbatch_per_dp_rank=256,
     max_context_length=16,
     num_prompts_per_train_step=2,
@@ -64,8 +64,8 @@ def _group(group_id: int, rewards: list[float]) -> RolloutGroup:
     return RolloutGroup(group_id=group_id, rollouts=rollouts)
 
 
-def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> None:
-    # TCP, not ibverbs: works on any CI host. The batcher process inherits the env var.
+def test_training_batch_builder_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> None:
+    # TCP, not ibverbs: works on any CI host. The training batch builder process inherits the env var.
     monkeypatch.setenv("MONARCH_RDMA_DISABLE_IBVERBS", "1")
     # Batch A after group 2, batch B after group 4. Group 1 has zero reward spread, so the
     # builder drops it: it rides along but isn't trainable.
@@ -77,24 +77,24 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
         _group(4, [1.0, 0.0]),
     ]
 
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(**_BATCHER_KWARGS)
-    expected = [batcher.add_group(rollout_group=group) for group in groups]
+    training_batch_builder = TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(**_TRAINING_BATCH_BUILDER_KWARGS)
+    expected = [training_batch_builder.add_group(rollout_group=group) for group in groups]
 
     async def run() -> tuple[list, list, list]:
         mesh = this_host().spawn_procs(per_host={"cpus": 1})
         try:
             spawn_kwargs = dict(
-                **_BATCHER_KWARGS,
+                **_TRAINING_BATCH_BUILDER_KWARGS,
                 output_dir=str(tmp_path),
                 enable_structured_logging=False,
             )
             actor = mesh.spawn(
-                "batcher", BatcherActor, Batcher.Config(), **spawn_kwargs
+                "training_batch_builder", TrainingBatchBuilderActor, TrainingBatchBuilder.Config(), **spawn_kwargs
             )
             by_value = mesh.spawn(
-                "batcher_by_value",
-                BatcherActor,
-                Batcher.Config(rdma_min_tensor_bytes=None),
+                "training_batch_builder_by_value",
+                TrainingBatchBuilderActor,
+                TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None),
                 **spawn_kwargs,
             )
             results = [

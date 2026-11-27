@@ -110,7 +110,7 @@ def _controller(
     controller.generator_router = SimpleNamespace(
         sync_log_step=_Endpoint(), pull_model_state_dict=_Endpoint(pull)
     )
-    controller.batcher = SimpleNamespace(
+    controller.training_batch_builder = SimpleNamespace(
         sync_log_step=SimpleNamespace(broadcast=lambda step: None),
         maybe_release_oldest_batch=SimpleNamespace(broadcast=lambda: None),
     )
