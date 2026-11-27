@@ -82,6 +82,7 @@ jobs:
 
           NCCL_NVLS_ENABLE=0 pytest \
             tests/unit_tests/cpu/models/common/test_dist_moe.py \
+            tests/unit_tests/cpu/recipes/test_kimi_dist_moe.py::test_full_recipe_selects_dist_moe_before_graph_validation \
             tests/unit_tests/gpu/models/common/test_dist_moe.py \
             tests/unit_tests/gpu/quantization/test_mxfp8_fsdp.py \
             tests/unit_tests/gpu/models/kimi_k3/test_kimi_k3.py::TestKimiK3::test_attention_gym_kda_kernel_matches_recurrent_reference \

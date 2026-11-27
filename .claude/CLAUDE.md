@@ -219,18 +219,22 @@ this for the comments and docstrings you are adding or rewriting.
    placeholder (see "AI-assisted contributions" in `CONTRIBUTING.md`).
    Agents don't open, edit, or comment on GitHub issues and PRs unless the user
    approved the exact content.
-3. **Show numerical proof.** Include loss comparison for any non-trivial change
+3. **Self-review with agents.** An agent preparing a PR runs the `pr-review`
+   skill in branch mode first, fixes its must-fix items or records why not in
+   the description's "Self-review" section, and runs it again after
+   substantial changes. PRs written without an agent skip this.
+4. **Show numerical proof.** Include loss comparison for any non-trivial change
    (see "Validating Numerics" above).
-4. **Tests must earn their CI cost.** Add a test when it guards a real,
+5. **Tests must earn their CI cost.** Add a test when it guards a real,
    otherwise-unguarded invariant -- and say which regression it catches. Prefer
    extending an existing test or integration config (e.g. enabling the feature in
    an existing parallelism combination) over adding a new one; prefer covering
    harder configurations (interleaved PP schedules, EP x SP, CP) over trivial
    ones. Don't add tests that only re-read a config, grep docs, or duplicate
    coverage. See `.claude/rules/tests.md`.
-5. **One concern per PR.** No drive-by renames, reformatting, or unrelated
+6. **One concern per PR.** No drive-by renames, reformatting, or unrelated
    fixes; put them in their own PR.
-6. **Keep model code minimal.** After model changes, ensure HF checkpoints still
+7. **Keep model code minimal.** After model changes, ensure HF checkpoints still
    load correctly. Document reasons for model changes.
 
 ## Code Review

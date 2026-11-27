@@ -213,6 +213,8 @@ class Qwen38FlashNextModel(Qwen35Model):
                     "partial_rope",
                     "shared_expert_gate",
                     "fp32_to_bf16_split",
+                    "attn_output_gate",
+                    "gdn_gate",
                     "gated_residual",
                     "indexer_scores",
                 ]

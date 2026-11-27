@@ -38,6 +38,7 @@ from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
 
 def test_cpu_store_waits_for_tp_workers_but_not_other_dp_replicas():
     manager = SimpleCPUOffloadScheduler.__new__(SimpleCPUOffloadScheduler)
+    manager._interval_load_blocks_completed = 0
     manager._expected_worker_count = 4  # TP=2, DP=2 external-launcher world.
     manager._store_event_pending_counts = {}
     manager._process_store_event = Mock()
@@ -92,6 +93,11 @@ def test_cpu_receive_cleanup_preserves_lru_order_across_local_ids():
     scheduler = kv_offload_scheduler.KVOffloadScheduler.__new__(
         kv_offload_scheduler.KVOffloadScheduler
     )
+    # vLLM 0.33 Scheduler state the code paths below read.
+    scheduler._kv_fetch_stages = None
+    scheduler.deferred_loads = {}
+    scheduler.aux_output_connector = None
+    scheduler._pending_encoder_input_ids = {}
     scheduler.requests = {
         local_id: SimpleNamespace(
             status=RequestStatus.WAITING_FOR_REMOTE_KVS,
@@ -175,15 +181,21 @@ def _coordinate_worker(rank, rendezvous):
             store_scheduler = SimpleCPUOffloadScheduler.__new__(
                 SimpleCPUOffloadScheduler
             )
+            store_scheduler._interval_load_blocks_completed = 0
             store_scheduler._expected_worker_count = 2
             store_scheduler._store_event_pending_counts = {}
-            store_scheduler._cleanup_load_request = Mock()
+            store_scheduler._cleanup_load_request = Mock(return_value=0)
             store_scheduler._process_store_event = Mock(
                 side_effect=lambda event: pool.free_blocks(blocks)
             )
             scheduler = kv_offload_scheduler.KVOffloadScheduler.__new__(
                 kv_offload_scheduler.KVOffloadScheduler
             )
+            # vLLM 0.33 Scheduler state the code paths below read.
+            scheduler._kv_fetch_stages = None
+            scheduler.deferred_loads = {}
+            scheduler.aux_output_connector = None
+            scheduler._pending_encoder_input_ids = {}
             scheduler._kv_output_aggregator = KVOutputAggregator(2)
             local_ids = {
                 shared_request_id: f"{shared_request_id}-rank{rank}"
@@ -303,12 +315,17 @@ def test_scheduler_uses_resolved_async_setting(async_scheduling):
 
 
 @pytest.mark.parametrize("suffix", ["00000000", "ffffffff"])
-def test_priority_ties_use_shared_request_ids_across_waiting_queues(suffix):
+def test_priority_ties_use_shared_request_ids(suffix):
     # Native vLLM orders these IDs differently depending on the random suffix.
     # Every TP scheduler must select the same shared request.
     scheduler = kv_offload_scheduler.KVOffloadScheduler.__new__(
         kv_offload_scheduler.KVOffloadScheduler
     )
+    # vLLM 0.33 Scheduler state the code paths below read.
+    scheduler._kv_fetch_stages = None
+    scheduler.deferred_loads = {}
+    scheduler.aux_output_connector = None
+    scheduler._pending_encoder_input_ids = {}
     scheduler.policy = SchedulingPolicy.PRIORITY
     scheduler.shared_to_local_request_ids = {}
     scheduler.requests = {}
@@ -316,7 +333,8 @@ def test_priority_ties_use_shared_request_ids_across_waiting_queues(suffix):
     scheduler.log_stats = False
     scheduler.spec_decode_metrics_level = "none"
     scheduler.waiting = kv_offload_scheduler._SharedIDRequestQueue()
-    scheduler.skipped_waiting = kv_offload_scheduler._SharedIDRequestQueue()
+    scheduler.kv_holding_waiting = kv_offload_scheduler._SharedIDRequestQueue()
+    scheduler.deferred_waiting = set()
     requests = []
     for shared_request_id in ("request-5", "request"):
         request = Request(
@@ -335,12 +353,7 @@ def test_priority_ties_use_shared_request_ids_across_waiting_queues(suffix):
         requests.append(request)
     earlier = requests[1]
     assert scheduler.waiting.pop_request() is earlier
-    # The same tie-break must hold between the ready and blocked queue heads.
-    earlier.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-    scheduler.skipped_waiting.add_request(earlier)
-    assert scheduler._select_waiting_queue_for_scheduling() is scheduler.skipped_waiting
-    scheduler.waiting.prepend_requests(scheduler.skipped_waiting)
-    scheduler.skipped_waiting.remove_request(earlier)
+    scheduler.waiting.prepend_request(earlier)
     assert list(scheduler.waiting) == [earlier, requests[0]]
     scheduler.waiting.remove_requests([earlier])
     scheduler.waiting.prepend_request(earlier)
@@ -359,6 +372,11 @@ def test_terminal_cleanup_preserves_block_identity(late_receive, finished_status
     scheduler = kv_offload_scheduler.KVOffloadScheduler.__new__(
         kv_offload_scheduler.KVOffloadScheduler
     )
+    # vLLM 0.33 Scheduler state the code paths below read.
+    scheduler._kv_fetch_stages = None
+    scheduler.deferred_loads = {}
+    scheduler.aux_output_connector = None
+    scheduler._pending_encoder_input_ids = {}
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.defer_block_free = False
@@ -373,7 +391,8 @@ def test_terminal_cleanup_preserves_block_identity(late_receive, finished_status
     scheduler.log_stats = False
     scheduler.running = []
     scheduler.waiting = FCFSRequestQueue()
-    scheduler.skipped_waiting = FCFSRequestQueue()
+    scheduler.kv_holding_waiting = FCFSRequestQueue()
+    scheduler.deferred_waiting = set()
     scheduler.encoder_cache_manager = EncoderCacheManager(0)
     scheduler.block_size = 16
     manager = scheduler.kv_cache_manager = KVCacheManager(
@@ -421,7 +440,7 @@ def test_terminal_cleanup_preserves_block_identity(late_receive, finished_status
         scheduler.waiting.remove_request(request)
         if late_receive:
             request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-            scheduler.skipped_waiting.add_request(request)
+            scheduler.kv_holding_waiting.add_request(request)
         else:
             request.status = RequestStatus.RUNNING
             scheduler.running.append(request)
@@ -441,7 +460,7 @@ def test_terminal_cleanup_preserves_block_identity(late_receive, finished_status
     assert (
         not scheduler.running
         and not scheduler.waiting
-        and not scheduler.skipped_waiting
+        and not scheduler.kv_holding_waiting
     )
 
     # A shared request ID can be reused after its old request/receive is fully retired.

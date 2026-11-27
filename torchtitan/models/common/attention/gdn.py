@@ -481,8 +481,7 @@ class InnerGDN(InnerAttention):
             cu_seqlens=convolution_offsets,
             routing=routing,
         ).reshape(num_tokens, -1, value_head_dim)
-        g_TH = -torch.exp(A_log_H.float()) * F.softplus(a_TH.float() + dt_bias_H)
-        beta_TH = torch.sigmoid(b_TH)
+        g_TH, beta_TH = self._compute_gdn_gates(a_TH, b_TH, A_log_H, dt_bias_H)
         return self.gdn_core(
             xq_THK,
             xk_THK,
@@ -492,6 +491,19 @@ class InnerGDN(InnerAttention):
             cu_seqlens=cu_seqlens if use_varlen_kernels else None,
             routing=routing,
         )
+
+    @staticmethod
+    @local_compile("gdn_gate", batch_invariant=True)
+    def _compute_gdn_gates(
+        a_TH: torch.Tensor,
+        b_TH: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_H: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fuse the decay ``g_TH`` and the update gate ``beta_TH``."""
+        g_TH = -torch.exp(A_log_H.float()) * F.softplus(a_TH.float() + dt_bias_H)
+        beta_TH = torch.sigmoid(b_TH)
+        return g_TH, beta_TH
 
     def short_convolution(
         self,

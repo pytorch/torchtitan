@@ -18,11 +18,11 @@ if TYPE_CHECKING:
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.rl.generator.generator import Generator
     from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-    from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
     from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
     from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
     from torchtitan.rl.trainer.batcher import Batcher
     from torchtitan.rl.trainer.trainer import Trainer
+    from torchtitan.rl.transport.model_state_dict import ModelStateDictTransport
 
 
 @dataclass(frozen=True, slots=True)

@@ -25,8 +25,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
-from torchtitan.rl import model_state_dict_transport as m
-from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
+from torchtitan.rl.transport import model_state_dict as m
+from torchtitan.rl.transport.model_state_dict import ModelStateDictTransport
 
 
 class _FakeRemoteBuffer:
