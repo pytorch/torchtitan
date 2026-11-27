@@ -767,5 +767,5 @@ class QSAAttention(Qwen35Attention):
             aux_loss_denominator=aux_loss_denominator,
         )
         remat.recompute_needs_tensor(output_THV, gate_THV)
-        output_TD = (output_THV * gate_THV.sigmoid()).flatten(-2)
+        output_TD = self._apply_output_gate(output_THV, gate_THV)
         return self.wo(output_TD)

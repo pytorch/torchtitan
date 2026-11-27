@@ -409,7 +409,8 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             self.assertEqual(lse_TH.shape, (num_tokens, num_heads))
             return out_THV
 
-        with patch(
+        # no_grad: backpropagating through the lse needs FA4, which a CPU test lacks.
+        with torch.no_grad(), patch(
             "torchtitan.models.common.attention.attention._varlen_attn",
             side_effect=_varlen_with_lse,
         ):

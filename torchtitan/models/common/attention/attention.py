@@ -395,7 +395,8 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
             Names keep the config plain data for ``to_dict()`` and JSON
             serialization, since ``SDPBackend`` is a pybind11 enum.
             Deterministic mode skips cuDNN, whose backward is not
-            deterministic.
+            deterministic, and so does a backward through the lse that an
+            ``out_transform`` consumes, which only Flash with FA4 supports.
         """
 
         @property
@@ -510,10 +511,21 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
         attn_dtype = _varlen_attn_dtype(v_THV.dtype)
 
         sdpa_backends = self.sdpa_backends
-        if torch.are_deterministic_algorithms_enabled():
-            # TODO: Remove once the cuDNN varlen backward honors
-            # use_deterministic_algorithms (upstream issue not filed yet). It
-            # neither raises nor runs deterministically, so repeated runs differ.
+        # TODO: Remove the deterministic case once the cuDNN varlen backward
+        # honors use_deterministic_algorithms (upstream issue not filed yet). It
+        # neither raises nor runs deterministically, so repeated runs differ.
+        # TODO: Relax the lse case once other kernels implement the backward
+        # for the lse that out_transform consumes. Since pytorch/pytorch#206398
+        # only Flash with FA4 does; cuDNN, FA2 and FA3 raise in backward, where
+        # detaching the lse would silently drop part of the q/k gradient.
+        lse_needs_grad = out_transform is not None and torch.is_grad_enabled()
+        if lse_needs_grad and fa_impl != "FA4":
+            raise ValueError(
+                "Backpropagating through out_transform's lse with varlen attention "
+                "needs the FA4 flash attention implementation (SM100). Use "
+                "FlexInnerAttention (attn_backend='flex') on this hardware."
+            )
+        if torch.are_deterministic_algorithms_enabled() or lse_needs_grad:
             sdpa_backends = [
                 backend
                 for backend in sdpa_backends
@@ -521,7 +533,8 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
             ]
             if not sdpa_backends:
                 raise ValueError(
-                    "Deterministic mode needs a varlen backend other than cuDNN. "
+                    "Deterministic mode and backpropagating through out_transform's "
+                    "lse need a varlen backend other than cuDNN. "
                     'Add "FLASH_ATTENTION" to sdpa_backends.'
                 )
 
@@ -546,6 +559,19 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
             return result.to(q_THK.dtype)
 
         out_THV, lse_HT = result
+        # TODO: Remove once every torch torchtitan installs includes
+        # pytorch/pytorch#206398; RL still pins an older one
+        # (scripts/install_rl_env.sh). Before it, varlen_attn returned a
+        # non-differentiable lse, so q and k would silently miss the gradient
+        # through out_transform.
+        if q_THK.requires_grad and not lse_HT.requires_grad:
+            raise ValueError(
+                "This torch returns a non-differentiable lse from varlen_attn, so "
+                "backpropagating through out_transform would drop part of the q/k "
+                "gradient. Use a torch that includes pytorch/pytorch#206398 "
+                "(nightly 2.16.0.dev20261125 or later), or FlexInnerAttention "
+                "(attn_backend='flex')."
+            )
         out_THV = out_THV.to(q_THK.dtype)
         lse_TH = lse_HT.transpose(0, 1)
         return out_transform(out_THV, lse_TH)

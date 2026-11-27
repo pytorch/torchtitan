@@ -22,7 +22,6 @@ from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_fsdp2_gen_tp2_no_compile,
     rl_grpo_kimi_k3_debug_batch_invariant,
     rl_grpo_moe_debug_dist_moe_tp2_ep4,
-    rl_grpo_moe_debug_tp4_ep4,
     rl_grpo_moe_debug_tp4_ep4_batch_invariant,
     rl_grpo_pp2_interleaved1f1b_fsdp2_gen_tp2,
     rl_grpo_qwen3_5_debug_tp2_batch_invariant,
@@ -67,12 +66,6 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
             configs=[rl_grpo_pp2_interleaved1f1b_fsdp2_gen_tp2],
             test_descr="RL GRPO trainer PP=2 Interleaved1F1B FSDP=2 + gen TP=2",
             test_name="rl_grpo_pp2_interleaved1f1b_fsdp2_gen_tp2",
-            ngpu=8,
-        ),
-        _rl_test(
-            configs=[rl_grpo_moe_debug_tp4_ep4],
-            test_descr="RL GRPO GPT-OSS MoE varlen TP=4 EP=4",
-            test_name="rl_grpo_moe_debug_tp4_ep4",
             ngpu=8,
         ),
         _rl_test(
@@ -133,8 +126,12 @@ def build_h100_rl_test_list() -> list[IntegrationTestDefinition]:
 
 
 def build_b200_rl_test_list() -> list[IntegrationTestDefinition]:
-    """Build the B200 RL integration tests: the H100 tests, plus Dist-MoE, which requires SM100+."""
+    """Build the B200 RL integration tests: the H100 tests, plus tests that require SM100+."""
     return build_h100_rl_test_list() + [
+        # TODO: Add rl_grpo_moe_debug_tp4_ep4 (GPT-OSS MoE varlen TP=4 EP=4)
+        # here once RL's torch includes pytorch/pytorch#206398 (see
+        # scripts/install_rl_env.sh). GPT-OSS sinks backpropagate through the
+        # varlen lse, which needs that torch and FA4 (SM100).
         _rl_test(
             configs=[rl_grpo_moe_debug_dist_moe_tp2_ep4],
             test_descr=(

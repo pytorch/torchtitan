@@ -21,6 +21,12 @@ areas:
       - scripts/rl/
     reviewers: [felipemello1, pzhan9, wwwjn]
 
+  - name: rl_transport
+    paths:
+      - torchtitan/rl/transport/
+      - tests/rl/unit_tests/cpu/transport/
+    reviewers: [d4l3k]
+
   - name: rl_attention
     paths:
       - torchtitan/rl/generator/vllm/attention/
@@ -132,5 +138,9 @@ areas:
   - name: ci
     paths:
       - .github/
-      - .ci/
     reviewers: [wwwjn]
+
+  - name: ci_images
+    paths:
+      - .ci/
+    reviewers: [huydhn, wwwjn]
