@@ -875,6 +875,66 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
     asyncio.run(run())
 
 
+async def _settle() -> None:
+    """Let every ready task run until it blocks again."""
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
+def test_add_work_wakes_one_claim_next_waiter(monkeypatch) -> None:
+    """A new group wakes one idle rollout loop. Waking all (S+1) x P loops, each of which then
+    goes back to wait, saturated the controller at P=1024."""
+    num_waits = 0
+    wait = asyncio.Condition.wait
+
+    async def counting_wait(self) -> bool:
+        nonlocal num_waits
+        num_waits += 1
+        return await wait(self)
+
+    monkeypatch.setattr(asyncio.Condition, "wait", counting_wait)
+
+    async def run() -> None:
+        buffer = _buffer(capacity=8, window_size=None)
+        claimers = [asyncio.create_task(buffer.claim_next()) for _ in range(5)]
+        await _settle()
+        assert num_waits == 5
+        await _admit(buffer, 0)
+        await _settle()
+        [claimed] = [claimer.result() for claimer in claimers if claimer.done()]
+        assert claimed.group_id == 0
+        # The four other loops never woke, so none of them waited again.
+        assert num_waits == 5
+        await buffer.close()
+        await asyncio.gather(*claimers)
+
+    asyncio.run(asyncio.wait_for(run(), timeout=10))
+
+
+def test_close_unblocks_every_waiter() -> None:
+    async def run() -> list:
+        buffer = _buffer(capacity=1, window_size=None)
+        await _admit(buffer, 0)
+        await buffer.claim_next()  # g0 CLAIMED: nothing to claim or take, and no free slot
+        waiters = [
+            *(asyncio.create_task(buffer.claim_next()) for _ in range(3)),
+            asyncio.create_task(buffer.wait_for_slot()),
+            asyncio.create_task(buffer.take_finalized()),
+        ]
+        await _settle()
+        assert not any(waiter.done() for waiter in waiters)
+        await buffer.close()
+        return await asyncio.gather(*waiters)
+
+    assert asyncio.run(asyncio.wait_for(run(), timeout=10)) == [
+        None,
+        None,
+        None,
+        False,
+        None,
+    ]
+
+
 async def _block_forever(*args, **kwargs) -> None:
     await asyncio.Event().wait()
 
