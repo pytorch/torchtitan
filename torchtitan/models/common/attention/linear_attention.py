@@ -16,7 +16,6 @@ import spmd_types as spmd
 import torch
 from torch.export import register_dataclass
 
-from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attn_gym import (
     _ConfiguredShortConv,
     _L2Norm,
@@ -60,19 +59,10 @@ register_dataclass(LinearAttentionMetadata)
 
 
 def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:
-    """Attention Gym chunk-kernel options: warpdrive where it runs, fused elsewhere.
-
-    The warpdrive chunk kernels take packed (batch 1) fp16/bf16 inputs on SM100/SM103,
-    where they are 2.3-3.9x faster than the fused ones (Qwen3.5-27B GDN fwd+bwd on GB300).
-    Fused stays in deterministic mode (warpdrive's backward is not checked for
-    determinism) and in batch-invariant mode (paged KDA replay requires fused).
-    """
-    use_warpdrive = (
-        q.is_cuda
-        and not torch.are_deterministic_algorithms_enabled()
-        and not is_in_batch_invariant_mode()
-        and q.shape[0] == 1
-        and q.dtype in (torch.float16, torch.bfloat16)
-        and torch.cuda.get_device_capability(q.device) in ((10, 0), (10, 3))
-    )
-    return KernelOptions(backend="warpdrive" if use_warpdrive else "fused")
+    """Attention Gym chunk-kernel options for `q`: the fused kernels, for every input."""
+    # TODO: bring back backend="warpdrive" once it is causally consistent at long packed lengths. Under its old name
+    # "cudnn" it was not (Qwen3.8-27B, 78k tokens, pos 562: full -1.91, prefix -10.35; fused -0.0146), though its GDN
+    # fwd+bwd was 1.9-2.1x faster than fused on GB300. KDA's is unchecked. No Attention Gym issue yet: file one with
+    # this repro and link it here.
+    del q
+    return KernelOptions(backend="fused")
