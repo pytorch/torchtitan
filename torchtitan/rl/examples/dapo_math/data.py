@@ -34,7 +34,8 @@ class DapoMathSample:
 # TODO: Share this cycling iterator with other RL datasets instead of keeping
 # per-environment implementations.
 class _CyclingDataset(RLDataset):
-    """Provides an endless, resumable stream over a finite sample list."""
+    """Provides a resumable stream over a finite sample list: endless, or one pass if not
+    `repeat`."""
 
     def __init__(
         self,
@@ -42,12 +43,14 @@ class _CyclingDataset(RLDataset):
         *,
         seed: int,
         shuffle: bool,
+        repeat: bool,
     ) -> None:
         if not samples:
             raise ValueError("math dataset must contain at least one sample")
         self._samples = samples
         self._rng = random.Random(seed)
         self._shuffle = shuffle
+        self._repeat = repeat
         self._order = list(range(len(samples)))
         if shuffle:
             self._rng.shuffle(self._order)
@@ -58,6 +61,8 @@ class _CyclingDataset(RLDataset):
 
     def __next__(self) -> DapoMathSample:
         if self._position == len(self._order):
+            if not self._repeat:
+                raise StopIteration
             # Rollout production consumes an endless stream; crossing the dataset
             # boundary starts a new epoch. Training reshuffles; validation does not.
             if self._shuffle:
@@ -106,7 +111,9 @@ class DapoMathDataset(_CyclingDataset):
                     ground_truth=str(row["ground_truth"]),
                 )
             )
-        super().__init__(samples, seed=config.seed, shuffle=config.shuffle)
+        super().__init__(
+            samples, seed=config.seed, shuffle=config.shuffle, repeat=config.repeat
+        )
 
 
 class AIME2025Dataset(_CyclingDataset):
@@ -120,6 +127,8 @@ class AIME2025Dataset(_CyclingDataset):
         seed: int = 99
         shuffle: bool = False
         num_samples: int = 30
+        repeat: bool = False
+        """An eval set: one pass."""
 
     def __init__(self, config: Config) -> None:
         dataset = concatenate_datasets(
@@ -135,4 +144,6 @@ class AIME2025Dataset(_CyclingDataset):
             )
             for row in dataset
         ]
-        super().__init__(samples, seed=config.seed, shuffle=config.shuffle)
+        super().__init__(
+            samples, seed=config.seed, shuffle=config.shuffle, repeat=config.repeat
+        )

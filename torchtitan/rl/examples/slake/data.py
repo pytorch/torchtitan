@@ -38,7 +38,8 @@ class SlakeSample:
 
 
 class SlakeDataset(RLDataset):
-    """English SLAKE medical VQA (CT / MRI / X-ray), streamed in reshuffled epochs.
+    """English SLAKE medical VQA (CT / MRI / X-ray), streamed in reshuffled epochs, or one pass
+    if not `repeat`.
 
     Expects the official release layout (Hugging Face ``BoKelvin/SLAKE``):
     ``{data_dir}/{split}.json`` and the images unzipped under
@@ -80,6 +81,7 @@ class SlakeDataset(RLDataset):
         if not self._samples:
             raise ValueError(f"No SLAKE samples selected from {config.data_dir}")
         self._rng = random.Random(config.seed)
+        self._repeat = config.repeat
         self._order: list[int] = []
         self._cursor = 0
 
@@ -91,6 +93,9 @@ class SlakeDataset(RLDataset):
 
     def __next__(self) -> SlakeSample:
         if self._cursor == len(self._order):
+            # The first call starts the first epoch; later ones start another only if `repeat`.
+            if self._order and not self._repeat:
+                raise StopIteration
             self._order = list(range(len(self._samples)))
             self._rng.shuffle(self._order)
             self._cursor = 0

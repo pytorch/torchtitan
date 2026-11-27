@@ -74,9 +74,6 @@ MUSE_SPARK_LORA_TARGETS = (
     "attention.output_gate",
 )
 
-# English SLAKE test questions without knowledge-graph ones (what SlakeDataset keeps).
-_NUM_SLAKE_TEST_QUESTIONS = 913
-
 
 def rl_muse_spark_816b_a42b_slake_lora_gb300(
     *,
@@ -146,7 +143,8 @@ def rl_muse_spark_816b_a42b_slake_lora_gb300(
             num_prompts_per_train_step=32,
             num_samples_per_prompt=16,
             target_offpolicy_steps=target_offpolicy_steps,
-            validation=ValidationConfig(steps=_NUM_SLAKE_TEST_QUESTIONS),
+            # One pass over the 913 English test questions without knowledge-graph ones.
+            validation=ValidationConfig(steps=-1),
             batcher=Batcher.Config(
                 training_sample_builder=TrainingSampleBuilder.Config(
                     drop_zero_std_reward_groups=True
