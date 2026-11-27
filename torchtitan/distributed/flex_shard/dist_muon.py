@@ -186,7 +186,7 @@ class DistMuon(Optimizer):
     have a layout-compatible DTensor gradient before each rank enters
     ``step()``.
 
-    Matrix-batch compute views use batched BF16 kernels. They implement the
+    Matrix-batch compute views use batched low-precision kernels. They implement the
     same mathematical update as ``torch.optim.Muon`` running one matrix at a
     time, but bitwise equality across the two kernel schedules is not part of
     the contract.
@@ -199,6 +199,16 @@ class DistMuon(Optimizer):
     another eager optimizer when forward/backward use CUDA graphs. This does not
     share scratch with a separate CUDA-graph private pool. Parameters, optimizer
     state, and communication resources remain owned.
+
+    ``ns_dtype`` is the dtype of the Newton-Schulz iteration only. Redistributed
+    inputs and directions stay in ``ComputeLayout.compute_dtype`` (BF16).
+
+    - ``torch.float16`` (default): for Newton-Schulz on the accelerator. Its 3
+      extra mantissa bits cut the iteration's rounding error (Step 3.5 Flash,
+      arXiv 2602.10604, Section 4.1.1).
+    - ``torch.bfloat16``: set it when Newton-Schulz runs on the host. float16
+      matmuls are slower there, and the float16 path normalizes through a
+      float32 copy.
 
     ``ns_device`` selects where Newton-Schulz runs. ``None`` keeps the storage
     device, where each parameter's local shard lives (the host under FSDP2 CPU
@@ -230,8 +240,14 @@ class DistMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
         ns_device: Literal["accelerator"] | None = None,
+        ns_dtype: torch.dtype = torch.float16,
     ) -> None:
         self._ns_device = self._resolve_ns_device(ns_device)
+        if ns_dtype not in (torch.bfloat16, torch.float16):
+            raise ValueError(
+                f"ns_dtype must be torch.bfloat16 or torch.float16, got {ns_dtype}"
+            )
+        self._ns_dtype = ns_dtype
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -361,8 +377,8 @@ class DistMuon(Optimizer):
                 compute_dtype = param.dtype
             if compute_dtype is not torch.bfloat16:
                 raise NotImplementedError(
-                    f"{fqn!r} would compute in {compute_dtype}: DistMuon runs "
-                    "Newton-Schulz in torch.bfloat16, set compute_dtype="
+                    f"{fqn!r} would exchange in {compute_dtype}: DistMuon's "
+                    "exchange buffers must be torch.bfloat16, set compute_dtype="
                     "torch.bfloat16 on its ComputeLayout"
                 )
             compute_layouts.append(
@@ -646,6 +662,7 @@ class DistMuon(Optimizer):
             ns_coefficients=group["ns_coefficients"],
             ns_steps=group["ns_steps"],
             eps=group["eps"],
+            ns_dtype=self._ns_dtype,
         )
         if staged is not compute:
             compute.copy_(staged, non_blocking=False)
@@ -1847,6 +1864,7 @@ def _compute_muon_direction(
     ns_coefficients: _NSCoefficientSchedule,
     ns_steps: int,
     eps: float,
+    ns_dtype: torch.dtype,
 ) -> Tensor:
     """Compute independent matrix directions with relative shape scaling."""
     reference_ratio = (
@@ -1862,6 +1880,7 @@ def _compute_muon_direction(
                 ns_coefficients=ns_coefficients,
                 ns_steps=ns_steps,
                 eps=eps,
+                ns_dtype=ns_dtype,
             )
         )
         if reference_ratio is None:
@@ -1956,14 +1975,31 @@ def _zeropower_via_newtonschulz(
     ns_coefficients: _NSCoefficientSchedule,
     ns_steps: int,
     eps: float,
+    ns_dtype: torch.dtype,
 ) -> Tensor:
     """Compute Muon's approximate polar factor without optimizer state."""
     coefficients_by_step = _ns_coefficients_by_step(ns_coefficients, ns_steps)
-    result = update.to(dtype=torch.bfloat16, copy=True)
-    transposed = result.shape[-2] > result.shape[-1]
-    if transposed:
-        result = result.transpose(-2, -1)
-    result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
+    transposed = update.shape[-2] > update.shape[-1]
+    if ns_dtype is torch.bfloat16:
+        # BF16 keeps torch.optim.Muon's ops: 2D matrices match it bitwise. The
+        # float32-norm path below would make a float32 copy on the host, and after
+        # a BF16 iteration it helps mostly float32 inputs.
+        result = update.to(dtype=torch.bfloat16, copy=True)
+        if transposed:
+            result = result.transpose(-2, -1)
+        result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
+    else:
+        # Normalize in float32 straight into the output: a float16 cast first
+        # flushes entries below ~6e-8 to zero, while normalized entries are at
+        # most 1. An update with norm below eps is divided by eps instead, so its
+        # entries stay small and float16 may flush them.
+        if transposed:
+            update = update.transpose(-2, -1)
+        norm = torch.linalg.vector_norm(
+            update, dim=(-2, -1), keepdim=True, dtype=torch.float32
+        )
+        result = torch.empty_like(update, dtype=ns_dtype)
+        torch.div(update, norm.clamp_min(eps), out=result)
 
     if result.ndim == 2:
         for a, b, c in coefficients_by_step:
@@ -1975,10 +2011,10 @@ def _zeropower_via_newtonschulz(
     else:
         original_shape = result.shape
         matrices = result.reshape(-1, *original_shape[-2:])
-        # The loop replaces matrices; do not retain the initial BF16 storage.
+        # The loop replaces matrices; do not retain the initial storage.
         del result
-        # Batched kernels and independent matrix calls can use different BF16
-        # reduction orders.
+        # Batched kernels and independent matrix calls can use different
+        # low-precision reduction orders.
         for a, b, c in coefficients_by_step:
             gram = matrices @ matrices.transpose(-2, -1)
             gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)

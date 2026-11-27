@@ -25,18 +25,21 @@ def test_dist_muon_applies_shared_or_per_step_ns_coefficients() -> None:
         ns_coefficients=shared,
         ns_steps=2,
         eps=1e-7,
+        ns_dtype=torch.bfloat16,
     )
     repeated_result = _zeropower_via_newtonschulz(
         update,
         ns_coefficients=repeated,
         ns_steps=2,
         eps=1e-7,
+        ns_dtype=torch.bfloat16,
     )
     per_step_result = _zeropower_via_newtonschulz(
         update,
         ns_coefficients=per_step,
         ns_steps=2,
         eps=1e-7,
+        ns_dtype=torch.bfloat16,
     )
 
     assert torch.equal(shared_result, repeated_result)
@@ -44,3 +47,28 @@ def test_dist_muon_applies_shared_or_per_step_ns_coefficients() -> None:
     assert _valid_ns_coefficients(shared, ns_steps=2)
     assert _valid_ns_coefficients(per_step, ns_steps=2)
     assert not _valid_ns_coefficients(per_step, ns_steps=3)
+
+
+def test_float16_newton_schulz_tracks_float32_reference() -> None:
+    # Low-rank momentum at 1e-9 scale: float16 must normalize in float32 before
+    # the cast, since a cast first flushes these entries to zero. Here float16 is
+    # ~8x closer to the float32 reference than BF16; the 3x bound leaves margin.
+    generator = torch.Generator().manual_seed(0)
+    left = torch.randn(256, 8, generator=generator)
+    right = torch.randn(8, 512, generator=generator)
+    update = ((left * torch.logspace(0, -3, 8)) @ right * 1e-9).to(torch.bfloat16)
+
+    def newton_schulz(ns_dtype: torch.dtype) -> torch.Tensor:
+        return _zeropower_via_newtonschulz(
+            update,
+            ns_coefficients=(3.4445, -4.7750, 2.0315),
+            ns_steps=5,
+            eps=1e-7,
+            ns_dtype=ns_dtype,
+        ).float()
+
+    reference = newton_schulz(torch.float32)
+    bf16_error = (newton_schulz(torch.bfloat16) - reference).abs().mean()
+    fp16_error = (newton_schulz(torch.float16) - reference).abs().mean()
+
+    assert fp16_error < bf16_error / 3
