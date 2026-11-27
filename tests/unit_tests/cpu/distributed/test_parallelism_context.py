@@ -968,7 +968,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
             model.init_states(buffer_device=None)
 
         ref_model = copy.deepcopy(model)
-        ref_optim = torch.optim.Adam(ref_model.parameters(), lr=1e-4)
+        ref_optim = torch.optim.Adam(ref_model.parameters(), lr=1e-4, foreach=True)
 
         dp_mesh = init_device_mesh(self.device_type, (1,))
         apply_fsdp_to_decoder(
@@ -978,7 +978,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
             reduce_dtype=torch.float32,
             pp_enabled=False,
         )
-        optim = torch.optim.Adam(model.parameters(), lr=1e-4)
+        optim = torch.optim.Adam(model.parameters(), lr=1e-4, foreach=True)
 
         # Cast only parameters to bf16, matching MixedPrecisionPolicy behavior
         # (buffers like freqs_cis stay fp32)
