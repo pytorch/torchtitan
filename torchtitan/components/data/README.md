@@ -293,10 +293,12 @@ resets positions between conversations, not between turns. Samples exceeding
 `max_context_length` are dropped whole.
 
 Formatting and reasoning retention follow the selected renderer. For example,
-Qwen3 omits reasoning from assistant turns before the last user query. Those
-omitted tokens receive no loss. To train on each turn's reasoning, prepare
-separate conversation prefixes in the source dataset. `thinking_retention`
-controls the renderer's rollout bridging, not the full renders used here.
+Qwen3 omits reasoning from assistant turns before the last user query. Turns
+whose reasoning is omitted receive no loss, answer included, so the model does
+not learn those answers without their reasoning. To train on each turn's
+reasoning, prepare separate conversation prefixes in the source dataset.
+`thinking_retention` controls the renderer's rollout bridging, not the full
+renders used here.
 
 # Mixing datasets
 

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -94,6 +95,36 @@ def _require_token_prefix(full_tokens: list[int], prompt_tokens: list[int]) -> N
         )
 
 
+def _without_spaces(text: str) -> str:
+    # NFKC matches tokenizers that normalize (e.g. Qwen3 applies NFC).
+    return "".join(unicodedata.normalize("NFKC", text).split())
+
+
+def _split_reasoning(message: Message) -> tuple[str, str]:
+    """Return an assistant message's (reasoning, answer), as renderers read them.
+
+    Example:
+        {"reasoning_content": "R", "content": "A"}                    -> ("R", "A")
+        {"content": "<think>R</think>A"}                               -> ("R", "A")
+        {"content": [{"type": "text", "text": "<think>R</think>A"}]}  -> ("R", "A")
+        {"content": "A"}                                               -> ("", "A")
+    """
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        # Join OpenAI-style text parts, as Qwen3's renderer does.
+        texts = [
+            part if isinstance(part, str) else part.get("text") for part in content
+        ]
+        content = "".join(text for text in texts if isinstance(text, str))
+    reasoning = message.get("reasoning_content") or message.get("reasoning")
+    if reasoning:
+        return reasoning, content
+    if "</think>" in content:
+        before, answer = content.split("</think>", 1)
+        return before.split("<think>")[-1], answer
+    return "", content
+
+
 class ChatProcessor(SampleProcessor):
     """Tokenizes chat samples and masks labels outside assistant responses."""
 
@@ -110,6 +141,7 @@ class ChatProcessor(SampleProcessor):
         self._messages_fn = config.messages_fn
         self._tools_fn = config.tools_fn
         self._logged_first_sample = False
+        self._logged_context_only_turn = False
         self._renderer = None
         if config.renderer is None:
             if config.tools_fn is not None:
@@ -196,12 +228,66 @@ class ChatProcessor(SampleProcessor):
     ) -> TextSequence | None:
         if not messages or messages[-1]["role"] != "assistant":
             raise ValueError("Chat samples must end with an assistant message.")
-        # TODO(data-sft-supervision): Support per-turn loss weighting.
+        # Templates like Qwen3 drop an earlier turn's reasoning once a later user
+        # message exists. Training that turn would teach an answer without its
+        # reasoning, so it stays context. Per earlier assistant turn with reasoning:
+        #   renderer.is_prefix_stable (history renders as it was)      -> trained
+        #   final turn has reasoning, but it is missing from its render -> trained
+        #     (the renderer ignores that field, e.g. `reasoning` in Qwen3)
+        #   reasoning in the turn's rendered text, answer removed      -> trained
+        #   otherwise                                                  -> context
+        # Reasoning that a tool call repeats still counts as rendered.
+        # TODO(data-sft-supervision): renderers has no per-message "history drops
+        # this turn's reasoning" flag, so this matches text; use one once it
+        # exists. Also emit one sample per user turn to train those turns too,
+        # and support per-turn loss weighting.
+        message_loss_mask: list[bool | int] = [True] * len(messages)
+        reasoning_and_answer = [
+            _split_reasoning(message) if message["role"] == "assistant" else ("", "")
+            for message in messages
+        ]
+        has_earlier_reasoning = any(
+            reasoning for reasoning, _ in reasoning_and_answer[:-1]
+        )
+        if has_earlier_reasoning and not renderer.is_prefix_stable:
+            full_render = renderer.render(messages, tools=tools)
+            token_ids_per_message: list[list[int]] = [[] for _ in messages]
+            for token_id, message_index in zip(
+                full_render.token_ids, full_render.message_indices
+            ):
+                if message_index >= 0:
+                    token_ids_per_message[message_index].append(token_id)
+
+            def shows_reasoning(index: int) -> bool:
+                reasoning, answer = reasoning_and_answer[index]
+                turn_text = _without_spaces(
+                    self._tokenizer.decode(
+                        token_ids_per_message[index], skip_special_tokens=False
+                    )
+                )
+                # Drop the answer, so reasoning that the answer repeats isn't found.
+                if answer := _without_spaces(answer):
+                    before_answer, _, after_answer = turn_text.rpartition(answer)
+                    turn_text = before_answer + after_answer
+                return _without_spaces(reasoning) in turn_text
+
+            final_reasoning = reasoning_and_answer[-1][0]
+            if not final_reasoning or shows_reasoning(len(messages) - 1):
+                for index, (reasoning, _) in enumerate(reasoning_and_answer[:-1]):
+                    if reasoning:
+                        message_loss_mask[index] = shows_reasoning(index)
+        if not all(message_loss_mask) and not self._logged_context_only_turn:
+            logger.info(
+                "[ChatProcessor] Earlier assistant turns whose reasoning is missing "
+                "from the rendered history are context, not trained."
+            )
+            self._logged_context_only_turn = True
         rendered = build_training_sample(
             renderer,
             messages,
             tools=tools,
             ensure_final_stop=True,
+            message_loss_mask=message_loss_mask,
         )
 
         sequence = self._create_sequence(rendered.token_ids)
