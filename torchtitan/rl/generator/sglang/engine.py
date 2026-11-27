@@ -731,6 +731,7 @@ class SGLangEngine(GenerationEngine):
         ):
             _overlap_event_loop_iteration(scheduler)
             # SGLang runs one more decode step for an aborted request, then finishes it.
+            # abort_request also drops a retracted request from SGLang's waiting queues.
             for request_id in self._output_collector.take_requests_to_abort():
                 scheduler.abort_request(AbortReq(rid=request_id))
             # When SGLang processes a prefill's results, it appends the request's

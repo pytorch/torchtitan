@@ -421,13 +421,9 @@ class TestSGLangBitwiseParityVarlen(SGLangBitwiseParityTestBase):
         self.assertEqual(len(finished[0].token_ids), 1)
 
     def test_aborts_request_with_non_finite_logprob(self):
-        # NaN, and the values SGLang clamps a -inf logprob to with bfloat16 and float32
-        # logits.
-        for poison in (
-            float("nan"),
-            torch.finfo(torch.bfloat16).min,
-            torch.finfo(torch.float32).min,
-        ):
+        # NaN, and bfloat16's min: of the values SGLang clamps a -inf logprob to (with
+        # bfloat16 or float32 logits), the one nearest the floor.
+        for poison in (float("nan"), torch.finfo(torch.bfloat16).min):
             with self.subTest(poison=poison):
                 ns = time.monotonic_ns()
                 self._check_aborts_request_with_logprob(
@@ -488,6 +484,7 @@ class TestSGLangBitwiseParityVarlen(SGLangBitwiseParityTestBase):
             finished = {}
             while self.engine.has_unfinished_requests():
                 for result in self.engine.step():
+                    self.assertNotIn(result.request_id, finished)
                     finished[result.request_id] = result
         finally:
             collector._receive_tokens = receive_tokens
