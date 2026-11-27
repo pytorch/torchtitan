@@ -240,7 +240,7 @@ class TorchTitanKDAAttnBackend(TorchTitanLinearAttnBackend):
             cu_seqlens,
             has_initial_state,
         ) = self.convolve_extend(forward_batch, mixed_qkv, conv_weight_CW, conv_state)
-        return paged_kda(
+        output_1THK = paged_kda(
             convolved_1TC,
             a.unflatten(-1, (-1, layer.head_k_dim)).unsqueeze(0),
             b.unsqueeze(0),
@@ -255,6 +255,12 @@ class TorchTitanKDAAttnBackend(TorchTitanLinearAttnBackend):
             lower_bound=layer.lower_bound,
             **checkpoints,
         )
+        if self.prefill_graph_metadata is not None:
+            # The kernels leave the tokens past the batch unwritten.
+            output_1THK.masked_fill_(
+                self.prefill_graph_metadata.padding_tokens[None, :, None, None], 0
+            )
+        return output_1THK
 
 
 class SGLangInnerKDA(InnerAttention):

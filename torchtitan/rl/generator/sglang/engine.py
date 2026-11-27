@@ -48,7 +48,6 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.models.common.attention import MLAAttention
-from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.decoder import Decoder
@@ -557,11 +556,16 @@ class SGLangEngine(GenerationEngine):
             }
         elif self.config.cuda_graph == "breakable":
             server_kwargs["cuda_graph_config"] = {"prefill": {"backend": "breakable"}}
-            if any(isinstance(layer.attention, GDN.Config) for layer in model.layers):
+            # Attention DP keeps the linear attention extend eager, with no tables
+            # (TorchTitanLinearAttnBackend.supports_prefill_graph_extend).
+            if parallelism.data_parallel_degree == 1 and any(
+                isinstance(layer.attention, LinearAttention.Config)
+                for layer in model.layers
+            ):
                 # At most 256 requests per prefill batch; SGLang runs the rest in the next
-                # prefill step. The GDN prefill graphs keep a table row per request, and each
-                # row costs GPU time in every GDN layer: 1,024 rows add about 3 ms to a
-                # 2,048-token Qwen3.5-0.8B prefill (13 ms with 256 rows, one GB300).
+                # prefill step. The prefill graphs keep a table row per request, and each
+                # row costs GPU time in every GDN or KDA layer: 1,024 rows add about 3 ms to
+                # a 2,048-token Qwen3.5-0.8B prefill (13 ms with 256 rows, one GB300).
                 server_kwargs["prefill_max_requests"] = 256
         else:
             server_kwargs["disable_prefill_cuda_graph"] = True

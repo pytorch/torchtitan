@@ -22,7 +22,7 @@ from sglang.srt.layers.attention.hybrid_linear_attn_backend import MambaAttnBack
 from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
 from sglang.srt.mem_cache.kv.router import STATE_PART
 from sglang.srt.model_executor.runner_utils.forward_batch import get_forward_batch
-from sglang.srt.runtime_context import get_schedule
+from sglang.srt.runtime_context import get_parallel, get_schedule
 from transformers import PretrainedConfig
 
 from torchtitan.models.base.module import Module
@@ -160,9 +160,9 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
     slots, in place, as the vLLM engine's adapters do. Slot 0 is SGLang's padding slot,
     which the kernels skip. Speculative decoding is not supported.
 
-    A subclass whose ``supports_prefill_graph_extend`` holds runs its extend inside
-    SGLang's breakable prefill CUDA graphs, on each bucket's ``PrefillGraphMetadata``, and
-    zeroes its output at ``padding_tokens``, which the kernels leave unwritten.
+    Where ``supports_prefill_graph_extend`` holds, the extend runs inside SGLang's
+    breakable prefill CUDA graphs, on each bucket's ``PrefillGraphMetadata``, and each
+    subclass zeroes its output at ``padding_tokens``, which the kernels leave unwritten.
     """
 
     # Set by a bucket's capture or replay; the next eager forward (init_forward_metadata)
@@ -195,6 +195,20 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
         # An eager forward reads SGLang's metadata of the batch, not a bucket's tables.
         self.prefill_graph_metadata = None
         super().init_forward_metadata(forward_batch)
+
+    def supports_prefill_graph_extend(self) -> bool:
+        """Whether SGLang's breakable prefill CUDA graphs capture the extend.
+
+        Off, so each layer breaks the graph and runs eagerly:
+        (a) on SGLang's draft runners (MTP), as with SGLang's own GDN backend;
+        (b) under attention DP > 1.
+        """
+        # TODO: capture the extend under attention DP too. The tables must first handle
+        # the two batches SGLang pads a DP rank with: an idle rank (one made-up request,
+        # no real token) and a decode batch run as 1-token extends. Needs a DP 2 test of
+        # the captured extend: no GDN class runs at attention DP, and the KDA DP-EP class
+        # captures no graphs.
+        return not self.is_draft_worker and get_parallel().attn_dp_size == 1
 
     def prefill_graph_extend_active(self) -> bool:
         return self.prefill_graph_metadata is not None
