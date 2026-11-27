@@ -389,6 +389,21 @@ def test_a_retry_admitted_while_a_request_of_its_session_is_preempted_keeps_its_
     assert num_hit_tokens == 112
 
 
+def test_a_retry_of_a_running_request_leaves_the_requests_reply_to_evict(
+    manager, scheduler, evictor
+):
+    first = _admit(scheduler, evictor, "s/turn=1", "s", 0, list(range(50)))
+    _prefill(manager, first, sample=100)
+    # A client-timeout retry with the same prompt arrives while the first attempt still decodes.
+    _admit(scheduler, evictor, "s/retry", "s", 0, list(range(50)))
+    for token in range(101, 140):
+        _schedule(manager, first, 1, sample=token)
+    _finish(manager, scheduler, evictor, first)
+
+    # The retry counts the prompt's blocks 0-2; the attempt's reply blocks 3-4 go.
+    assert _cached_indices(manager, first, ATTENTION_KV_CACHE_GROUP_ID) == [0, 1, 2]
+
+
 def test_an_edited_history_releases_the_dropped_reply(manager, scheduler, evictor):
     # Turn 0: a 50-token prompt and a 40-token reply. Full blocks 3 and 4 hold the reply.
     turn0 = _turn(

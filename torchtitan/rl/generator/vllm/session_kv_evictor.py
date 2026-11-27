@@ -160,6 +160,7 @@ class VLLMSessionKVEvictor:
         previous request's (e.g. a chat template that strips old reasoning)."""
         # A late request of a released group (an abandoned attempt still in transit) would
         # re-create a session that nothing releases. vLLM's LRU reuses its blocks instead.
+        # Group ids are used once, so a released id only comes back with a late request.
         if group_id in self._released_group_ids:
             return
 
@@ -180,7 +181,8 @@ class VLLMSessionKVEvictor:
             return
 
         # Hashes chain, so a turn that extends the previous request's history starts with all of
-        # its hashes: take over their counts and count only the new ones.
+        # its hashes: take over their counts and count only the new ones. Only once the previous
+        # request left vLLM: a running one still adds reply blocks.
         self._count_new_block_hashes(previous)
         last_index = previous.num_counted - 1
         extends_previous = (
