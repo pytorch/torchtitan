@@ -19,9 +19,16 @@ from torchtitan.models.base.module import Module
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
-@local_compile("moe_score_scale", batch_invariant=True)
-def scale_by_router_scores(x_RD: torch.Tensor, scores_R: torch.Tensor) -> torch.Tensor:
-    """Scale routed activations by fp32 router scores without materializing an fp32 copy."""
+@local_compile("score_scale", batch_invariant=True)
+def _scale_by_router_scores(x_RD: torch.Tensor, scores_R: torch.Tensor) -> torch.Tensor:
+    """Scale routed activations by their float32 router scores.
+
+    Type promotion computes the product in float32 without materializing a
+    float32 copy of the routed output, which the multiply would save for
+    backward (twice the bytes of the routed output itself). Compiling this
+    region fuses the promotion, the multiply and the downcast, so neither the
+    forward nor its backward writes a float32 ``[R, D]`` tensor to HBM.
+    """
     return (x_RD * scores_R.reshape(-1, 1).to(torch.float32)).to(x_RD.dtype)
 
 
@@ -270,7 +277,7 @@ class LocalTokenDispatcher(Module):
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
         """Weight expert-sorted outputs by their router scores and sum them per token."""
-        routed_output_ND = scale_by_router_scores(routed_output_ND, topk_scores_N)
+        routed_output_ND = _scale_by_router_scores(routed_output_ND, topk_scores_N)
         return deterministic_scatter_add(
             torch.zeros_like(x_TD),
             token_indices_N.reshape(-1, 1).expand(-1, x_TD.shape[-1]),
