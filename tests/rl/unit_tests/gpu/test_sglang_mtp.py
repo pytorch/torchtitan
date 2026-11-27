@@ -75,16 +75,16 @@ class TestSGLangMTP(unittest.TestCase):
     PROMPT_LENGTH = 1024
     NEXT_TURN_SUFFIX_LENGTH = 8
 
-    # Each bar leaves a margin over this test's numbers on one GB300. Measured 2.37
-    # tokens per verify step; SGLang's default verify (argmax drafts) gave 1.70 on a
-    # similar load.
+    # Each bar leaves a margin over this test's numbers on one GB300. Measured 2.48
+    # tokens per verify step. On a similar load, SGLang's default verify (argmax
+    # drafts) gave 1.70 where this verify gave 2.37.
     MIN_TOKENS_PER_VERIFY_STEP = 2.0
-    # Measured 0.016 at temperature 1; greedy 0.0023, and 0.0066 after the x1.01
-    # weight load. The same without drafts.
+    # Measured 0.014 at temperature 1; greedy 0.0021, and 0.0081 after the x1.01
+    # weight load (0.0075 without drafts).
     MAX_MEAN_ABS_LOGPROB_DELTA_SAMPLED = 0.03
     MAX_MEAN_ABS_LOGPROB_DELTA_GREEDY = 0.01
-    # The trainer's max logprob minus that of a greedy token. Measured at most 0.11,
-    # with or without drafts: a near tie that the trainer's and SGLang's kernels round
+    # The trainer's max logprob minus that of a greedy token. Measured at most 0.18
+    # (0.14 without drafts): near ties that the trainer's and SGLang's kernels round
     # apart.
     MAX_GREEDY_ARGMAX_GAP = 0.25
 
