@@ -33,7 +33,7 @@ class TrainingSample:
 
     Per-token fields are numpy arrays, like `RolloutTurn`'s:
     - not lists: a full GC walks every entry of a list, but doesn't track numpy arrays;
-    - not tensors: the turns are already numpy, so a sample is built with no conversion; the batcher
+    - not tensors: the turns are already numpy, so a sample is built with no conversion; the training batch builder
       converts once, into the trainer's tensors.
 
     Example:
@@ -197,7 +197,7 @@ class TrainingSampleBuilder(Configurable):
     """Build trainable samples and metrics the trainer consumes from rollout groups.
 
     Example:
-        builder = config.async_loop.batcher.training_sample_builder.build()
+        builder = config.async_loop.training_batch_builder.training_sample_builder.build()
         output: TrainingSampleGroup = builder.build_from_group(rollout_group=rollout_group)
     """
 

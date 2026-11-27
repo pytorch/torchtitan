@@ -131,7 +131,7 @@ def packed_attention_cost(
 
     The sum of squared attention segment lengths, with the segments built from
     lengths: the documents plus a padding tail cut every ``max_context_length``.
-    For packing decisions made before a microbatch exists (RL's batcher).
+    For packing decisions made before a microbatch exists (RL's training batch builder).
     """
     tail = _padding_segment_lengths(
         num_tokens - sum(document_lengths), max_context_length
@@ -329,9 +329,9 @@ class GlobalBalancer(MicrobatchBalancer):
         to the ranks left free. Returns, per row, the bin index each rank trains.
 
         With one microbatch per rank per step, a row's cost is its heaviest bin
-        whatever the ranks, so keeping bins local is free. RL's batcher, which
+        whatever the ranks, so keeping bins local is free. RL's training batch builder, which
         gathers the batch in one place, uses the same rows with a different
-        rank choice (``rl.trainer.batcher.assign_sorted_bins_to_dp_ranks``).
+        rank choice (``rl.trainer.training_batch_builder.assign_sorted_bins_to_dp_ranks``).
 
         TODO: with PP (M microbatches per step), also balance each rank's step
         total, trading moves against balance.

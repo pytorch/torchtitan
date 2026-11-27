@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Monarch actor adapter for the RL batcher."""
+"""Monarch actor adapter for the RL training batch builder."""
 
 from __future__ import annotations
 
@@ -16,13 +16,13 @@ from torchtitan.observability.logging import init_logger
 from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.actors.monarch.rdma_microbatch import MonarchRDMAMicrobatch
 from torchtitan.rl.rollout.types import RolloutGroup
-from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
+from torchtitan.rl.trainer.training_batch_builder import TrainingBatchBuilder, TrainerStepBatch
 
 
-class _BatcherActorEndpoints:
+class _TrainingBatchBuilderActorEndpoints:
     def __init__(
         self,
-        config: Batcher.Config,
+        config: TrainingBatchBuilder.Config,
         *,
         num_tokens_per_microbatch_per_dp_rank: int,
         max_context_length: int,
@@ -39,7 +39,7 @@ class _BatcherActorEndpoints:
     ) -> None:
         init_logger()
         sl.init_structured_logger(
-            source="rl_batcher",
+            source="rl_training_batch_builder",
             output_dir=output_dir,
             rank=0,
             enable=enable_structured_logging,
@@ -64,7 +64,7 @@ class _BatcherActorEndpoints:
         self, *, rollout_group: RolloutGroup
     ) -> tuple[TrainerStepBatch | None, bool]:
         """Plain `@endpoint`, not `@concurrent_endpoint`: calls run one at a time, so groups reach the
-        stateful batcher in arrival order. `async` because Monarch rejects mixing sync and async endpoints."""
+        stateful training batch builder in arrival order. `async` because Monarch rejects mixing sync and async endpoints."""
         return super().add_group(rollout_group=rollout_group)
 
     @endpoint
@@ -77,22 +77,22 @@ class _BatcherActorEndpoints:
         sl.set_step(step)
 
 
-class BatcherActor(Actor, _BatcherActorEndpoints, Batcher):
-    """Expose a :class:`Batcher` through Monarch endpoints, in its own process.
+class TrainingBatchBuilderActor(Actor, _TrainingBatchBuilderActorEndpoints, TrainingBatchBuilder):
+    """Expose a :class:`TrainingBatchBuilder` through Monarch endpoints, in its own process.
 
     Why not batch in the controller, whose busy event loop holds the GIL:
         on the loop thread:      blocks every rollout while it runs
         in `asyncio.to_thread`:  each GIL release waits up to 5 ms to get it back (the switch interval)
 
     Example:
-        batcher = this_host().spawn_procs(per_host={"cpus": 1}).spawn(
-            "batcher",
-            BatcherActor,
-            Batcher.Config(),
+        training_batch_builder = this_host().spawn_procs(per_host={"cpus": 1}).spawn(
+            "training_batch_builder",
+            TrainingBatchBuilderActor,
+            TrainingBatchBuilder.Config(),
             num_prompts_per_train_step=2,
-            **other_init_kwargs,  # see `_BatcherActorEndpoints.__init__`
+            **other_init_kwargs,  # see `_TrainingBatchBuilderActorEndpoints.__init__`
         )
-        await batcher.add_group.call_one(rollout_group=group0)  # -> (None, True)
-        await batcher.add_group.call_one(rollout_group=group1)  # -> (batch of MonarchRDMAMicrobatches, True)
-        batcher.maybe_release_oldest_batch.broadcast()  # once every trainer rank has read group1's batch
+        await training_batch_builder.add_group.call_one(rollout_group=group0)  # -> (None, True)
+        await training_batch_builder.add_group.call_one(rollout_group=group1)  # -> (batch of MonarchRDMAMicrobatches, True)
+        training_batch_builder.maybe_release_oldest_batch.broadcast()  # once every trainer rank has read group1's batch
     """

@@ -4,10 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Default RDMA path for trainer microbatches (`Batcher.Config.rdma_min_tensor_bytes=None` turns it off): the
+"""Default RDMA path for trainer microbatches (`TrainingBatchBuilder.Config.rdma_min_tensor_bytes=None` turns it off): the
 process that registers them keeps the large tensors, and each trainer rank reads its own column.
 
-The actor system implements `RDMAMicrobatch` (e.g. `actors/monarch/rdma_microbatch.py`); the batcher and
+The actor system implements `RDMAMicrobatch` (e.g. `actors/monarch/rdma_microbatch.py`); the training batch builder and
 the trainer use only this interface.
 """
 
@@ -24,7 +24,7 @@ from typing import Protocol, runtime_checkable, TYPE_CHECKING
 from torchtitan.observability import structured_logger as sl
 
 if TYPE_CHECKING:
-    from torchtitan.rl.trainer.batcher import TrainingMicrobatch
+    from torchtitan.rl.trainer.training_batch_builder import TrainingMicrobatch
 
 
 @runtime_checkable
@@ -131,7 +131,7 @@ class RDMAMicrobatchPrefetcher:
                 yield [wait_for_microbatch(reads.popleft())]
         finally:
             # The pass ended, or the generator was closed or collected (e.g. a failed step). Cancel the queued
-            # reads: with the batcher gone, each would wait out the 60 s RDMA timeout. The running read finishes.
+            # reads: with the training batch builder gone, each would wait out the 60 s RDMA timeout. The running read finishes.
             pool.shutdown(cancel_futures=True)
 
     def _read(self, rdma_microbatch: RDMAMicrobatch) -> TrainingMicrobatch:

@@ -21,8 +21,8 @@ if TYPE_CHECKING:
     from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
     from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
     from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
-    from torchtitan.rl.trainer.batcher import Batcher
     from torchtitan.rl.trainer.trainer import Trainer
+    from torchtitan.rl.trainer.training_batch_builder import TrainingBatchBuilder
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,14 +42,14 @@ class TrainerHandle(ServiceHandle):
 
     by_dp_rank: list[Any]
     """``by_dp_rank[i]`` reaches the pp * cp * tp actors at DP rank ``i``, which train
-    the batcher's column ``i``, e.g. ``by_dp_rank[i].forward_backward.call(...)``."""
+    the training_batch_builder's column ``i``, e.g. ``by_dp_rank[i].forward_backward.call(...)``."""
 
 
 class ActorSystem(Configurable, abc.ABC):
     """Places the RL services on processes and returns handles to them.
 
     The services (``Trainer``, ``Generator``, ``InterGeneratorRouter``,
-    ``Batcher``, ``BaseRolloutWorker``) are framework-free classes; an actor system
+    ``TrainingBatchBuilder``, ``BaseRolloutWorker``) are framework-free classes; an actor system
     runs each in its framework's actors. The controller builds it from
     ``Controller.Config.actor_system`` (or takes one its launcher built) and
     drives it: ``provision`` once, then a ``spawn_*`` call per service, and
@@ -89,7 +89,7 @@ class ActorSystem(Configurable, abc.ABC):
         num_generators: int,
     ) -> None:
         """Reserve the processes for the trainer, ``num_generators`` generators, the
-        generator router and the batcher, before any of them is spawned."""
+        generator router and the training batch builder, before any of them is spawned."""
 
     @abc.abstractmethod
     async def spawn_trainer(
@@ -111,9 +111,11 @@ class ActorSystem(Configurable, abc.ABC):
         generators. ``generator_kwargs`` go to ``Generator``'s constructor."""
 
     @abc.abstractmethod
-    async def spawn_batcher(self, config: Batcher.Config, **kwargs: Any) -> Any:
-        """Spawn the batcher in its own process; returns a single-actor handle.
-        ``kwargs`` go to ``Batcher``'s constructor."""
+    async def spawn_training_batch_builder(
+        self, config: TrainingBatchBuilder.Config, **kwargs: Any
+    ) -> Any:
+        """Spawn the training batch builder in its own process; returns a single-actor handle.
+        ``kwargs`` go to ``TrainingBatchBuilder``'s constructor."""
 
     @abc.abstractmethod
     async def spawn_rollout_workers(

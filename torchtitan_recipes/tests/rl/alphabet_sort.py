@@ -56,7 +56,6 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.losses import (
     CISPOLoss,
     DPPOLoss,
@@ -65,6 +64,7 @@ from torchtitan.rl.trainer.losses import (
     ScoreCentering,
 )
 from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.trainer.training_batch_builder import TrainingBatchBuilder
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 from torchtitan_recipes.rl.alphabet_sort import (
@@ -197,7 +197,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
-            batcher=Batcher.Config(
+            training_batch_builder=TrainingBatchBuilder.Config(
                 training_sample_builder=TrainingSampleBuilder.Config(
                     drop_zero_std_reward_groups=False,
                 ),
@@ -300,7 +300,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
-            batcher=Batcher.Config(
+            training_batch_builder=TrainingBatchBuilder.Config(
                 training_sample_builder=TrainingSampleBuilder.Config(
                     drop_zero_std_reward_groups=False,
                 ),
@@ -392,7 +392,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
-            batcher=Batcher.Config(
+            training_batch_builder=TrainingBatchBuilder.Config(
                 training_sample_builder=TrainingSampleBuilder.Config(
                     drop_zero_std_reward_groups=False,
                 ),
@@ -548,7 +548,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
-            batcher=Batcher.Config(
+            training_batch_builder=TrainingBatchBuilder.Config(
                 training_sample_builder=TrainingSampleBuilder.Config(
                     drop_zero_std_reward_groups=False,
                 ),
@@ -626,7 +626,7 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
-            batcher=Batcher.Config(
+            training_batch_builder=TrainingBatchBuilder.Config(
                 training_sample_builder=TrainingSampleBuilder.Config(
                     drop_zero_std_reward_groups=False,
                 ),
@@ -754,7 +754,7 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_training_steps=5,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            batcher=Batcher.Config(
+            training_batch_builder=TrainingBatchBuilder.Config(
                 max_num_documents=32,
                 training_sample_builder=TrainingSampleBuilder.Config(
                     drop_zero_std_reward_groups=False,
@@ -867,7 +867,7 @@ def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Confi
             num_training_steps=5,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            batcher=Batcher.Config(
+            training_batch_builder=TrainingBatchBuilder.Config(
                 training_sample_builder=TrainingSampleBuilder.Config(
                     drop_zero_std_reward_groups=False,
                 ),
@@ -927,7 +927,7 @@ def _configure_ci(
 ) -> Controller.Config:
     config.async_loop.num_training_steps = steps
     config.async_loop.num_samples_per_prompt = 2
-    config.async_loop.batcher.training_sample_builder.drop_zero_std_reward_groups = (
+    config.async_loop.training_batch_builder.training_sample_builder.drop_zero_std_reward_groups = (
         False
     )
     config.trainer.training.num_tokens_per_microbatch_per_dp_rank = (
@@ -1013,7 +1013,7 @@ def rl_grpo_pp2_interleaved1f1b_fsdp2_gen_tp2() -> Controller.Config:
     config.trainer.parallelism.tensor_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 2
     # TODO: drop once trainer ranks read RDMA microbatches in pipeline-step groups.
-    config.async_loop.batcher.rdma_min_tensor_bytes = None
+    config.async_loop.training_batch_builder.rdma_min_tensor_bytes = None
     # Tied embeddings cannot be split across pipeline stages, and the generator
     # must hold the same untied weights as the trainer.
     for model_config in (config.trainer.model, config.generator.model):

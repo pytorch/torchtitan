@@ -58,9 +58,9 @@ from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
-from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.trainer.training_batch_builder import TrainingBatchBuilder
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
@@ -147,7 +147,7 @@ def rl_muse_spark_816b_a42b_slake_lora_gb300(
             num_samples_per_prompt=16,
             target_offpolicy_steps=target_offpolicy_steps,
             validation=ValidationConfig(steps=_NUM_SLAKE_TEST_QUESTIONS),
-            batcher=Batcher.Config(
+            training_batch_builder=TrainingBatchBuilder.Config(
                 training_sample_builder=TrainingSampleBuilder.Config(
                     drop_zero_std_reward_groups=True
                 ),
