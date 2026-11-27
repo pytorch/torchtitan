@@ -405,6 +405,8 @@ def test_cpu_kv_and_weight_version_isolation(
         assert block_sizes[0] == block_sizes[1]
         cache_block_size = block_sizes[0]
 
+        tail_saves_without_forward = []
+
         def generate(
             gpu,
             version,
@@ -446,20 +448,19 @@ def test_cpu_kv_and_weight_version_isolation(
                     if dp_rank in outputs:
                         assert payload == outputs[dp_rank]
                     outputs[dp_rank] = payload
+            tail_saves_without_forward.append(outputs[target_dp][3])
             return outputs[target_dp]
 
         prompt = list(range(100, 100 + max(512, 2 * cache_block_size)))
         if prefix_match_unit is not None:
             # End prefill at a hash boundary inside a physical block, then
-            # finish after one sample: the tail can only save on an idle step.
+            # finish after one sample, so a tail can save on an idle step.
             prompt += [42] * prefix_match_unit
         # Recomputing the last prompt token limits a repeated prompt's hit
         # to the preceding full block.
         cached_prompt_tokens = (len(prompt) - 1) // cache_block_size * cache_block_size
         first = generate(0, 0, prompt)
         assert first[2] == 0
-        if prefix_match_unit is not None:
-            assert first[3] > 0, "must exercise a finish-time save without forward"
 
         # Local offload must reload on the same DP replica.
         consumer = 0
@@ -509,6 +510,10 @@ def test_cpu_kv_and_weight_version_isolation(
             consumer, 1, swap_prompt, clear_local=True, target_dp=consumer_dp
         )
         assert reused[2] >= cached_prompt_tokens
+        if prefix_match_unit is not None:
+            assert (
+                sum(tail_saves_without_forward) > 0
+            ), "must exercise a finish-time save without forward"
         print(
             f"SimpleCPU cached tokens: cold={first[2]}, shared={shared[2]}, "
             f"next_turn={continued[2]}, new_policy={updated[2]}, old_policy={old[2]}"

@@ -188,7 +188,7 @@ class DeepSeekV3Model(MTPDecoder):
                     if aux_loss_denominators is None
                     else aux_loss_denominators[depth]
                 )
-            prev_depth_hidden = layer(
+            prev_depth_hidden, mtp_output = layer(
                 mtp_input_embed,
                 prev_depth_hidden,
                 mtp_input_valid_mask,
@@ -197,7 +197,7 @@ class DeepSeekV3Model(MTPDecoder):
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
-            mtp_outputs.append(prev_depth_hidden)
+            mtp_outputs.append(mtp_output)
 
         outputs = (h, *mtp_outputs)
         if self._skip_lm_head:
