@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import random
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import pytest
@@ -149,6 +150,39 @@ def test_replay_mismatch_is_fatal():
     with pytest.raises(SDCReplayMismatch, match="gradient:0:weight"):
         replayer.run_fwd_bwd(execute, step=9, get_loss=lambda loss: loss)
     assert replayer.steps_since_reset == 0
+
+
+@pytest.mark.parametrize(
+    ("reference_ids", "replay_ids", "mismatch"),
+    [
+        ([1, 1, 3], [3, 1, 1], False),  # reordered duplicate indices
+        ([], [], False),  # empty gradient on a nonempty table
+        ([1, 1, 3], [1, 1, 4], True),  # move a row
+        ([1, 1, 3], [1, 3, 3], True),  # swap the two rows' gradient values
+        ([1, 1, 3], [1, 3], True),  # change one row's gradient
+    ],
+)
+def test_replay_sparse_embedding_gradients(reference_ids, replay_ids, mismatch):
+    module = torch.nn.Embedding(6, 2, sparse=True)
+    module.weight.detach().zero_()  # Keep the loss identical across executions.
+    replayer = SDCReplayer.Config().build(modules=[module], device=torch.device("cpu"))
+    batches = enumerate((reference_ids, replay_ids))
+
+    def execute():
+        replay, ids = next(batches)
+        loss = module(torch.tensor(ids, dtype=torch.long)).sum()
+        loss.backward()
+        if replay:
+            module.weight.grad = module.weight.grad.coalesce()
+        return loss
+
+    expected = (
+        pytest.raises(SDCReplayMismatch, match="gradient:0:weight")
+        if mismatch
+        else nullcontext()
+    )
+    with expected:
+        replayer.run_fwd_bwd(execute, step=1, get_loss=lambda loss: loss)
 
 
 @pytest.mark.parametrize(

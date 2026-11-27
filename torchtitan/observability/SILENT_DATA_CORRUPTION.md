@@ -52,6 +52,11 @@ entered without a gradient return to `None`, and entry gradient tensors are
 zeroed in place, preserving their storage addresses for accelerator graphs, with no
 gradient-sized clone or copy kernels on checked steps.
 
+Register module-owned tensors that accumulate across microbatches, for example
+with `self.register_buffer("pending_grad", None, persistent=False)`. Replay can
+then restore the accumulator before each execution and check its final value.
+A plain attribute would accumulate the same gradients again on every replay.
+
 Eager execution, `torch.compile`, accelerator graphs, symmetric-memory FSDP,
 distributed GEMM, async TP, DeepEP v2, and HybridEP can
 participate in replay. GraphTrainer uses the same replay boundary. Execution
@@ -66,7 +71,11 @@ Accelerator graphs currently require `sdc_replayer.num_replays=1`. Additional re
 would require restoring graph-owned gradient and optional-buffer storage
 without changing its captured addresses.
 
-Replay currently uses the existing XOR-based `torch.hash_tensor` mode. This
+Sparse COO gradients and buffers are coalesced before checksumming their stored
+indices and values in order. This combines duplicate coordinates and avoids
+allocating a dense copy of the table.
+
+Dense tensors use the existing XOR-based `torch.hash_tensor` mode. This
 checksum is order-insensitive, so permutations and some repeated-value
 corruptions can collide today.
 

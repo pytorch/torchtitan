@@ -30,8 +30,8 @@ checksummed matmuls). It trades extra forward/backward time on checked
 steps for an in-training, hardware-agnostic check, and requires fully
 deterministic execution (``debug.deterministic``).
 
-Unregistered execution scratch state is intentionally outside the replay
-contract when each invocation overwrites it before reading it.
+Register state that accumulates across microbatches as a module buffer so
+replay restores it. Unregistered scratch state must be overwritten before use.
 """
 
 from __future__ import annotations
@@ -107,14 +107,32 @@ def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
 def _hash_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Return a lightweight device-side digest for replay comparison.
 
-    The current hash is order-insensitive and can therefore collide for tensor
-    permutations. Complex tensors are viewed as real components and inherit the
-    same limitation across their real and imaginary values. This hash is used
-    because it is simple to apply across tensors and fast enough for replay.
+    The dense hash is order-insensitive and can therefore collide for tensor
+    permutations, including permutations of real and imaginary components.
+    Sparse COO tensors are checksummed in coalesced order.
     """
     local = _local_tensor(tensor).detach()
     if local.numel() == 0:
         return torch.zeros((), dtype=torch.int64, device=local.device)
+    if local.layout == torch.sparse_coo:
+        coo = local.coalesce()
+        # XOR of the indices and values separately misses swaps between rows.
+        # Read the stored bits in words of up to 32 bits, including for complex
+        # values. Packing smaller dtypes in their own word handles odd lengths.
+        word_dtype = {1: torch.uint8, 2: torch.int16}.get(
+            coo.values().element_size(), torch.int32
+        )
+        words = torch.cat(
+            [
+                part.clone(memory_format=torch.contiguous_format)
+                .view(-1)
+                .view(word_dtype)
+                for part in (coo.indices(), coo.values())
+            ]
+        )
+        # Powers of the 64-bit FNV prime weight each position modulo 2**64.
+        weights = torch.full_like(words, 0x100000001B3, dtype=torch.int64).cumprod(0)
+        return weights.mul_(words).sum() + words.numel()
     if local.is_complex():
         # for RoPE caches
         local = torch.view_as_real(local)
