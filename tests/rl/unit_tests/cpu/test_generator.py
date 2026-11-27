@@ -18,9 +18,10 @@ import json
 import os
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -81,6 +82,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.cache import LRUCache
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 class _FakeRenderer:
@@ -1160,6 +1162,77 @@ def test_full_mode_decode_dispatch(
         num_tokens, uniform_decode=True, valid_modes=valid_modes
     )
     assert (mode, descriptor.uniform) == expected
+
+
+@pytest.mark.parametrize(
+    "graph_mode, mixed_step",
+    [
+        (CUDAGraphMode.FULL, (CUDAGraphMode.FULL, False)),
+        (CUDAGraphMode.FULL_DECODE_ONLY, (CUDAGraphMode.NONE, False)),
+    ],
+)
+def test_runner_replays_the_verify_graph_only_when_every_row_verifies(
+    graph_mode, mixed_step
+):
+    """k = 3, 4 rows of 4 tokens each:
+
+                                                         FULL                FULL_DECODE_ONLY
+    draft counts [3, 3, 3, 3]                            FULL, uniform       FULL, uniform
+    draft counts [3, 3, 3, -1] (a 4-token prefill row)   FULL, mixed graph   NONE
+    a step without drafts, after an all-verify step      FULL, mixed graph   NONE
+    """
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=3, parallel_drafting=False
+    )
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=graph_mode,
+        cudagraph_capture_sizes=[4, 8, 16],
+        max_cudagraph_capture_size=16,
+    )
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=64,
+        max_num_seqs=4,
+        max_num_batched_tokens=16,
+        is_encoder_decoder=False,
+    )
+    runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
+    runner.vllm_config = config
+    runner.compilation_config = config.compilation_config
+    runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+    runner.input_batch = SimpleNamespace(lora_id_to_lora_request={})
+    runner.get_model = lambda: SimpleNamespace(set_num_valid_tokens=lambda n: None)
+    runner.attn_groups = []
+    runner.uniform_decode_query_len = 4
+    runner.num_decode_draft_tokens = SimpleNamespace(np=np.full(4, -1, dtype=np.int32))
+    runner.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(config)
+    runner.cudagraph_dispatcher.initialize_cudagraph_keys(graph_mode, 4)
+
+    def dispatch_step(num_decode_draft_tokens: list[int] | None):
+        # vLLM's _prepare_inputs writes the draft counts only on steps with drafts (None: a step without drafts).
+        def prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+            if scheduler_output.scheduled_spec_decode_tokens:
+                self.num_decode_draft_tokens.np[:4] = num_decode_draft_tokens
+
+        drafts = {"request": [0] * 3} if num_decode_draft_tokens else {}
+        with patch.object(GPUModelRunner, "_prepare_inputs", prepare_inputs):
+            runner._prepare_inputs(
+                SimpleNamespace(scheduled_spec_decode_tokens=drafts), None
+            )
+        mode, descriptor = runner._determine_batch_execution_and_padding(
+            num_tokens=16,
+            num_reqs=4,
+            num_scheduled_tokens_np=np.full(4, 4, dtype=np.int32),
+            max_num_scheduled_tokens=4,
+            use_cascade_attn=False,
+        )[:2]
+        return mode, descriptor.uniform
+
+    assert dispatch_step([3, 3, 3, 3]) == (CUDAGraphMode.FULL, True)
+    assert dispatch_step([3, 3, 3, -1]) == mixed_step
+    dispatch_step([3, 3, 3, 3])
+    assert dispatch_step(None) == mixed_step
 
 
 def test_only_weights_use_cumem_allocator(monkeypatch):

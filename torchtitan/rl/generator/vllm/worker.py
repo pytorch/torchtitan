@@ -12,6 +12,7 @@ from contextlib import nullcontext
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor
 from vllm.utils.math_utils import round_up
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -196,9 +197,20 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
                 key for key in keys[CUDAGraphMode.FULL] if not key.uniform
             }
 
+    def _prepare_inputs(self, scheduler_output: SchedulerOutput, *args, **kwargs):
+        # vLLM writes num_decode_draft_tokens only on steps with drafts. Reset it, so a step without
+        # drafts doesn't dispatch on the last step's counts (_determine_batch_execution_and_padding).
+        if (
+            self.uniform_decode_query_len > 1
+            and not scheduler_output.scheduled_spec_decode_tokens
+        ):
+            self.num_decode_draft_tokens.np.fill(-1)
+        return super()._prepare_inputs(scheduler_output, *args, **kwargs)
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
+        num_reqs: int,
         *args,
         force_uniform_decode: bool | None = None,
         **kwargs,
@@ -214,6 +226,11 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         those rows off Dist-MoE's network; graph replay reads the value published
         for the real step. Linear attention (GDN/KDA) builders then learn whether
         the step replays a packed or a uniform FULL graph.
+
+        With k drafts, a real step replays a uniform graph only if every row verifies k drafts:
+
+            k = 3, 4 tokens per row, draft counts [3, 3, 3, 3]   -> uniform graph
+            k = 3, 4 tokens per row, draft counts [3, 3, 3, -1]  -> not the uniform graph (a 4-token prefill)
         """
         self.get_model().set_num_valid_tokens(num_tokens)
 
@@ -221,8 +238,20 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         # vLLM passes force_uniform_decode only from _dummy_run; real steps pass None.
         dummy_run_uniform = force_uniform_decode
 
+        # vLLM calls a step uniform when every row has 1 + k tokens. The uniform graph runs only
+        # GDN's verify kernels, so a 1 + k token prefill row must not replay it
+        # (TorchTitanLinearAttentionMetadataBuilder._build_with_drafts raises otherwise).
+        # TODO: drop with this override and the _prepare_inputs reset on the move to vLLM's V2 model runner
+        # (pytorch/torchtitan#5956), which keeps steps with a prefill row off decode graphs
+        # (decode_graph_eligible on vLLM main, vllm/v1/worker/gpu/model_runner.py).
+        if force_uniform_decode is None and self.uniform_decode_query_len > 1:
+            num_decode_draft_tokens = self.num_decode_draft_tokens.np[:num_reqs]
+            force_uniform_decode = bool(
+                (num_decode_draft_tokens == self.uniform_decode_query_len - 1).all()
+            )
         result = super()._determine_batch_execution_and_padding(
             num_tokens,
+            num_reqs,
             *args,
             force_uniform_decode=force_uniform_decode,
             **kwargs,
