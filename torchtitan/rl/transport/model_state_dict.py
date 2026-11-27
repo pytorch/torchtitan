@@ -497,6 +497,11 @@ class ModelStateDictTransport(Configurable):
         assert self._reads is not None, "connect_generator must be called first"
         if not self._reads:
             return
+        # Older wheels only support individual reads. A single piece cannot be grouped.
+        read_batch = getattr(self._transport, "read_batch_async", None)
+        if read_batch is not None and len(self._reads) > 1:
+            await read_batch(self._reads, timeout=self._read_timeout_s)
+            return
         works = await asyncio.to_thread(
             lambda: [
                 self._transport.read(local, remote, async_op=True)

@@ -87,9 +87,12 @@ does not cover every element of a generator shard, or on `Partial` and uneven
    (`connect_generator`).
 2. Push: the trainer casts its shards and copies them into the staging buffer
    (`stage`), with no collectives.
-3. Pull: each generator rank issues its reads (`read`) and waits for them,
-   raising after 60s plus the time its bytes take at `min_read_bytes_per_s`. A
-   timeout leaves the reads in flight; restart the job.
+3. Pull: each generator rank submits multiple planned reads as one batch when
+   the PyTorch transport provides `read_batch_async`. NIXL can group pieces from
+   the same trainer and memory types into one request. Older PyTorch wheels
+   submit each read individually. The deadline is 60s plus the time this rank's
+   bytes take at `min_read_bytes_per_s`. A timeout can leave reads in flight;
+   restart the job.
 4. Load: the generator copies its weights from the prefetch buffers, unpacking
    packed keys (`copy_prefetched_`).
 
