@@ -26,6 +26,7 @@ Usage:
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 from typing import Any, TYPE_CHECKING
@@ -50,6 +51,7 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.tools.utils import device_type
 
 if TYPE_CHECKING:
+    from vllm.config.model import HfOverrides
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
@@ -215,6 +217,25 @@ def model_config_to_hf_config_dict(
     return hf
 
 
+def _is_speculative_draft_parse(hf_overrides: HfOverrides | None) -> bool:
+    """Whether vLLM is parsing a speculative draft's HF config, not the target's.
+
+    vLLM marks a draft parse by its `hf_overrides`:
+
+        SpeculativeConfig.hf_config_override                         -> True
+        partial(SpeculativeConfig._apply_composed_hf_override, ...)  -> True (the target has its own)
+        None, a dict, or the target's own callable                   -> False
+    """
+    from vllm.config.speculative import SpeculativeConfig
+
+    if isinstance(hf_overrides, functools.partial):
+        hf_overrides = hf_overrides.func
+    return hf_overrides in (
+        SpeculativeConfig.hf_config_override,
+        SpeculativeConfig._apply_composed_hf_override,
+    )
+
+
 def register_to_vllm(
     model_config: Decoder.Config,
     *,
@@ -239,7 +260,9 @@ def register_to_vllm(
          and forwards them when vLLM constructs the model.
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
-         produces the HF-shaped ``PretrainedConfig`` from ``model_config``.
+         produces the HF-shaped ``PretrainedConfig`` from ``model_config``. A
+         speculative draft's parse goes to vLLM's HF parser instead
+         (``_is_speculative_draft_parse``).
       3. ``TorchTitanModelArchConfigConvertor`` with vLLM's arch config
          converters under ``TORCHTITAN_MODEL_TYPE``. It reports MLA when the
          HF config has ``kv_lora_rank``, which ``model_config_to_hf_config_dict``
@@ -290,7 +313,11 @@ def register_to_vllm(
     # transformers internally, so this keeps torchtitan free of a direct
     # ``transformers`` import — when vLLM eventually drops it, this path
     # disappears with it.
-    from vllm.transformers_utils.config import PretrainedConfig, register_config_parser
+    from vllm.transformers_utils.config import (
+        get_config_parser,
+        PretrainedConfig,
+        register_config_parser,
+    )
     from vllm.transformers_utils.config_parser_base import ConfigParserBase
     from vllm.transformers_utils.model_arch_config_convertor import (
         MODEL_ARCH_CONFIG_CONVERTORS,
@@ -363,6 +390,18 @@ def register_to_vllm(
             code_revision=None,
             **kwargs,
         ):
+            if _is_speculative_draft_parse(kwargs["hf_overrides"]):
+                # vLLM parses the MTP draft's config with the target's config_format. The
+                # draft is vLLM's own model (e.g. Qwen3_5MTP), so it needs the checkpoint's.
+                # TODO: drop once vLLM's SpeculativeConfig takes a draft config_format.
+                # No vLLM issue filed yet.
+                return get_config_parser("hf").parse(
+                    model,
+                    trust_remote_code,
+                    revision=revision,
+                    code_revision=code_revision,
+                    **kwargs,
+                )
             config_dict = model_config_to_hf_config_dict(
                 model_config, serves_images=vision_processor is not None
             )

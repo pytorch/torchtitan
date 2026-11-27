@@ -8,12 +8,17 @@
 
 from collections.abc import Set
 from contextlib import nullcontext
+from dataclasses import replace
 
-from vllm.config import CUDAGraphMode
+import torch
+from torch import nn
+from torch.distributed.tensor import DTensor
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.utils.math_utils import round_up
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
@@ -107,6 +112,9 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
 class TorchTitanGPUModelRunner(GPUModelRunner):
     """V1 runner with sequence-parallel padding and FULL-graph decode specialization."""
 
+    # The last step's accepted-token count per request, kept by _update_states for _prepare_inputs.
+    _accepted_counts_by_request: dict[str, int] | None = None
+
     def load_model(self, load_dummy_weights: bool = False) -> None:
         super().load_model(load_dummy_weights)
         assert not self.cudagraph_dispatcher.keys_initialized
@@ -197,6 +205,27 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
                 key for key in keys[CUDAGraphMode.FULL] if not key.uniform
             }
 
+    def _update_states(self, scheduler_output: SchedulerOutput):
+        # Under async scheduling, the last step's accepted-token count copy can land before or after vLLM moves
+        # rows (condense, the decode/prefill reorder), and vLLM then gathers each row's count by its last-step
+        # row. A moved row can then read another request's count. So wait for the copy before any row moves,
+        # and keep the counts by request for _prepare_inputs.
+        # TODO: drop this and its use in _prepare_inputs on the move to vLLM's model runner V2
+        #   (pytorch/torchtitan#5956), which keeps the counts on the GPU (vllm-project/vllm#63373 removed V1).
+        self._accepted_counts_by_request = None
+        if (
+            self.cache_config.mamba_cache_mode == "align"
+            and self.use_async_scheduling
+            and self.num_accepted_tokens_event is not None
+        ):
+            self.num_accepted_tokens_event.synchronize()
+            counts = self.input_batch.num_accepted_tokens_cpu
+            last_step_rows = self.input_batch.prev_req_id_to_index or {}
+            self._accepted_counts_by_request = {
+                req_id: int(counts[row]) for req_id, row in last_step_rows.items()
+            }
+        return super()._update_states(scheduler_output)
+
     def _prepare_inputs(self, scheduler_output: SchedulerOutput, *args, **kwargs):
         # vLLM writes num_decode_draft_tokens only on steps with drafts. Reset it, so a step without
         # drafts doesn't dispatch on the last step's counts (_determine_batch_execution_and_padding).
@@ -205,7 +234,21 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
             and not scheduler_output.scheduled_spec_decode_tokens
         ):
             self.num_decode_draft_tokens.np.fill(-1)
-        return super()._prepare_inputs(scheduler_output, *args, **kwargs)
+        outputs = super()._prepare_inputs(scheduler_output, *args, **kwargs)
+
+        if self._accepted_counts_by_request is not None:
+            # Put back the accepted-token counts kept in _update_states: preprocess_mamba and GDN's verify rows
+            # start from the state at offset count - 1. A row that didn't sample in the last step (new, re-added,
+            # a prefill in progress) has count 1.
+            counts = self.input_batch.num_accepted_tokens_cpu
+            last_step_rows = self.input_batch.prev_req_id_to_index or {}
+            for row, req_id in enumerate(self.input_batch.req_ids):
+                counts[row] = (
+                    self._accepted_counts_by_request[req_id]
+                    if req_id in last_step_rows
+                    else 1
+                )
+        return outputs
 
     def _determine_batch_execution_and_padding(
         self,
@@ -301,13 +344,85 @@ class TorchTitanGPUWorker(GPUWorker):
             )
 
         # GPUWorker imports its runner class inside init_device and provides no
-        # runner factory. Scope the class substitution to that construction.
+        # runner factory; the runner builds its MTP drafter the same way. Scope the
+        # class substitutions to that construction.
         original_runner_cls = vllm_gpu_model_runner.GPUModelRunner
+        original_proposer_cls = vllm_gpu_model_runner.EagleProposer
         vllm_gpu_model_runner.GPUModelRunner = TorchTitanGPUModelRunner
+        vllm_gpu_model_runner.EagleProposer = TorchTitanEagleProposer
         try:
             super().init_device()
         finally:
             vllm_gpu_model_runner.GPUModelRunner = original_runner_cls
+            vllm_gpu_model_runner.EagleProposer = original_proposer_cls
+
+
+class TorchTitanEagleProposer(EagleProposer):
+    """vLLM's MTP drafter, built next to a TorchTitan target.
+
+    model config      the draft's own: the target's is TorchTitan's HF-shaped config
+    embed_tokens      shares storage with the target's `tok_embeddings.weight`
+    lm_head           shares storage with the target's `lm_head.weight`
+    mtp.* layers      the checkpoint's weights: model state dict loads leave them alone
+    """
+
+    # TODO: on vLLM's V2 runner (vLLM >= 0.34, pytorch/torchtitan#5956), subclass
+    # MTPSpeculator instead and register it with register_speculative_method.
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        runner: GPUModelRunner | None = None,
+    ) -> None:
+        super().__init__(vllm_config=vllm_config, device=device, runner=runner)
+        # The overrides below assume Qwen3.5's draft layout: `model.embed_tokens` and one
+        # top-level `lm_head`. DeepSeek-style drafts keep a head per MTP layer.
+        if self.draft_model_config.architecture not in ("Qwen3_5MTP", "Qwen3_5MoeMTP"):
+            raise ValueError(
+                "num_speculative_tokens supports Qwen3.5-architecture MTP drafts, got "
+                f"{self.draft_model_config.architecture}"
+            )
+
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        # vLLM's MTP models read their HF config from `vllm_config.model_config`.
+        return replace(
+            super()._create_draft_vllm_config(),
+            model_config=self.draft_model_config,
+        )
+
+    # TODO: drop the two overrides below once vLLM's drafter can ask the target for its
+    # embedding and lm_head, as SGLang's `get_embed_and_head` does. vLLM finds them by HF
+    # attribute names, which TorchTitan's model doesn't have. No vLLM issue filed yet.
+
+    def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
+        _alias_draft_weight(
+            draft_weight=self.model.model.embed_tokens.weight,
+            target_weight=target_language_model.model.tok_embeddings.weight,
+        )
+
+    def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
+        _alias_draft_weight(
+            draft_weight=self.model.lm_head.weight,
+            target_weight=target_language_model.model.lm_head.weight,
+        )
+
+
+def _alias_draft_weight(
+    draft_weight: nn.Parameter, target_weight: torch.Tensor
+) -> None:
+    """Point `draft_weight` at the target's storage, which model state dict loads update in place."""
+    if isinstance(target_weight, DTensor):
+        target_weight = target_weight.to_local()
+    if (
+        target_weight.shape != draft_weight.shape
+        or target_weight.dtype != draft_weight.dtype
+    ):
+        raise ValueError(
+            f"MTP draft weight {tuple(draft_weight.shape)} {draft_weight.dtype} does not "
+            f"match the target's {tuple(target_weight.shape)} {target_weight.dtype}"
+        )
+    draft_weight.data = target_weight.detach()
 
 
 if device_type == "xpu":
@@ -326,7 +441,8 @@ if device_type == "xpu":
                 raise ValueError(
                     "TorchTitan's vLLM integration requires the V1 model runner"
                 )
-            # Same substitution as TorchTitanGPUWorker.init_device.
+            # TorchTitanGPUWorker.init_device's runner swap. No drafter swap: drafts
+            # need CUDA (`_validate_platform`).
             original_runner_cls = vllm_xpu_worker.XPUModelRunner
             vllm_xpu_worker.XPUModelRunner = TorchTitanXPUModelRunner
             try:

@@ -92,6 +92,7 @@ def add_extra_vllm_engine_args(
         "kv_transfer_config": "VLLMEngine.Config.kv_offload",
         "seed": "Generator.Config.debug.seed",
         "watermark": "VLLMEngine.Config.watermark",
+        "speculative_config": "VLLMEngine.Config.num_speculative_tokens",
     }
     owned_keys = sorted(
         extra_engine_args.keys()
@@ -135,6 +136,15 @@ def _validate_platform(
         raise ValueError(
             f"debug.batch_invariant is only verified on CUDA, got {device_type}."
         )
+
+    # Only TorchTitanGPUWorker installs TorchTitanEagleProposer. vLLM's own drafter
+    # looks up HF names (`model.embed_tokens`) that TorchTitan's model doesn't have.
+    if config.num_speculative_tokens > 0:
+        raise ValueError(
+            f"num_speculative_tokens={config.num_speculative_tokens} needs CUDA, "
+            f"got {device_type}."
+        )
+
     # TorchTitan's GDN/KDA backend runs Attention Gym's paged linear-attention
     # kernels, which are only verified on CUDA.
     if any(
@@ -217,11 +227,27 @@ class VLLMEngine(GenerationEngine):
         `VLLMSessionKVHolder`). With SimpleCPU offload configured, also send CPU
         cache release hints when sessions end. None disables both behaviors."""
 
+        num_speculative_tokens: int = 0
+        """Tokens the checkpoint's MTP head drafts per decode step; 0: off. The target
+        verifies them with rejection sampling, so the output follows the target's
+        distribution and the logprobs are the target's. Example: 3 emits 1 to 4 tokens
+        per step.
+
+        - Drafts: Qwen3.5-architecture MTP heads (vLLM's `Qwen3_5MTP`); others raise.
+        - Weights: the draft shares the target's embedding and lm_head storage, so it sees
+          their updates. Its own layers (`mtp.*`) keep the checkpoint's weights, so
+          acceptance can fall as the policy drifts.
+        - `cuda_graph.mode="FULL"` is not supported; use FULL_DECODE_ONLY.
+        - Not supported with `session_kv_holder`, `debug.batch_invariant`, generator data
+          parallelism > 1, models with a vision encoder or non-CUDA devices. `add_requests`
+          rejects prompts under 2 tokens."""
+
         @property
         def uses_mooncake_store(self) -> bool:
             return isinstance(self.kv_offload, MooncakeStoreKVOffloadConfig)
 
-        def __post_init__(self):
+        def __post_init__(self) -> None:
+            GenerationEngine.Config.__post_init__(self)
             if (
                 isinstance(self.kv_offload, SimpleCPUKVOffloadConfig)
                 and self.extra_engine_args.get("enable_prefix_caching") is False
@@ -229,6 +255,17 @@ class VLLMEngine(GenerationEngine):
                 raise ValueError(
                     "SimpleCPUOffloadConnector requires prefix caching: it saves and "
                     "loads KV blocks by their prefix hashes."
+                )
+
+            if self.num_speculative_tokens < 0:
+                raise ValueError(
+                    f"num_speculative_tokens must be >= 0, got {self.num_speculative_tokens}"
+                )
+            if self.num_speculative_tokens > 0 and self.cuda_graph.mode == "FULL":
+                raise ValueError(
+                    f"num_speculative_tokens={self.num_speculative_tokens} needs "
+                    'cuda_graph.mode="FULL_DECODE_ONLY" or "NONE": FULL graphs with drafts '
+                    "are not supported"
                 )
 
     def __init__(
@@ -275,6 +312,30 @@ class VLLMEngine(GenerationEngine):
             raise ValueError(
                 "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False: vLLM "
                 "cannot reset the prefix cache while blocks are held"
+            )
+        if config.num_speculative_tokens > 0 and debug.batch_invariant:
+            # TODO: support it once the verify step runs the trainer's kernels.
+            raise ValueError(
+                f"num_speculative_tokens={config.num_speculative_tokens} needs "
+                "debug.batch_invariant=False: the target verifies 1 + k tokens per step "
+                "with kernels the trainer does not run"
+            )
+        if config.num_speculative_tokens > 0 and parallelism.data_parallel_degree > 1:
+            # TODO: support drafts at DP > 1 once tested: a rank's verify graph padded to a peer's size
+            # takes the packed graph (TorchTitanLinearAttentionMetadataBuilder._build_with_drafts), and
+            # idle ranks run dummy batches.
+            raise ValueError(
+                f"num_speculative_tokens={config.num_speculative_tokens} needs "
+                f"data_parallel_degree=1, got {parallelism.data_parallel_degree}: drafts at "
+                "DP > 1 are untested (verify graphs padded to a peer rank's size, idle ranks' "
+                "dummy batches)"
+            )
+        if config.num_speculative_tokens > 0 and vision_processor is not None:
+            # TODO: vLLM's drafter reads the image token id from the target's config
+            # (SpecDecodeBaseProposer.load_model); support vision models once tested.
+            raise ValueError(
+                f"num_speculative_tokens={config.num_speculative_tokens} does not "
+                "support models with a vision encoder yet"
             )
         validate_ep_token_dispatchers(
             model,
@@ -394,6 +455,7 @@ class VLLMEngine(GenerationEngine):
         """Build the vLLM ``EngineArgs`` (see ``GenerationEngine`` for the arguments;
         ``serves_images``: the engine has a vision processor)."""
         enable_ep = parallelism.expert_parallel_degree > 1
+        attention_backend = vllm_attention_backend(model)
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
             # config is sourced from TorchTitan's model config via
@@ -421,7 +483,7 @@ class VLLMEngine(GenerationEngine):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=gpu_memory_limit,
             enforce_eager=self.config.cuda_graph.mode == "NONE",
-            attention_config=AttentionConfig(backend=vllm_attention_backend(model)),
+            attention_config=AttentionConfig(backend=attention_backend),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
             enable_cumem_allocator=False,
@@ -477,12 +539,22 @@ class VLLMEngine(GenerationEngine):
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
+        if self.config.num_speculative_tokens > 0:
+            engine_kwargs["speculative_config"] = {
+                "method": "mtp",
+                "num_speculative_tokens": self.config.num_speculative_tokens,
+                # The draft's attention layer must take the target's page size. vLLM's
+                # own pick (FlashInfer) has no block size in common with CUSTOM's
+                # 128-token pages (FA4 on SM100).
+                "attention_backend": attention_backend,
+            }
         vllm_compilation_config = self.config.cuda_graph.get_vllm_compilation_config(
             max_num_seqs=max_num_seqs,
             max_model_len=model.max_context_length,
             max_num_batched_tokens=max_num_batched_tokens,
             expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
             enable_sequence_parallel=parallelism.enable_sequence_parallel,
+            num_speculative_tokens=self.config.num_speculative_tokens,
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
@@ -543,15 +615,27 @@ class VLLMEngine(GenerationEngine):
         rejected_requests: list[tuple[str, Exception]] = []
         for request in requests:
             # Rejected, not raised: the request's `generate` call fails and the engine keeps
-            # serving. Both checks run before LLMEngine.add_request registers the request,
+            # serving. These checks run before LLMEngine.add_request registers the request,
             # so a rejection leaves no engine state:
+            #   - a 1-token prompt with drafts (below);
             #   - `_preprocess_images`: no vision processor, or an image file does not decode;
             #   - vLLM's validation (prompt length, sampling params, token ids): render_cmpl
             #     and InputProcessor.process_inputs raise VLLMClientError (not a ValueError
             #     subclass) or ValueError (recheck on a vLLM upgrade).
-            # Both are deterministic and rank 0 broadcasts the same requests to every TP
+            # All are deterministic and rank 0 broadcasts the same requests to every TP
             # rank, so all ranks reject the same ones; otherwise their collectives hang.
             try:
+                # With drafts, vLLM pads a 1-token prompt with placeholder drafts, which GDN's
+                # verify kernels can't run (TorchTitanLinearAttentionMetadataBuilder raises).
+                if (
+                    self.config.num_speculative_tokens > 0
+                    and len(request.prompt.token_ids) < 2
+                ):
+                    raise ValueError(
+                        f"{request.request_id} has a {len(request.prompt.token_ids)}-token "
+                        f"prompt; num_speculative_tokens={self.config.num_speculative_tokens} "
+                        "needs at least 2 tokens"
+                    )
                 sampling_params = _build_sampling_params(request.sampling)
                 if self._coordinate_kv_offload:
                     # shared_request_id is a copy of Titan's request.request_id,
@@ -724,6 +808,9 @@ class VLLMEngine(GenerationEngine):
     ) -> None:
         """Fetch the model state dict into the model's weights one FSDP group at a time, and
         reset the KV cache (and, for image prompts, vLLM's encoder cache) when configured."""
+        # TODO: with num_speculative_tokens > 0, also load a trained MTP head (`mtp.*`)
+        # into the drafter, once Qwen3.5 has an MTP module and loss, e.g. by inheriting
+        # `MTPDecoder` (torchtitan/models/common/mtp.py) as DeepSeek-V3 and V4 do.
         self._get_model().model_state_dict_loader.load(fetch)
         if self._reset_kv_cache_on_model_state_dict_load:
             # Always reset running requests too: the only reason to reset is a strict

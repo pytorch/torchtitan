@@ -89,10 +89,6 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         self.num_speculative_tokens = (
             speculative_config.num_speculative_tokens if speculative_config else 0
         )
-        # vLLM speculative decoding retains one state per draft position and
-        # commits the accepted state; Attention Gym currently mutates one slot.
-        if self.num_speculative_tokens != 0:
-            raise ValueError("Attention Gym GDN does not support speculative decoding.")
 
         self.num_k_heads = config.num_k_heads
         self.num_v_heads = config.num_v_heads

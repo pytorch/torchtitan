@@ -87,6 +87,8 @@ class VLLMSessionKVHolder(Configurable):
             raise ValueError(
                 "session_kv_holder does not support partial-block prefix hits"
             )
+        # TODO: pytorch/torchtitan#5919 replaces this holder with a session KV evictor that
+        #   runs with MTP drafts; this check goes with it.
         if scheduler.vllm_config.speculative_config is not None:
             raise ValueError("session_kv_holder does not support speculative decoding")
         self._scheduler = scheduler
