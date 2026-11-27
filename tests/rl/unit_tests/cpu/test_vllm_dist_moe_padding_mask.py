@@ -173,4 +173,7 @@ def test_runner_publishes_the_unpadded_count_before_vllm_pads():
     assert model.published == [31]
     parent.assert_called_once()
     assert parent.call_args.args[0] == 31
-    assert parent.call_args.kwargs == {"force_eager": True}
+    assert parent.call_args.kwargs == {
+        "force_eager": True,
+        "force_uniform_decode": None,
+    }

@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
     TorchTitanLinearAttentionBackend,
+    TorchTitanLinearAttentionMetadataBuilder,
 )
 from torchtitan.tools.utils import device_type
 
@@ -110,6 +111,41 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         assert not self.cudagraph_dispatcher.keys_initialized
         self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
 
+    def initialize_metadata_builders(
+        self, kv_cache_config, kernel_block_sizes: list[int]
+    ) -> None:
+        super().initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
+        # vLLM passes accepted counts to builders only on steps with drafts, but refreshes this buffer in
+        # batch order on every step (GPUModelRunner._prepare_inputs, before its drafts branch). GDN with
+        # drafts reads it on steps whose drafts were all trimmed.
+        for builder in self._linear_attention_builders():
+            builder.runner_num_accepted_tokens = self.num_accepted_tokens.gpu
+
+    def calculate_reorder_batch_threshold(self) -> None:
+        super().calculate_reorder_batch_threshold()
+        # With drafts, GDN's verify kernels read only the first tokens of a step, so rows with
+        # at most 1 + k tokens must lead every batch (TorchTitanLinearAttentionMetadataBuilder).
+        if (
+            self.uniform_decode_query_len > 1
+            and self._linear_attention_builders()
+            and self.reorder_batch_threshold != self.uniform_decode_query_len
+        ):
+            raise RuntimeError(
+                f"GDN with drafts needs a batch-reorder threshold of "
+                f"{self.uniform_decode_query_len} (1 + k); the attention builders give "
+                f"{self.reorder_batch_threshold}"
+            )
+
+    def _linear_attention_builders(
+        self,
+    ) -> list[TorchTitanLinearAttentionMetadataBuilder]:
+        return [
+            builder
+            for group in self._attn_group_iterator()
+            if group.backend is TorchTitanLinearAttentionBackend
+            for builder in group.metadata_builders
+        ]
+
     def _dummy_run(
         self,
         num_tokens: int,
@@ -160,7 +196,13 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
                 key for key in keys[CUDAGraphMode.FULL] if not key.uniform
             }
 
-    def _determine_batch_execution_and_padding(self, num_tokens: int, *args, **kwargs):
+    def _determine_batch_execution_and_padding(
+        self,
+        num_tokens: int,
+        *args,
+        force_uniform_decode: bool | None = None,
+        **kwargs,
+    ):
         """Tell the model how many of this step's tokens are real, before padding.
 
         vLLM calls this once before every forward: from ``execute_model`` for a
@@ -171,22 +213,32 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         equalization). The model turns the count into a padding mask, which keeps
         those rows off Dist-MoE's network; graph replay reads the value published
         for the real step. Linear attention (GDN/KDA) builders then learn whether
-        the step replays a packed FULL graph.
+        the step replays a packed or a uniform FULL graph.
         """
         self.get_model().set_num_valid_tokens(num_tokens)
+
+        # With drafts, linear-attention builders read this flag to stage dummy batches (null slots).
+        # vLLM passes force_uniform_decode only from _dummy_run; real steps pass None.
+        dummy_run_uniform = force_uniform_decode
+
         result = super()._determine_batch_execution_and_padding(
-            num_tokens, *args, **kwargs
+            num_tokens,
+            *args,
+            force_uniform_decode=force_uniform_decode,
+            **kwargs,
         )
         # TODO: drop once vLLM passes the dispatched (cudagraph_mode, batch_descriptor)
         # to AttentionMetadataBuilder.build.
         cudagraph_mode, batch_descriptor = result[:2]
-        replays_packed_graph = (
-            cudagraph_mode == CUDAGraphMode.FULL and not batch_descriptor.uniform
-        )
-        for group in self._attn_group_iterator():
-            if group.backend is TorchTitanLinearAttentionBackend:
-                for builder in group.metadata_builders:
-                    builder.replays_packed_graph = replays_packed_graph
+        replays_full_graph = cudagraph_mode == CUDAGraphMode.FULL
+        for builder in self._linear_attention_builders():
+            builder.dummy_run_uniform = dummy_run_uniform
+            builder.replays_packed_graph = (
+                replays_full_graph and not batch_descriptor.uniform
+            )
+            builder.replays_uniform_graph = (
+                replays_full_graph and batch_descriptor.uniform
+            )
         return result
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:

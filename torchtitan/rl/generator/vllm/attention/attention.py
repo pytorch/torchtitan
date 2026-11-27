@@ -107,9 +107,14 @@ class TorchTitanVarlenInnerAttentionBackend(_FA4PageSize, FlashAttentionBackend)
             FlashAttentionMetadataBuilder
         ):
             _cudagraph_support = AttentionCGSupport.ALWAYS
-            # Single-token rows first: TorchTitanVarlenInnerAttentionImpl.forward runs them
-            # as their own FA4 call.
-            reorder_batch_threshold = 1
+
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                # Rows of at most 1 + k tokens first (1 without drafts):
+                # TorchTitanVarlenInnerAttentionImpl.forward runs the leading single-token
+                # rows as their own FA4 call, and with drafts GDN's verify kernels read
+                # only the first tokens (TorchTitanLinearAttentionMetadataBuilder).
+                self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         return TorchTitanVarlenInnerAttentionMetadataBuilder
 
@@ -258,7 +263,8 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         # step and run 3-8x slower (e.g. at head dim 256, when the GQA ratio does not
         # divide 128, FA4 turns PackGQA off above 128 query tokens). Until FA4 decides per
         # sequence, run those rows as their own call. The builder puts them first
-        # (reorder_batch_threshold = 1), so clamping cu_seqlens_q at their token count
+        # (reorder_batch_threshold = 1; with drafts 1 + k, so a single-token row behind
+        # verify rows runs in the second call), so clamping cu_seqlens_q at their token count
         # splits the batch on device, inside CUDA graphs too. Each call gets the other
         # call's rows with zero KV length, since FA4 can still process the KV of a row
         # that has no query tokens:
