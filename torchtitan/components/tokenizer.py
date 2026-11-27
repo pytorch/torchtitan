@@ -226,9 +226,9 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 with open(merges_txt_path, "r") as f:
                     for line in f:
                         line = line.strip()
-                        if line and not line.startswith(
-                            "#"
-                        ):  # Skip comments and empty lines
+                        # Only the "#version" header is a comment; merges
+                        # like "# #" (which build "##") start with "#" too.
+                        if line and not line.startswith("#version"):
                             parts = line.split()
                             if len(parts) >= 2:
                                 merges.append((parts[0], parts[1]))
