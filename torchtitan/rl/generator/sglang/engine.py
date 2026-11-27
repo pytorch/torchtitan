@@ -974,21 +974,22 @@ class _ForwardTokenCounts:
         # TODO: SGLang reports no CUDA graph padding counts, so this wraps a method of
         # each runner's buffers, private attributes included. MTP draft runners are not
         # counted.
-        runners = {
-            id(runner): runner
-            for runner in (
-                model_runner.eager_runner,
-                model_runner.prefill_cuda_graph_runner,
-                model_runner.decode_cuda_graph_runner,
-            )
-            if runner is not None
-        }
-        for runner in runners.values():
+        # One wrap per registry: SGLang may hand its eager runner as the prefill runner.
+        registries = {}
+        for runner in (
+            model_runner.eager_runner,
+            model_runner.prefill_cuda_graph_runner,
+            model_runner.decode_cuda_graph_runner,
+        ):
+            if runner is None:
+                continue
             registry = (
                 runner._eager_registry
                 if isinstance(runner, EagerRunner)
                 else runner.buffer_registry
             )
+            registries[id(registry)] = registry
+        for registry in registries.values():
             registry.fill_from = self._counting(registry.fill_from)
 
     def pop(self) -> tuple[int, int]:
@@ -1002,8 +1003,11 @@ class _ForwardTokenCounts:
         def counting_fill_from(
             forward_batch, *, raw_num_tokens: int, padded_num_tokens: int, **kwargs
         ) -> None:
-            self._num_unpadded_tokens += raw_num_tokens
-            self._num_padded_tokens += padded_num_tokens
+            # An idle attention-DP rank replays a graph with no real token: no real batch
+            # was padded.
+            if raw_num_tokens > 0:
+                self._num_unpadded_tokens += raw_num_tokens
+                self._num_padded_tokens += padded_num_tokens
             fill_from(
                 forward_batch,
                 raw_num_tokens=raw_num_tokens,

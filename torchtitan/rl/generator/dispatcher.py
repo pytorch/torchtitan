@@ -426,9 +426,10 @@ def _prepare_generation_request_metrics(inputs: RequestMetricsInputs) -> list[m.
         for metric in (m.Metric(key, m.Mean(value)), m.Metric(key, m.Max(value)))
     ]
     if inputs.num_engine_padded_tokens > 0:
-        # Covers every request in the engine since the previous carrier, training and
-        # validation alike. Weighted by forward tokens. Eager steps pad only for sequence
-        # parallelism.
+        # Covers every forward in the engine since the previous carrier, whichever
+        # requests ran in it. A validation carrier's value is logged under
+        # validation_generator/ (the controller prefixes validation's metrics). Weighted
+        # by forward tokens. Eager steps pad only for sequence parallelism.
         num_paddings = (
             inputs.num_engine_padded_tokens - inputs.num_engine_unpadded_tokens
         )
