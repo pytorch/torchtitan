@@ -57,6 +57,14 @@ __all__ = [
 
 _NSCoefficients = tuple[float, float, float]
 _NSCoefficientSchedule = _NSCoefficients | tuple[_NSCoefficients, ...]
+# (batch shape, dtype, device, ns_coefficients, ns_steps, eps)
+_NSGraphKey = tuple[
+    tuple[int, ...], torch.dtype, torch.device, _NSCoefficientSchedule, int, float
+]
+# Newton-Schulz on at most this many elements (4 MiB in BF16) is launch-bound on
+# H100: a CUDA-graph replay is 3-8x faster. From about 4M elements the GEMMs
+# dominate and a replay gains nothing.
+_NS_CUDA_GRAPH_MAX_NUMEL = 1 << 21
 
 
 def _is_ns_coefficient_triple(coefficients: object) -> bool:
@@ -200,6 +208,10 @@ class DistMuon(Optimizer):
     share scratch with a separate CUDA-graph private pool. Parameters, optimizer
     state, and communication resources remain owned.
 
+    Newton-Schulz on CUDA matrix batches of at most ``_NS_CUDA_GRAPH_MAX_NUMEL``
+    elements replays CUDA graphs. Their static input buffers and private pool
+    stay allocated between updates.
+
     ``ns_device`` selects where Newton-Schulz runs. ``None`` keeps the storage
     device, where each parameter's local shard lives (the host under FSDP2 CPU
     offload). ``"accelerator"`` copies each compute view to the current
@@ -232,6 +244,7 @@ class DistMuon(Optimizer):
         ns_device: Literal["accelerator"] | None = None,
     ) -> None:
         self._ns_device = self._resolve_ns_device(ns_device)
+        self._newton_schulz_graphs = _NewtonSchulzGraphs()
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -646,6 +659,7 @@ class DistMuon(Optimizer):
             ns_coefficients=group["ns_coefficients"],
             ns_steps=group["ns_steps"],
             eps=group["eps"],
+            newton_schulz_graphs=self._newton_schulz_graphs,
         )
         if staged is not compute:
             compute.copy_(staged, non_blocking=False)
@@ -1847,6 +1861,7 @@ def _compute_muon_direction(
     ns_coefficients: _NSCoefficientSchedule,
     ns_steps: int,
     eps: float,
+    newton_schulz_graphs: _NewtonSchulzGraphs,
 ) -> Tensor:
     """Compute independent matrix directions with relative shape scaling."""
     reference_ratio = (
@@ -1856,13 +1871,11 @@ def _compute_muon_direction(
     )
     for view in matrix_views:
         matrices = view.view_as_matrix_batch(prepared)
-        matrices.copy_(
-            _zeropower_via_newtonschulz(
-                matrices,
-                ns_coefficients=ns_coefficients,
-                ns_steps=ns_steps,
-                eps=eps,
-            )
+        newton_schulz_graphs.orthogonalize_(
+            matrices,
+            ns_coefficients=ns_coefficients,
+            ns_steps=ns_steps,
+            eps=eps,
         )
         if reference_ratio is None:
             continue
@@ -1990,6 +2003,150 @@ def _zeropower_via_newtonschulz(
     return result.transpose(-2, -1) if transposed else result
 
 
+def _orthogonalize_(
+    matrices: Tensor,
+    *,
+    ns_coefficients: _NSCoefficientSchedule,
+    ns_steps: int,
+    eps: float,
+) -> None:
+    """Replace a matrix batch with its Newton-Schulz polar factor."""
+    matrices.copy_(
+        _zeropower_via_newtonschulz(
+            matrices,
+            ns_coefficients=ns_coefficients,
+            ns_steps=ns_steps,
+            eps=eps,
+        )
+    )
+
+
+class _NewtonSchulzGraphs:
+    """CUDA-graph replays of Newton-Schulz on small matrix batches.
+
+    One Newton-Schulz call launches about 20 kernels, which dominates the
+    optimizer step of small models. A graph is keyed by batch shape, dtype,
+    device and Newton-Schulz settings and owns a static input buffer: a call
+    copies the batch in, replays, and copies the result back, so it does not
+    depend on where the runtime's released and regrown scratch lands. The
+    first call for a key runs eagerly, the second captures, later calls replay.
+    A replay runs the same kernels on the same values, so updates are bitwise
+    identical to eager. All graphs share one memory pool and replay one at a
+    time on the current stream.
+    """
+
+    def __init__(self) -> None:
+        self._seen_keys: set[_NSGraphKey] = set()
+        self._graphs: dict[_NSGraphKey, tuple[torch.cuda.CUDAGraph, Tensor]] = {}
+        # graph.pool()'s handle type is private to torch.cuda.graphs.
+        self._pool: Any = None
+        self._capture_stream: torch.cuda.Stream | None = None
+
+    def clear(self) -> None:
+        """Free all graphs and static buffers, e.g. for shapes a replan removed."""
+        self._seen_keys.clear()
+        self._graphs.clear()
+        self._pool = None
+
+    def orthogonalize_(
+        self,
+        matrices: Tensor,
+        *,
+        ns_coefficients: _NSCoefficientSchedule,
+        ns_steps: int,
+        eps: float,
+    ) -> None:
+        """Replace a matrix batch with its Newton-Schulz polar factor, replaying a
+        captured CUDA graph for small CUDA batches.
+
+        Args:
+            matrices: Matrix batch to orthogonalize in place.
+            ns_coefficients: Newton-Schulz polynomial coefficients.
+            ns_steps: Number of Newton-Schulz iterations.
+            eps: Norm floor before the first iteration.
+        """
+        # TODO: Use torch.accelerator.Graph once it supports CUDA, so other
+        # accelerators replay too; until then they run eagerly.
+        # https://github.com/pytorch/pytorch/issues/158827
+        if not matrices.is_cuda or matrices.numel() > _NS_CUDA_GRAPH_MAX_NUMEL:
+            _orthogonalize_(
+                matrices, ns_coefficients=ns_coefficients, ns_steps=ns_steps, eps=eps
+            )
+            return
+        key: _NSGraphKey = (
+            tuple(matrices.shape),
+            matrices.dtype,
+            matrices.device,
+            ns_coefficients,
+            ns_steps,
+            eps,
+        )
+        if key not in self._graphs:
+            if key not in self._seen_keys:
+                # The eager call also initializes cuBLAS before capture.
+                self._seen_keys.add(key)
+                _orthogonalize_(
+                    matrices,
+                    ns_coefficients=ns_coefficients,
+                    ns_steps=ns_steps,
+                    eps=eps,
+                )
+                return
+            self._graphs[key] = self._capture(
+                matrices, ns_coefficients=ns_coefficients, ns_steps=ns_steps, eps=eps
+            )
+        graph, static_matrices = self._graphs[key]
+        static_matrices.copy_(matrices)
+        graph.replay()
+        matrices.copy_(static_matrices)
+
+    def _capture(
+        self,
+        matrices: Tensor,
+        *,
+        ns_coefficients: _NSCoefficientSchedule,
+        ns_steps: int,
+        eps: float,
+    ) -> tuple[torch.cuda.CUDAGraph, Tensor]:
+        # Capture records kernels without running them, so the buffer needs no
+        # values yet: every replay copies the batch in first.
+        static_matrices = torch.empty(
+            matrices.shape, dtype=matrices.dtype, device=matrices.device
+        )
+        if self._capture_stream is None:
+            self._capture_stream = torch.cuda.Stream(matrices.device)
+        current_stream = torch.cuda.current_stream(matrices.device)
+        graph = torch.cuda.CUDAGraph()
+        # torch.cuda.graph() would synchronize and empty the allocator cache
+        # before every capture, so drive the capture directly, with the same
+        # stream ordering: the capture stream waits for pending work, warms up
+        # once (cuBLAS sets up its per-stream workspace outside the capture),
+        # and the current stream waits for it before the first replay.
+        self._capture_stream.wait_stream(current_stream)
+        with torch.cuda.stream(self._capture_stream):
+            static_matrices.copy_(matrices)
+            _orthogonalize_(
+                static_matrices,
+                ns_coefficients=ns_coefficients,
+                ns_steps=ns_steps,
+                eps=eps,
+            )
+            graph.capture_begin(pool=self._pool, capture_error_mode="thread_local")
+            try:
+                _orthogonalize_(
+                    static_matrices,
+                    ns_coefficients=ns_coefficients,
+                    ns_steps=ns_steps,
+                    eps=eps,
+                )
+            finally:
+                graph.capture_end()
+        current_stream.wait_stream(self._capture_stream)
+        if self._pool is None:
+            self._pool = graph.pool()
+        return graph, static_matrices
+
+
 def _after_load_state_dict(optimizer: Optimizer) -> None:
     muon = cast(DistMuon, optimizer)
     # Optimizer.load_state_dict restores group values such as ns_steps after
@@ -2001,6 +2158,7 @@ def _after_load_state_dict(optimizer: Optimizer) -> None:
         muon._bucket_plans,
         local_tensor_spec=muon._local_tensor_spec,
     )
+    muon._newton_schulz_graphs.clear()
     # init_optim_state may have validated placeholder state before the load.
     muon._first_step_validated = False
 
