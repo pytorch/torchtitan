@@ -281,10 +281,15 @@ class MuseSparkRMSNorm(RMSNorm):
     @dataclass(kw_only=True, slots=True)
     class Config(RMSNorm.Config):
         gain_center: float = 1.0
+        output_dtype: torch.dtype | None = None
+        """Dtype of the output; ``None`` keeps the input dtype. Casting inside
+        the compiled region saves the separate cast kernels of a caller that
+        needs another dtype."""
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.gain_center = config.gain_center
+        self.output_dtype = config.output_dtype
         # Compiled code reads gain_center from this tensor, so every graph takes it as an
         # input and saves the same tensors. A float is baked into layer 0's graph, and remat
         # recompute of layer 0 can run layer 1's graph, which saves different tensors
@@ -319,7 +324,7 @@ class MuseSparkRMSNorm(RMSNorm):
             effective_weight_D,
             self.eps,
         )
-        return output_TD.to(input_dtype)
+        return output_TD.to(self.output_dtype or input_dtype)
 
 
 class MuseSparkRMSNormWithInputScale(MuseSparkRMSNorm):

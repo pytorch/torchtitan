@@ -350,6 +350,7 @@ def _gain_norm(
     elementwise_affine: bool = True,
     gain_center: float = 1.0,
     eps: float = _NORM_EPS,
+    output_dtype: torch.dtype | None = None,
     sharding_config: ShardingConfig | None = None,
 ) -> MuseSparkRMSNorm.Config:
     return MuseSparkRMSNorm.Config(
@@ -357,6 +358,7 @@ def _gain_norm(
         eps=eps,
         elementwise_affine=elementwise_affine,
         gain_center=gain_center,
+        output_dtype=output_dtype,
         param_init=_GAIN_NORM_INIT if elementwise_affine else None,
         sharding_config=sharding_config,
     )
@@ -827,6 +829,9 @@ def _muse_spark_config(
 
     assert len(post_norm_gain_centers) == num_layers
 
+    # The pre-norms write the branch dtype inside their compiled region, so an
+    # FP32 residual stream needs no separate cast kernels in forward or backward.
+    branch_dtype = torch.bfloat16
     layers = []
     for layer_id, post_norm_gain_center in enumerate(post_norm_gain_centers):
         is_global_attention = layer_id in global_attention_layers
@@ -873,6 +878,7 @@ def _muse_spark_config(
                 ),
                 attention_norm=_gain_norm(
                     dim,
+                    output_dtype=branch_dtype,
                     sharding_config=norm_sharding,
                 ),
                 post_attention_norm=_gain_norm(
@@ -887,6 +893,7 @@ def _muse_spark_config(
                 ),
                 ffn_norm=_gain_norm(
                     dim,
+                    output_dtype=branch_dtype,
                     sharding_config=norm_sharding,
                 ),
                 post_ffn_norm=_input_scaled_gain_norm(
@@ -899,7 +906,7 @@ def _muse_spark_config(
                     dim, layer_id=layer_id, enable_sp=enable_sp
                 ),
                 feed_forward=feed_forward,
-                branch_dtype=torch.bfloat16,
+                branch_dtype=branch_dtype,
                 sharding_config=transformer_block_sharding_config(enable_sp=enable_sp),
             )
         )

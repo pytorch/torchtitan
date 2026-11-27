@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -95,6 +97,31 @@ def test_rmsnorm_region_matches_eager():
 
     for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
         torch.testing.assert_close(actual_tensor, expected_tensor, atol=2e-2, rtol=2e-2)
+
+
+def test_pre_norm_output_cast_is_bitwise():
+    # Flavors set the pre-norms' output_dtype to the branch dtype. Rounding inside the
+    # compiled region must match the block's cast after an FP32-output norm.
+    norm_config = build_model_config("debugmodel").layers[0].attention_norm
+    assert norm_config.output_dtype == torch.bfloat16
+    fused = norm_config.build().cuda().to(torch.bfloat16)
+    unfused = replace(norm_config, output_dtype=None).build().cuda().to(torch.bfloat16)
+    torch.nn.init.normal_(fused.weight, std=0.1)
+    unfused.load_state_dict(fused.state_dict())
+    stream_TD = torch.randn(64, fused.normalized_shape[0], device="cuda")
+
+    def output_and_grads(fn, norm):
+        return [*_run(fn, (stream_TD,)), norm.weight.grad]
+
+    try:
+        LocalCompileConfig(regions=["muse_spark_rmsnorm"]).apply()
+        actual = output_and_grads(fused, fused)
+        expected = output_and_grads(lambda x: unfused(x).to(torch.bfloat16), unfused)
+    finally:
+        LocalCompileConfig().apply()
+
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_tensor, expected_tensor, atol=0, rtol=0)
 
 
 # The input-scaled norm also runs on routed tokens, a different count per layer.
