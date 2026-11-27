@@ -150,10 +150,27 @@ def test_native_checkpoint_must_be_outside_source(monkeypatch, inputs, folder):
     config = _launch_config(monkeypatch, source, corpus, run)
     assert config.checkpointer is not None
 
-    with pytest.raises(
-        ValueError, match="native checkpoint must be outside the source"
-    ):
+    with pytest.raises(ValueError, match="checkpoint trees must be disjoint"):
         replace(config, checkpointer=replace(config.checkpointer, folder=folder))
+
+
+def test_resume_rejects_source_inside_retained_steps(monkeypatch, inputs):
+    monkeypatch.setattr(Trainer, "__init__", lambda self, config: None)
+    source, corpus, run = inputs
+    _launch_config(monkeypatch, *inputs).build()
+    relocated = run / "checkpoint" / "step-9" / "hf"
+    shutil.copytree(source, relocated)
+    with pytest.raises(ValueError, match="source checkpoint"):
+        _launch_config(monkeypatch, relocated, corpus, run).build()
+
+
+def test_resume_rejects_another_runs_checkpoint_folder(monkeypatch, inputs):
+    monkeypatch.setattr(Trainer, "__init__", lambda self, config: None)
+    _launch_config(monkeypatch, *inputs).build()
+    config = _launch_config(monkeypatch, *inputs, steps=20)
+    config.checkpointer.folder = "other-run/checkpoint"
+    with pytest.raises(ValueError, match="run's checkpoint directory"):
+        config.build()
 
 
 def test_refuses_to_adopt_unverified_native_checkpoint(monkeypatch, inputs):

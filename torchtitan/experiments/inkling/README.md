@@ -58,8 +58,8 @@ Supply a UTF-8 corpus with one document per line. The example uses short
 contexts to exercise training on a single GB10, not to establish convergence
 or long-context capacity. The recipe uses the standard Trainer, Grain data
 loader, next-token cross entropy, optimizer, and distributed checkpointing.
-The native step checkpoint saves the adapter and training state, not a second
-copy of the frozen model. Keep the source checkpoint for resume and allow about
+Native checkpoints live in `$run/checkpoint`, separate from the source snapshot.
+They save the adapter and training state, not a second copy of the frozen model. Keep the source checkpoint for resume and allow about
 19 GiB of disk space per merged HF export. The trainer records the original
 snapshot and corpus contents and the sequence length in `run-manifest.json`.
 It verifies them before loading a native checkpoint and again before export.

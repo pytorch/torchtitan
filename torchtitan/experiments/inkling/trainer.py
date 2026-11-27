@@ -113,14 +113,14 @@ class InklingTrainer(Trainer):
                     "The training output must be outside the source checkpoint"
                 )
             native_checkpoint = (run / self.checkpointer.folder).resolve()
-            if not native_checkpoint.is_relative_to(run):
+            if native_checkpoint.is_relative_to(source) or source.is_relative_to(
+                native_checkpoint
+            ):
                 raise ValueError(
-                    "The native checkpoint must be inside the training output"
+                    "The native and source checkpoint trees must be disjoint"
                 )
-            if native_checkpoint.is_relative_to(source):
-                raise ValueError(
-                    "The native checkpoint must be outside the source checkpoint"
-                )
+            if native_checkpoint != run / "checkpoint":
+                raise ValueError("Inkling requires the run's checkpoint directory")
 
     def __init__(self, config: Config) -> None:
         self._source = Path(config.hf_assets_path).resolve()
