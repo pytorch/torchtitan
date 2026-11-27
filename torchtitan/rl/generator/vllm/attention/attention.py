@@ -13,8 +13,11 @@ import spmd_types as spmd
 import torch
 from torch.nn.attention import current_flash_attention_impl
 from vllm.config import get_current_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
+from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType, MultipleOf
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
@@ -27,7 +30,7 @@ from vllm.v1.attention.backends.flash_attn_diffkv import (
     FlashAttentionDiffKVImpl,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache, KVCacheSpec
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
@@ -103,6 +106,43 @@ class TorchTitanVarlenInnerAttentionBackend(_FA4PageSize, FlashAttentionBackend)
         # name so the backend registry can look it up correctly.
         return "CUSTOM"
 
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        # The parent's fp8 check is about vLLM's own FlashAttention kernel, which has no fp8
+        # kernel at head dim 256. This backend runs FA4's fp8 forward, which needs SM100.
+        # TODO: stop hiding fp8 from the parent's check if this backend stops subclassing
+        # FlashAttentionBackend (kept for its metadata builder); keep the SM100 check.
+        if kv_cache_dtype is not None and is_quantized_kv_cache(kv_cache_dtype):
+            if device_capability.major != 10:
+                return (
+                    f"kv_cache_dtype={kv_cache_dtype!r} runs FA4's fp8 forward, which needs "
+                    f"an SM100-family GPU; got capability {device_capability}"
+                )
+            kv_cache_dtype = None
+
+        return super().supports_combination(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            use_mla,
+            has_sink,
+            use_sparse,
+            use_mm_prefix,
+            device_capability,
+        )
+
     @staticmethod
     def get_impl_cls():
         return TorchTitanVarlenInnerAttentionImpl
@@ -158,10 +198,36 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
     Custom vLLM attention backend impl using PyTorch's native FlashAttention varlen API.
     Instead of using vLLM's FlashAttention kernel, this implementation takes the kernel
     dependency from torch directly while supporting the same interface.
+    An fp8 KV cache calls FA4's fp8 forward instead (see `paged_varlen_attention_out`).
     """
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        *args,
+        **kwargs,
+    ) -> None:
+        # FlashAttentionImpl.__init__ applies the parent backend's fp8 check, which
+        # TorchTitanVarlenInnerAttentionBackend.supports_combination bypasses, so pass "auto".
+        # TODO: drop together with that bypass (see its TODO).
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            "auto",
+            *args,
+            **kwargs,
+        )
+        self.kv_cache_dtype = kv_cache_dtype
 
         # optional post-attention epilogue transform (out, lse) -> out
         # set by VLLMModelWrapper in vllm_wrapper.py
@@ -255,9 +321,12 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         # varlen attention before splitting them.
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
-        assert not self.kv_cache_dtype.startswith(
-            "fp8"
-        ), "FP8 KV cache not supported yet."
+        is_fp8 = is_quantized_kv_cache(self.kv_cache_dtype)
+        if is_fp8:
+            # The cache holds e4m3 bytes, and vLLM's Attention layer quantized the query. Every
+            # scale is 1: VLLMInnerAttention builds vLLM's Attention without a quant_config.
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
 
         assert not attn_metadata.use_cascade, "Cascade not supported yet."
 
@@ -305,8 +374,10 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         # over 32 columns once query heads per KV head and tokens per row are each rounded up to a
         # power of two (6 query heads per KV head at 5 tokens: 8 x 8 = 64). If FA4 declines token
         # mode, fuse the tail and the merge into one Triton kernel.
+        # fp8 verify steps skip it: FA4's fp8 forward runs in the one varlen call below.
         if (
             is_uniform
+            and not is_fp8
             and max_seqlen_q == self.verify_query_len
             and seqused_k.shape[0] >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
             and current_flash_attention_impl() == "FA4"
@@ -608,6 +679,10 @@ class VLLMInnerAttention(InnerAttention):
                 scale=scale,
                 num_kv_heads=num_kv_heads,
                 cache_config=cache_config,
+                # TODO: an fp8 KV cache keeps vLLM's default scales of 1.0, so q, K and V values
+                # above 448 clip and values below 2^-6 lose precision. Calibrated per-layer scales
+                # would fix only those (not FA4's e4m3 rounding of P) and need a descales argument
+                # in `paged_varlen_attention_out`; the gain is not measured.
                 quant_config=None,
                 per_layer_sliding_window=config.sliding_window_size,
                 prefix=f"model.layers.{layer_id}.attention.inner_attention",
@@ -660,7 +735,12 @@ class VLLMInnerAttention(InnerAttention):
             # KV projection), but vLLM's cache writer assumes V heads are packed
             # with stride value_head_dim, so repack before updating the cache.
             v_THV = v_THV.contiguous()
-        out_TD = self.vllm_attn(q_THK, k_THK, v_THV)
+
+        if self.vllm_attn.query_quant is not None:
+            # With an fp8 KV cache, vLLM quantizes the query in a kernel that takes 2D input.
+            out_TD = self.vllm_attn(q_THK.flatten(1), k_THK, v_THV)
+        else:
+            out_TD = self.vllm_attn(q_THK, k_THK, v_THV)
 
         # vLLM's flash attention backend may pad the token count (e.g.
         # round up to an even number), which introduces a new symbolic
