@@ -186,7 +186,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             output_dir=tempfile.gettempdir(),
         )
         if cls.sync_weights_from_trainer:
-            _load_trainer_weights(cls.engine, cls.model, cls.precision)
+            load_trainer_weights(cls.engine, cls.model, cls.precision)
         tokenizer = AutoTokenizer.from_pretrained(config.hf_assets_path)
         cls.prompt_ids = make_prompt_tokens(
             cls.BATCH_SIZE, cls.PROMPT_LENGTH, tokenizer
@@ -228,7 +228,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         num_steps = 0
         while self.engine.has_unfinished_requests():
             if num_steps == load_at_step:
-                _load_trainer_weights(self.engine, self.model, self.precision)
+                load_trainer_weights(self.engine, self.model, self.precision)
             for result in self.engine.step():
                 finished[result.request_id] = result
             num_steps += 1
@@ -348,12 +348,12 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         self.assertFalse(
             torch.equal(self._trainer_logprobs(self.prompt_ids[0]), logprobs_before)
         )
-        _load_trainer_weights(self.engine, self.model, self.precision)
+        load_trainer_weights(self.engine, self.model, self.precision)
         type(self).policy_version += 1
         self._check_trainer_vs_sglang_decode(self.prompt_ids)
 
 
-def _load_trainer_weights(engine, model, precision) -> None:
+def load_trainer_weights(engine, model, precision) -> None:
     """Load the trainer model's weights into the engine, as a model state dict load."""
     trainer_state_dict = model.state_dict()
     # The trainer sends parameters in the generator's compute dtype, and buffers and

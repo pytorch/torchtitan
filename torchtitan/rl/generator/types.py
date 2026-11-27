@@ -91,6 +91,8 @@ class RequestMetricsInputs:
     first_token_latency: float = 0.0
     num_generation_tokens: int = 0
     num_preemptions: int = 0
+    # Decode steps that verified MTP drafts; 0 without drafts.
+    num_verify_steps: int = 0
 
 
 @dataclass(kw_only=True, slots=True)

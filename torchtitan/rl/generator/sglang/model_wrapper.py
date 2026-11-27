@@ -52,6 +52,7 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.sglang.attention.attention import SGLangInnerAttention
 from torchtitan.rl.generator.sglang.attention.gdn import SGLangInnerGDN
 from torchtitan.rl.generator.sglang.attention.kda import SGLangInnerKDA
+from torchtitan.rl.generator.sglang.registry import CONTEXT_LENGTH_MARGIN
 from torchtitan.tools.utils import round_up
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ def _replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Confi
     Only GDN, KDA and softmax attention with the varlen backend, full or sliding-window,
     are supported; other layers raise ``ValueError``. MLA layers keep their projection of
     the latent to per-head K/V, which SGLang caches. The inner attention keeps the
-    trainer attention's sharding config.
+    trainer attention's sharding config. RoPE caches grow to SGLang's context length.
     """
     from torchtitan.models.gpt_oss.model import GptOssAttention
 
@@ -165,6 +166,19 @@ def _replace_sglang_layer_configs(model_config: Decoder.Config) -> Decoder.Confi
             ),
             sharding_config=inner_cfg.sharding_config,
         )
+        # MLA attention configs (e.g. Kimi K3) have no ``rope`` field.
+        rope_cfg = getattr(attention_cfg, "rope", None)
+        if rope_cfg is not None:
+            # SGLang's context is CONTEXT_LENGTH_MARGIN tokens longer than the model's,
+            # and MTP verify steps run positions up to it.
+            attention_cfg = dataclasses.replace(
+                attention_cfg,
+                rope=dataclasses.replace(
+                    rope_cfg,
+                    max_context_length=rope_cfg.max_context_length
+                    + CONTEXT_LENGTH_MARGIN,
+                ),
+            )
         new_layers.append(
             dataclasses.replace(
                 layer_cfg,
@@ -429,6 +443,12 @@ class SGLangModelWrapper(Module):
         return self.logits_processor(
             input_ids, hidden_states, self.model.decoder.lm_head, forward_batch
         )
+
+    def get_embed_and_head(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """SGLang's model API: the token embedding and LM head weights that an MTP draft
+        shares. Model state dict loads write them in place, so the draft sees updates."""
+        decoder = self.model.decoder
+        return decoder.tok_embeddings.weight, decoder.lm_head.weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         """SGLang's model API. A no-op: the wrapper loaded its weights when built, and

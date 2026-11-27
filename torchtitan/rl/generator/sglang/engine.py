@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import gc
+import glob
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ from typing import Any, Literal
 import torch
 import torch.distributed as dist
 import triton
+from safetensors import safe_open
 from sglang.srt.layers.sampler import SGLANG_RETURN_ORIGINAL_LOGPROB
 from sglang.srt.managers.io_struct import (
     AbortReq,
@@ -47,6 +49,7 @@ from sglang.srt.utils.common import next_power_of_2
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import DebugConfig, PrecisionConfig
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.decoder import Decoder
@@ -73,6 +76,12 @@ from torchtitan.rl.generator.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Dense checkpoint architectures SGLang's ModelConfig builds a Qwen3.5 MTP draft for
+# (Qwen3_5ForCausalLMMTP) with speculative decoding on.
+_MTP_DRAFT_ARCHITECTURES = frozenset(
+    {"Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM"}
+)
 
 # ServerArgs fields that SGLangEngine sets itself or does not support, so
 # extra_server_args cannot set them. Every key that names CUDA graphs is also
@@ -109,6 +118,18 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         # SGLangEngine._awaiting_prefill).
         "max_queued_requests",
         "enable_unified_memory",
+        # A config file sends a parse to SGLang's HF parser (TorchTitanConfigParser).
+        "decrypted_config_file",
+        "decrypted_draft_config_file",
+        # Config.num_speculative_tokens sets these; extra_server_args cannot set any
+        # other "speculative_*" key either.
+        "speculative_algorithm",
+        "speculative_num_steps",
+        "speculative_eagle_topk",
+        "speculative_num_draft_tokens",
+        "speculative_use_rejection_sampling",
+        "speculative_draft_attention_backend",
+        "enable_linear_replayssm_spec",
     }
 )
 
@@ -147,10 +168,18 @@ class SGLangEngine(GenerationEngine):
         Without prefill graphs, prefill is bound by the eager model's CPU overhead.
         """
 
+        num_speculative_tokens: int = 0
+        """Tokens the checkpoint's MTP head drafts per decode step; 0: off. The model
+        verifies them with rejection sampling, so the output follows the model's
+        distribution and the logprobs are the model's. Example: 3 emits 1 to 4 tokens
+        per step. See the README (MTP speculative decoding) for memory, numerics and the
+        setups that raise."""
+
         extra_server_args: dict[str, Any] = field(default_factory=dict)
         """Additional keyword arguments passed to SGLang's ``ServerArgs``, for options
         without a dedicated field (e.g. SGLang's hierarchical cache). Keys that
-        TorchTitan sets itself, CUDA-graph keys included, raise a ``ValueError``."""
+        TorchTitan sets itself, CUDA-graph and speculative keys included, raise a
+        ``ValueError``."""
 
         def __post_init__(self) -> None:
             # cuda_graph owns SGLang's CUDA-graph settings: SGLang applies its
@@ -162,12 +191,32 @@ class SGLangEngine(GenerationEngine):
             owned_keys = sorted(
                 key
                 for key in self.extra_server_args
-                if key in _TORCHTITAN_SERVER_ARGS or "cuda_graph" in key
+                if key in _TORCHTITAN_SERVER_ARGS
+                or "cuda_graph" in key
+                or key.startswith("speculative_")
             )
             if owned_keys:
                 raise ValueError(
                     "extra_server_args cannot set ServerArgs that TorchTitan controls: "
                     f"{owned_keys}"
+                )
+            max_speculative_tokens = CONTEXT_LENGTH_MARGIN - 1
+            if not 0 <= self.num_speculative_tokens <= max_speculative_tokens:
+                # A verify step reads keys up to k tokens past a request's tokens, and
+                # SGLang's context is CONTEXT_LENGTH_MARGIN tokens above the model's.
+                raise ValueError(
+                    f"num_speculative_tokens must be in [0, {max_speculative_tokens}], "
+                    f"got {self.num_speculative_tokens}"
+                )
+            if self.num_speculative_tokens > 0 and self.extra_server_args.get(
+                "enable_mixed_chunk"
+            ):
+                # A mixed step decodes each running request as a 1-token prefill row
+                # on its state slot, which ReplaySSM verify leaves behind the request
+                # by up to a ring of accepted tokens.
+                raise ValueError(
+                    "enable_mixed_chunk would decode running requests from stale GDN "
+                    "states with num_speculative_tokens > 0: drop it"
                 )
             # A HiCache storage backend (L3) outlives a run and a new run's policy
             # versions (the cache salts) restart at 0, so a run could read KV that
@@ -285,6 +334,70 @@ class SGLangEngine(GenerationEngine):
             cuda_graph=config.cuda_graph != "none",
             deterministic=debug.deterministic,
         )
+        if config.num_speculative_tokens > 0:
+            if debug.batch_invariant:
+                # Batch-invariant mode patches the trainer's logprobs into SGLang's
+                # sampler (force_trainer_logprobs_for_batch_invariance); verify steps
+                # compute theirs in SGLang's compute_spec_logprobs.
+                raise ValueError(
+                    "num_speculative_tokens > 0 does not support debug.batch_invariant"
+                )
+
+            # Setups no MTP run has covered.
+            untested = []
+            if parallelism.tensor_parallel_degree > 1:
+                untested.append(
+                    f"tensor_parallel_degree={parallelism.tensor_parallel_degree}"
+                )
+
+            if parallelism.data_parallel_degree > 1:
+                untested.append(
+                    f"data_parallel_degree={parallelism.data_parallel_degree}"
+                )
+
+            if config.extra_server_args.get("enable_hierarchical_cache"):
+                untested.append("SGLang's hierarchical cache (HiCache, Mooncake)")
+
+            if model.first_moe is not None:
+                # Also: SGLangModelWrapper's max_num_tokens_per_step counts one decode
+                # token per running request; a verify step runs k + 1.
+                untested.append("MoE layers")
+
+            if any(isinstance(layer.attention, KDA.Config) for layer in model.layers):
+                untested.append("KDA layers (no verify path)")
+
+            if not any(
+                isinstance(layer.attention, GDN.Config) for layer in model.layers
+            ):
+                untested.append("a model without GDN layers")
+
+            if untested:
+                raise ValueError(
+                    "num_speculative_tokens > 0 is untested with "
+                    f"{'; '.join(untested)}; set num_speculative_tokens=0"
+                )
+
+            # SGLang builds the draft from the checkpoint's MTP head, as its Qwen3.5 MTP
+            # model for these architectures (ModelConfig's draft remap).
+            with open(os.path.join(model_path, "config.json")) as config_file:
+                architecture = json.load(config_file)["architectures"][0]
+            if architecture not in _MTP_DRAFT_ARCHITECTURES:
+                raise ValueError(
+                    "num_speculative_tokens > 0 is untested with a checkpoint of "
+                    f"architecture {architecture!r}: SGLang builds its Qwen3.5 MTP draft "
+                    f"for {sorted(_MTP_DRAFT_ARCHITECTURES)}; set num_speculative_tokens=0"
+                )
+
+            weight_names = set()
+            for path in glob.glob(os.path.join(model_path, "*.safetensors")):
+                with safe_open(path, framework="pt") as weights:
+                    weight_names.update(weights.keys())
+            if not any(name.startswith("mtp.") for name in weight_names):
+                raise ValueError(
+                    "num_speculative_tokens > 0 needs a checkpoint with an MTP head, "
+                    f"but no *.safetensors file in {model_path} has an mtp.* weight"
+                )
+
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
@@ -356,6 +469,8 @@ class SGLangEngine(GenerationEngine):
         self._dp_rank = get_parallel().attn_dp_rank
         logger.info("Building the SGLang scheduler...")
         self._scheduler = Scheduler(server_args, PortArgs.init_new(server_args))
+        if config.num_speculative_tokens > 0:
+            self._check_speculative_state_pool(max_num_seqs)
         # TODO(https://github.com/sgl-project/sglang/issues/48474): SGLang has no option
         # to drop the checkpoint generation config's EOS ids it adds to every request's
         # stops; the renderer's stop tokens (EOS included) are the only stops.
@@ -465,13 +580,42 @@ class SGLangEngine(GenerationEngine):
             skip_server_warmup=True,
             log_level="warning",
         )
-        if any(
+        num_speculative_tokens = self.config.num_speculative_tokens
+        if num_speculative_tokens == 0 and any(
             isinstance(layer.attention, LinearAttention.Config)
             for layer in model.layers
         ):
             # KV and GDN / KDA states share one pool, so memory one does not use can
             # hold the other (see the README). SGLang builds it for hybrid models only.
+            # With drafts, ReplaySSM needs SGLang's separate state pool: the unified
+            # one has no ReplaySSM rings at the pinned SGLang.
             server_kwargs["enable_unified_memory"] = True
+        if num_speculative_tokens > 0:
+            # TODO: build the draft from a TorchTitan Qwen3.5 MTP module, which drops the
+            # draft's config parse and GDN backend patches (registry.py). TorchTitan has
+            # no Qwen3.5 MTP module yet.
+            server_kwargs.update(
+                # NEXTN builds the checkpoint's MTP head as the draft (an EAGLE chain).
+                speculative_algorithm="NEXTN",
+                speculative_num_steps=num_speculative_tokens,
+                # One draft per position: TorchTitan's attention runs causal rows only.
+                speculative_eagle_topk=1,
+                speculative_num_draft_tokens=num_speculative_tokens + 1,
+                # The draft samples its tokens and the model keeps each with
+                # probability min(1, p_model / p_draft). SGLang's default keeps the
+                # draft's argmax with probability p_model, which accepts fewer at
+                # temperature 1.
+                speculative_use_rejection_sampling=True,
+                # The draft attends over the whole context k times per step.
+                speculative_draft_attention_backend="flashinfer",
+                # SGLang parses the draft's config with the model's parser; only the
+                # draft's parse carries this file (see TorchTitanConfigParser).
+                decrypted_draft_config_file=os.path.join(model_path, "config.json"),
+                # GDN verify keeps, per running request, a ring of the accepted
+                # tokens' records instead of one recurrent state per draft (576 MiB
+                # per request on Qwen3.5-27B at k = 3).
+                enable_linear_replayssm_spec=True,
+            )
         if self.config.cuda_graph == "full":
             # Full graphs also capture attention, whose eager CPU cost otherwise
             # dominates small prefills. SGLang runs a prefill batch eagerly if it
@@ -510,6 +654,31 @@ class SGLangEngine(GenerationEngine):
                 extra_config
             )
         return ServerArgs(**server_kwargs)
+
+    def _check_speculative_state_pool(self, max_num_seqs: int) -> None:
+        """Raise if SGLang built the GDN state pool for verify steps other than as asked.
+
+        ReplaySSM rings missing     SGLang dropped enable_linear_replayssm_spec
+        running requests < asked    SGLang's state cache cut max_running_requests
+        """
+        model_runner = self._scheduler.tp_worker.model_runner
+        state_pool = model_runner.attn_backend.linear_attn_backend.state_pool
+        if state_pool.mamba_cache.replayssm_d is None:
+            raise RuntimeError(
+                "SGLang built no ReplaySSM rings for the GDN verify "
+                "(enable_linear_replayssm_spec); see _patch_replayssm_gate"
+            )
+
+        num_running_requests = self._scheduler.max_running_requests
+        if num_running_requests < max_num_seqs:
+            raise ValueError(
+                f"SGLang keeps {num_running_requests} running requests, fewer than "
+                f"max_num_seqs={max_num_seqs}: its GDN state cache holds a "
+                "few state slots per running request (see its 'capped by the mamba "
+                "state cache' warning), with or without drafts. Ask for fewer, with "
+                "headroom, since the cap moves with free GPU memory: fewer rollouts in "
+                "flight per generator, or a higher gpu_memory_limit"
+            )
 
     def _init_event_loop(self) -> None:
         """Set up what SGLang's ``run_event_loop`` sets before its event loop."""
@@ -931,6 +1100,7 @@ def _metrics_inputs(
         - arrival_time,
         num_generation_tokens=num_generation_tokens,
         num_preemptions=req.retraction_count,
+        num_verify_steps=req.spec_verify_ct,
     )
 
 

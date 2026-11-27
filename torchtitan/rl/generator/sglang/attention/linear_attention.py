@@ -124,7 +124,8 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
     (``mamba_cache_indices``) and its query offsets, CUDA-graph buffers included; the
     subclasses run the trainer's Attention Gym convolution and recurrence on those
     slots, in place, as the vLLM engine's adapters do. Slot 0 is SGLang's padding slot,
-    which the kernels skip. Speculative decoding is not supported.
+    which the kernels skip. Only GDN verifies speculative drafts
+    (``TorchTitanGDNAttnBackend._forward_target_verify``).
     """
 
     def __init__(self, model_runner) -> None:
@@ -188,10 +189,6 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
         Returns:
             ``(convolved_1TC, state_indices, cu_seqlens, has_initial_state)``.
         """
-        if forward_batch.forward_mode.is_target_verify():
-            raise NotImplementedError(
-                "TorchTitan linear attention does not support speculative decoding"
-            )
         state_indices = self.forward_metadata.mamba_cache_indices.to(torch.int32)
         cu_seqlens = self.forward_metadata.query_start_loc
         has_initial_state = forward_batch.extend_prefix_lens > 0

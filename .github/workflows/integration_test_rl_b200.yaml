@@ -136,6 +136,10 @@ jobs:
               "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
               || failed_classes+=("$test_class")
           done
+          # MTP drafts need a checkpoint with an MTP head.
+          TORCHTITAN_QWEN3_5_0_8B_HF_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3.5-0.8B'))") \
+            torchrun --nproc-per-node=1 -m pytest tests/rl/unit_tests/gpu/test_sglang_mtp.py -v \
+            || failed_classes+=(MTP)
           if (( ${#failed_classes[@]} )); then
             echo "Failed SGLang test classes: ${failed_classes[*]}"
             exit 1

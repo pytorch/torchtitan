@@ -7,7 +7,8 @@
 """TorchTitan's Gated DeltaNet inside SGLang (see ``linear_attention.py``).
 
 Legend: T = tokens of the step, C = rank-local q|k|v channels, H = value heads,
-V = value head dim, W = conv kernel size (all rank-local under TP).
+V = value head dim, W = conv kernel size (all rank-local under TP); in an MTP verify
+step, B = requests and J = tokens per request (drafts + 1).
 """
 
 from __future__ import annotations
@@ -16,10 +17,18 @@ import dataclasses
 from dataclasses import dataclass
 
 import torch
+from sglang.kernels.ops.attention.linear.gdn_replayssm_spec_decode import (
+    gdn_replayssm_spec_decode,
+)
+from sglang.kernels.ops.mamba.causal_conv1d_triton import causal_conv1d_update
 from sglang.srt.configs.mamba_utils import (
     Mamba2CacheParams,
     Mamba2StateDType,
     Mamba2StateShape,
+)
+from sglang.srt.layers.attention.linear.utils import (
+    build_verify_intermediate_state_indices,
+    select_verify_intermediate_state_indices,
 )
 from sglang.srt.runtime_context import get_parallel, linear_attn_tp_size
 
@@ -90,6 +99,14 @@ class TorchTitanGDNConfig(TorchTitanLinearAttentionConfig):
 
 class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
     """SGLang's linear attention backend for TorchTitan's GDN layers."""
+
+    def __init__(self, model_runner) -> None:
+        super().__init__(model_runner)
+        # The per-draft conv windows of an MTP verify step: request i of the batch
+        # writes scratch row i.
+        self.verify_scratch_rows = build_verify_intermediate_state_indices(
+            self.req_to_token_pool.size, model_runner.device
+        )
 
     def forward_decode(
         self,
@@ -166,6 +183,9 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
     ) -> torch.Tensor:
         """Each request's new tokens, resuming the state of its cached prefix; returns
         ``(1, T, H, V)``."""
+        if forward_batch.forward_mode.is_target_verify():
+            return self._forward_target_verify(layer, forward_batch, mixed_qkv, a, b)
+
         conv_weight_CW, A_log_H, dt_bias_H = linear_attention_weights(layer)
         layer_cache = self.state_layer_cache(layer.layer_id)
         checkpoints = self.track_extend_states(
@@ -195,6 +215,107 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
             head_v_dim=layer.head_v_dim,
             **checkpoints,
         ).unsqueeze(0)
+
+    def _forward_target_verify(
+        self,
+        layer: SGLangRadixLinearAttention,
+        forward_batch,
+        mixed_qkv_TC: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+    ) -> torch.Tensor:
+        """Verify rows of an MTP step with SGLang's ReplaySSM kernels, k + 1 tokens per
+        request (its last token and k drafts); returns ``(1, T, H, V)``.
+
+        A request's recurrent state is a checkpoint plus a ring of its accepted tokens'
+        records. SGLang's commit after sampling (``commit_mamba_states_after_verify``)
+        keeps the accepted rows, and folds a full ring into the checkpoint:
+
+            slot:   checkpoint C, ring [t1 t2]         verify rows x, d1, d2, d3
+            verify: ring [t1 t2 | x d1 d2 d3]          -> x, d1 accepted, d2 rejected
+            commit: ring [t1 t2 x d1]; conv history <- the window after d1
+
+        Each row's conv window goes to the request's scratch row, which the commit
+        reads. Attention Gym has no verify kernels, so these are SGLang's.
+        """
+        # TODO: run verify rows on Attention Gym's GDN kernels once it has a multi-token
+        # verify kernel, so the trainer and the generator share the GDN decode numerics.
+        # No Attention Gym issue is filed yet.
+        conv_weight_CW, A_log_H, dt_bias_H = linear_attention_weights(layer)
+        layer_cache = self.state_layer_cache(layer.layer_id)
+        state_indices = self.forward_metadata.mamba_cache_indices
+        num_tokens = mixed_qkv_TC.shape[0]
+        num_tokens_per_request = forward_batch.spec_info.draft_token_num
+        num_requests = num_tokens // num_tokens_per_request
+        scratch_rows = select_verify_intermediate_state_indices(
+            self.verify_scratch_rows,
+            forward_batch.req_pool_indices,
+            state_indices[:num_requests] >= 0,
+            self.req_to_token_pool.size,
+        )[:num_requests]
+
+        # ======== Convolution ========
+        # SGLang's kernel takes [C, W - 1] conv histories with contiguous channels:
+        # transposed views of the pool's [W - 1, C].
+        convolved_BCJ = causal_conv1d_update(
+            mixed_qkv_TC.view(num_requests, num_tokens_per_request, -1).transpose(1, 2),
+            layer_cache.conv[0].transpose(-1, -2),
+            weight=conv_weight_CW,
+            bias=None,
+            activation="silu",
+            conv_state_indices=state_indices[:num_requests],
+            intermediate_conv_window=layer_cache.intermediate_conv_window[0].transpose(
+                -1, -2
+            ),
+            intermediate_state_indices=scratch_rows,
+        )
+        convolved_TC = convolved_BCJ.transpose(1, 2).reshape(num_tokens, -1)
+
+        # ======== Recurrence ========
+        query, key, value = torch.split(
+            convolved_TC,
+            [
+                layer.num_q_heads * layer.head_q_dim,
+                layer.num_k_heads * layer.head_k_dim,
+                layer.num_v_heads * layer.head_v_dim,
+            ],
+            dim=-1,
+        )
+        output_THV = value.new_empty(num_tokens, layer.num_v_heads, layer.head_v_dim)
+        gdn_replayssm_spec_decode(
+            q=query.reshape(num_tokens, layer.num_k_heads, layer.head_k_dim),
+            k=key.reshape(num_tokens, layer.num_k_heads, layer.head_k_dim),
+            v=value.reshape(num_tokens, layer.num_v_heads, layer.head_v_dim),
+            a=a.reshape(num_tokens, layer.num_v_heads),
+            b=b.reshape(num_tokens, layer.num_v_heads),
+            A_log=A_log_H,
+            dt_bias=dt_bias_H,
+            checkpoint_state=layer_cache.temporal,
+            d_cache=layer_cache.replayssm_d,
+            k_cache=layer_cache.replayssm_k,
+            g_cache=layer_cache.replayssm_g,
+            rawv_cache=layer_cache.replayssm_rawv,
+            rawk_cache=layer_cache.replayssm_rawk,
+            beta_cache=layer_cache.replayssm_beta,
+            out=output_THV,
+            query_start_loc=self.forward_metadata.query_start_loc,
+            ssm_state_indices=state_indices,
+            replay_indices=forward_batch.req_pool_indices,
+            # The ring cursors are per request and shared by every GDN layer; SGLang's
+            # commit advances them after sampling.
+            write_pos=self.state_pool.replayssm_spec_write_pos,
+            cache_base=self.state_pool.replayssm_cache_base,
+            is_flush=self.state_pool.replayssm_is_flush,
+            max_cache_len=layer_cache.replayssm_d.shape[-2],
+            max_spec_len=num_tokens_per_request,
+            scale=layer.head_k_dim**-0.5,
+            use_qk_l2norm_in_kernel=True,
+            # Rows of state slot -1 (SGLang's invalid rows) are skipped.
+            null_block_id=-1,
+            # The commit folds full rings once for all layers.
+            launch_mode="verify",
+        )
+        return output_THV.unsqueeze(0)
 
 
 class SGLangInnerGDN(InnerAttention):

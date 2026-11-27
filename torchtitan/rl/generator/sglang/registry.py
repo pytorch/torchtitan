@@ -183,6 +183,66 @@ def _patch_page_major_attention_backend_allow_list() -> None:
     kv_cache_hook.handle_page_major_kv_layout = handle_page_major_kv_layout
 
 
+def _patch_draft_gdn_attention_backend() -> None:
+    """Give an MTP draft's runner TorchTitan's GDN backend instead of SGLang's.
+
+        before: draft runner -> SGLang's GDNAttnBackend over the target's state pool,
+                which asserts a [C, W - 1] conv layout; TorchTitan's is [W - 1, C]
+        after:  draft runner -> TorchTitanGDNAttnBackend
+
+    SGLang wraps every runner's attention in its model config's hybrid backend
+    (``attn_backend_wrapper``), though the draft runs no GDN layer.
+
+    TODO: drop this patch once SGLang builds no linear attention backend for a draft
+    runner without linear attention layers, as it already does for NemotronH drafts.
+    """
+    from sglang.srt.layers.attention import attention_registry
+    from sglang.srt.layers.attention.linear.gdn_backend import GDNAttnBackend
+
+    from torchtitan.rl.generator.sglang.attention.gdn import TorchTitanGDNAttnBackend
+
+    original = attention_registry._create_linear_attention_backend
+
+    def _create_linear_attention_backend(runner, fallback):
+        if runner.is_draft_worker and fallback is GDNAttnBackend:
+            fallback = TorchTitanGDNAttnBackend
+        return original(runner, fallback)
+
+    attention_registry._create_linear_attention_backend = (
+        _create_linear_attention_backend
+    )
+
+
+def _patch_replayssm_gate() -> None:
+    """Let SGLang's ReplaySSM verify (``enable_linear_replayssm_spec``) run on
+    TorchTitan's GDN layers.
+
+        before: hybrid_gdn_config(TorchTitanGDNConfig) -> None: SGLang's memory sizing
+                and state pool drop the flag without a word
+        after:  hybrid_gdn_config(TorchTitanGDNConfig) -> the config
+
+    Replaces the name in ``kv_cache_configurator`` only, where every use is gated on
+    the flag or runs on NPU; the attention backend reads its own copy. So a run
+    without the flag is unchanged.
+
+    TODO: drop this patch once SGLang's ReplaySSM gate accepts linear attention configs
+    registered with ``register_linear_attn_model``.
+    """
+    from sglang.srt.mem_cache import kv_cache_configurator
+
+    from torchtitan.rl.generator.sglang.attention.gdn import TorchTitanGDNConfig
+
+    original = kv_cache_configurator.hybrid_gdn_config
+
+    def hybrid_gdn_config(model_config):
+        text_config = model_config.hf_config.get_text_config()
+        if isinstance(text_config, TorchTitanGDNConfig):
+            return text_config
+        return original(model_config)
+
+    kv_cache_configurator.hybrid_gdn_config = hybrid_gdn_config
+
+
 def register_to_sglang(
     model_config: Decoder.Config,
     *,
@@ -202,7 +262,8 @@ def register_to_sglang(
       2. A config parser under ``TORCHTITAN_CONFIG_PARSER`` that builds the HF-shaped
          config from ``model_config`` instead of reading ``config.json``: a
          ``TorchTitanGDNConfig`` for models with GDN layers, and a
-         ``TorchTitanKDAConfig`` for models with KDA layers.
+         ``TorchTitanKDAConfig`` for models with KDA layers. An MTP draft's parse
+         goes to SGLang's HF parser.
       3. ``TorchTitanVarlenAttnBackend`` under ``TORCHTITAN_VARLEN_ATTENTION_BACKEND``,
          also as a backend SGLang's deterministic mode accepts with its radix cache.
       4. ``TorchTitanGDNAttnBackend`` and ``TorchTitanKDAAttnBackend`` as the linear
@@ -221,6 +282,7 @@ def register_to_sglang(
         hf_assets_path: See ``ModelStateDictLoader``.
     """
     from sglang.srt.configs.model_config_parser_registry import (
+        get_model_config_parser,
         ModelConfigParserBase,
         register_model_config_parser,
     )
@@ -293,6 +355,14 @@ def register_to_sglang(
     @register_model_config_parser(TORCHTITAN_CONFIG_PARSER)
     class TorchTitanConfigParser(ModelConfigParserBase):
         def parse(self, model, trust_remote_code, revision=None, **kwargs):
+            if "_configuration_file" in kwargs:
+                # Only an MTP draft's parse carries a config file (SGLangEngine sets
+                # decrypted_draft_config_file): the draft is SGLang's own model class.
+                # TODO: drop this branch once SGLang can give a draft its own config
+                # parser; the pinned SGLang uses the target's parser for both.
+                return get_model_config_parser("hf").parse(
+                    model, trust_remote_code, revision=revision, **kwargs
+                )
             config_dict = _model_config_to_hf_config_dict(model_config)
             if gdn_kwargs is not None:
                 return TorchTitanGDNConfig(
@@ -331,6 +401,8 @@ def register_to_sglang(
 
         _patch_hybrid_full_attention_v_head_dim()
         _patch_page_major_attention_backend_allow_list()
+        _patch_draft_gdn_attention_backend()
+        _patch_replayssm_gate()
         # SGLang's extra_buffer mamba radix cache strategy keeps overlap scheduling
         # and snapshots each request's state at chunk boundaries mid-prompt, into the
         # track slots the backends fill (TorchTitanLinearAttnBackend).
