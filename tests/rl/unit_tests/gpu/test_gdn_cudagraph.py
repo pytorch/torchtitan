@@ -45,10 +45,17 @@ MODEL_ENV = "TORCHTITAN_QWEN3_5_0_8B_HF_PATH"
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
+# TODO: list this file in integration_test_rl_b200.yaml once pytorch/torchtitan#6294
+# (GDN/KDA chunk kernels: always fused) lands. Until then GDN's warpdrive kernel can fail
+# to build there (it does with cutlass DSL 4.7.1).
 @pytest.mark.parametrize(
-    "batch_invariant", [False, True], ids=["regular", "batch-invariant"]
+    "batch_invariant, num_speculative_tokens",
+    [(False, 0), (True, 0), (False, 3)],
+    ids=["regular", "batch-invariant", "drafts"],
 )
-def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) -> None:
+def test_gdn_full_runner_matches_eager(
+    tmp_path: Path, batch_invariant: bool, num_speculative_tokens: int
+) -> None:
     model = os.environ.get(MODEL_ENV)
     if not model:
         pytest.skip(f"set {MODEL_ENV} to a local Qwen3.5-0.8B checkpoint")
@@ -77,6 +84,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
             mode,
             str(output),
             str(int(batch_invariant)),
+            str(num_speculative_tokens),
         ]
         log_path = output.with_suffix(".log")
         with log_path.open("w") as log:
@@ -100,6 +108,8 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     assert [False, "PACKED"] in eager["recurrent_calls"]
     assert [True, "PACKED"] in full["recurrent_calls"]
     assert eager["outputs"].keys() == full["outputs"].keys()
+    # Bitwise, drafts included: M-invariant GEMMs (run_engine) keep FULL's padding from changing
+    # real rows, so the target and the drafter match eager, and so do the accepted drafts.
     mismatches = {}
     for request_id, eager_output in eager["outputs"].items():
         full_output = full["outputs"][request_id]
@@ -133,7 +143,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     # The builder follows the graph the runner picked.
     assert all((step["path"] == "PACKED") == (not step["uniform"]) for step in replayed)
     kinds = {step["kind"] for step in replayed}
-    if kinds != {"prefill", "mixed", "decode"}:
+    if kinds != {"prefill", "mixed", "verify" if num_speculative_tokens else "decode"}:
         dispatch_summary = [
             (step["kind"], step["mode"], step["actual"], step["num_tokens"])
             for step in full["dispatch"]
@@ -148,9 +158,23 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
         step["mode"] == "NONE" and step["actual"] > 128 for step in full["dispatch"]
     )
     assert len({tuple(step["slots"]) for step in replayed}) > 1
-    single_token = [step for step in replayed if step["path"] == "SINGLE_TOKEN"]
-    assert any(step["initial"] == [False] for step in single_token)
-    assert any(set(step["initial"]) == {False, True} for step in single_token)
+    if num_speculative_tokens:
+        assert any(step["path"] == "VERIFY" for step in replayed)
+        # A verify row resumed after accepting drafts, so it read its state past slot 0.
+        assert any(
+            max(step["accepted"]) > 1 for step in replayed if step["path"] == "VERIFY"
+        )
+        assert any(
+            step["kind"] == "mixed" and step["path"] == "PACKED" for step in replayed
+        )
+        # Start-up captured every drafter graph (TorchTitanEagleProposer.dummy_run), so no draft
+        # step captures while serving.
+        num_drafter_graphs, missing_drafter_graphs = full["drafter_graphs"]
+        assert num_drafter_graphs > 0 and missing_drafter_graphs == []
+    else:
+        single_token = [step for step in replayed if step["path"] == "SINGLE_TOKEN"]
+        assert any(step["initial"] == [False] for step in single_token)
+        assert any(set(step["initial"]) == {False, True} for step in single_token)
 
 
 @pytest.mark.parametrize(
@@ -274,7 +298,9 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
                 assert torch.equal(actual[:, -128:], untouched[:, -128:])
 
 
-def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
+def run_engine(
+    mode: str, output: Path, batch_invariant: bool, num_speculative_tokens: int
+) -> None:
     assert int(os.environ["WORLD_SIZE"]) == 1
     # Eager runs the real token count, while FULL replay pads it up to a capture
     # size (e.g. 88 -> 128). cuBLAS may choose a different GEMM kernel for the
@@ -290,6 +316,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         torch.backends.cudnn.benchmark = False
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.manual_seed(42)
+    drafts = num_speculative_tokens > 0
     recurrent_calls = []
     kernel_name = "recurrent_gdn" if batch_invariant else "paged_chunk_gdn"
     original_recurrent = getattr(paged_gdn, kernel_name)
@@ -320,6 +347,8 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         ),
         model_state_dict_load_mode="cpu_prefetch",
     )
+    # With 3 drafts, vLLM rounds capture sizes up to multiples of 4 tokens (a verify row).
+    capture_sizes = [4, 8, 16, 64, 128] if drafts else [1, 2, 4, 64, 128]
     engine = LLMEngine.from_engine_args(
         EngineArgs(
             model=model,
@@ -330,19 +359,31 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
             tensor_parallel_size=1,
             enforce_eager=mode == "eager",
             attention_config={"backend": "CUSTOM"},
+            # Qwen3.5-0.8B's checkpoint has one MTP layer.
+            speculative_config=(
+                {
+                    "method": "mtp",
+                    "num_speculative_tokens": num_speculative_tokens,
+                    "attention_backend": "CUSTOM",
+                }
+                if drafts
+                else None
+            ),
             compilation_config={
                 "mode": 0,
                 "cudagraph_mode": "FULL" if mode == "full" else "NONE",
-                "cudagraph_capture_sizes": [1, 2, 4, 64, 128],
+                "cudagraph_capture_sizes": capture_sizes,
                 "cudagraph_num_of_warmups": 1,
             },
             max_model_len=256,
             max_num_seqs=4,
             max_num_batched_tokens=256,
             # PyTorch's FA2 paged-KV kernel on A10G requires 256-token pages.
-            # Preserve 32 blocks so all four sequences can run concurrently.
+            # Room for all four sequences at once. Without drafts: 1 KV block + 1 state block in each
+            # of the 3 GDN groups, 4 x 4 = 16 of 32. With 3 drafts, 1 + 3 state blocks per group:
+            # 4 x 13 = 52, plus the null block, of 64.
             block_size=256,
-            num_gpu_blocks_override=32,
+            num_gpu_blocks_override=64 if drafts else 32,
             gpu_memory_utilization=0.25,
             enable_chunked_prefill=True,
             enable_prefix_caching=False,
@@ -371,6 +412,23 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
             for layer in layers.values():
                 for state in layer.kv_cache:
                     state.zero_()
+        if drafts and mode == "full":
+            drafter = runner.drafter
+            expected = {
+                descriptor
+                for _, descriptors in drafter.cudagraph_dispatcher.get_capture_descs()
+                for descriptor in descriptors
+            }
+            # vLLM adds an entry before it captures, so count the entries holding a graph.
+            captured = {
+                descriptor
+                for descriptor, entry in drafter.model.entries.items()
+                if entry.capture is not None
+            }
+            result["drafter_graphs"] = [
+                len(expected),
+                sorted(descriptor.num_tokens for descriptor in expected - captured),
+            ]
         replays = []
         if mode == "full":
             entries = runner.model.concrete_cudagraph_entries
@@ -389,9 +447,12 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
             requests = list(runner.input_batch.req_ids)
             metadata = context.attn_metadata
             first = metadata[next(iter(layers))]
-            offsets = first.non_spec_query_start_loc.cpu().tolist()[: len(requests) + 1]
-            prefills = [end - start > 1 for start, end in zip(offsets, offsets[1:])]
-            kind = "prefill" if all(prefills) else "decode"
+            offsets = runner.query_start_loc.cpu[: len(requests) + 1].tolist()
+            if drafts:
+                prefills = (first.prefill_state_indices[: len(requests)] > 0).tolist()
+            else:
+                prefills = [end - start > 1 for start, end in zip(offsets, offsets[1:])]
+            kind = "prefill" if all(prefills) else ("verify" if drafts else "decode")
             if any(prefills) and not all(prefills):
                 kind = "mixed"
             runtime = context.cudagraph_runtime_mode.name
@@ -402,12 +463,24 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
             assert replays == ([uniform] if runtime == "FULL" else [])
             hashes = {}
             for name, layer in layers.items():
-                slots = (
-                    metadata[name]
-                    .non_spec_state_indices_tensor.cpu()
-                    .tolist()[: len(requests)]
-                )
-                assert all(slot > 0 for slot in slots)
+                if drafts:
+                    # Verify-kernel rows hold 1 + k slots, prefill-kernel rows one.
+                    row_slots = torch.cat(
+                        [
+                            metadata[name].spec_state_indices_tensor[: len(requests)],
+                            metadata[name].prefill_state_indices[: len(requests), None],
+                        ],
+                        dim=1,
+                    ).cpu()
+                    assert (row_slots > 0).any(dim=1).all()
+                    slots = row_slots[row_slots > 0].tolist()
+                else:
+                    slots = (
+                        metadata[name]
+                        .non_spec_state_indices_tensor.cpu()
+                        .tolist()[: len(requests)]
+                    )
+                    assert all(slot > 0 for slot in slots)
                 hashes[name] = []
                 for state in layer.kv_cache:
                     raw = state[slots].view(torch.uint8).cpu().numpy().tobytes()
@@ -422,6 +495,11 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
                 actual=offsets[-1],
                 path=first.execution_path.name,
                 initial=first.has_initial_state.cpu().tolist()[: len(requests)],
+                accepted=(
+                    first.num_accepted_tokens.cpu().tolist()[: len(requests)]
+                    if drafts
+                    else []
+                ),
             )
             result["dispatch"].append(record)
             return value
@@ -435,9 +513,13 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     base = engine.renderer.tokenizer.encode(
         "Explain physics.", add_special_tokens=False
     )
-    for wave, (lengths, initial_count) in enumerate(
-        (([11, 17, 23, 37], 4), ([129], 1), ([9, 13, 29, 41], 3), ([1], 1), ([1, 1], 1))
-    ):
+    # Then fresh 1-token prompts: one alone, then one that arrives while another runs. With drafts,
+    # vLLM pads that second one with placeholder drafts, which GDN can't run (VLLMEngine.add_requests
+    # rejects 1-token prompts with drafts; this test drives vLLM's LLMEngine directly).
+    waves = [([11, 17, 23, 37], 4), ([129], 1), ([9, 13, 29, 41], 3), ([1], 1)]
+    if not drafts:
+        waves.append(([1, 1], 1))
+    for wave, (lengths, initial_count) in enumerate(waves):
         prompts = engine.renderer.render_cmpl(
             [{"prompt_token_ids": (base * length)[:length]} for length in lengths]
         )
@@ -455,11 +537,11 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
                     assert completion.logprobs is not None
                     result["outputs"][request.request_id] = asdict(completion)
             step += 1
-    assert len(result["outputs"]) == 12
+    assert len(result["outputs"]) == sum(len(lengths) for lengths, _ in waves)
     output.write_text(json.dumps(result, allow_nan=False))
     engine.model_executor.shutdown()
     torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
-    run_engine(sys.argv[1], Path(sys.argv[2]), bool(int(sys.argv[3])))
+    run_engine(sys.argv[1], Path(sys.argv[2]), bool(int(sys.argv[3])), int(sys.argv[4]))

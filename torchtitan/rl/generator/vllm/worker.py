@@ -13,6 +13,7 @@ from dataclasses import replace
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.utils.math_utils import round_up
@@ -43,6 +44,8 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
       - FA4 sizes its grid from ``max_query_len``: decode attention runs 1.3-2.0x
         longer from 32 sequences at head dim 64 and from 64 at head dim 128
         (GB300, 16-token pages).
+      - With k drafts, a decode batch verifies 1 + k tokens per row: GDN runs only its
+        verify kernels, and FA4 its verify-step path (``TorchTitanVarlenInnerAttentionImpl.forward``).
 
     Uniform-decode batch in FULL mode:
       num_tokens <= max_decode_capture_size              -> decode graph
@@ -53,8 +56,9 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
     replay and graph ownership stay intact.
 
     This costs one additional graph capture per decode-specialized batch size
-    (83 at max_num_seqs 1024); ``TorchTitanGPUModelRunner.initialize_kv_cache``
-    keeps them out of vLLM's graph-memory estimate.
+    (83 at max_num_seqs 1024; with 3 drafts, 145 verify graphs at max_num_seqs 512).
+    Without drafts, ``TorchTitanGPUModelRunner.initialize_kv_cache`` keeps them out of
+    vLLM's graph-memory estimate.
 
     TODO: drop this class once vLLM captures FULL decode graphs next to FULL mixed
     graphs without piecewise compilation.
@@ -119,6 +123,43 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         super().load_model(load_dummy_weights)
         assert not self.cudagraph_dispatcher.keys_initialized
         self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
+        # Before vLLM resolves the mode against the attention backends (capture_model checks it).
+        self.requested_cudagraph_mode = self.compilation_config.cudagraph_mode
+
+    def capture_model(self) -> int:
+        """Check the graph modes drafts rely on, then capture.
+
+        mode            GDN with drafts must not run inside a piecewise graph: its piecewise
+                        capture has no metadata, so it would replay zeros. A requested FULL
+                        must stay FULL (vLLM lowers it when a backend lacks ALWAYS support)
+        drafter graphs  under a requested FULL, the drafter must be breakable, or it runs
+                        eagerly; TorchTitanEagleProposer.dummy_run captures its graphs
+        """
+        drafts = self.uniform_decode_query_len > 1
+        if drafts and self._linear_attention_builders():
+            resolved_mode = self.compilation_config.cudagraph_mode
+            if resolved_mode.has_piecewise_cudagraphs() or (
+                self.requested_cudagraph_mode == CUDAGraphMode.FULL
+                and resolved_mode != CUDAGraphMode.FULL
+            ):
+                raise RuntimeError(
+                    f"GDN with drafts can't run under cudagraph_mode {resolved_mode} (requested "
+                    f"{self.requested_cudagraph_mode}): it must not run inside piecewise graphs, "
+                    "and a requested FULL must stay FULL. vLLM lowers FULL when an attention "
+                    "backend lacks AttentionCGSupport.ALWAYS"
+                )
+
+        drafter = getattr(self, "drafter", None)
+        if (
+            drafter is not None
+            and self.requested_cudagraph_mode == CUDAGraphMode.FULL
+            and not isinstance(drafter.model, BreakableCUDAGraphWrapper)
+        ):
+            raise RuntimeError(
+                "cuda_graph.mode='FULL' with drafts needs VLLM_USE_BREAKABLE_CUDAGRAPH=1 before vLLM "
+                "imports its attention op (VLLMEngine sets it); the MTP drafter would run eagerly"
+            )
+        return super().capture_model()
 
     def initialize_metadata_builders(
         self, kv_cache_config, kernel_block_sizes: list[int]
@@ -192,14 +233,17 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         self, kv_cache_config, is_profiling: bool = False, **kwargs
     ):
         super().initialize_kv_cache(kv_cache_config, is_profiling, **kwargs)
-        # vLLM's graph-memory estimate, taken out of the KV cache, charges every FULL graph
-        # like the second largest (a mixed graph). Decode graphs take far less (Qwen3-8B TP2:
-        # 11 decode graphs added 0.03 GiB to 1.57), so profile the mixed graphs only. vLLM drops
-        # these profiling keys afterwards; the real call rebuilds them, decode keys included
-        # (test_generator_dp_cudagraph.py checks a decode graph still replays).
+        # vLLM's graph-memory estimate, taken out of the KV cache, charges every FULL graph like the second largest
+        # (a mixed graph). 1-token decode graphs take far less (Qwen3-8B TP2: 11 added 0.03 GiB to 1.57), so profile
+        # only the mixed graphs. Verify graphs (1 + k tokens per row) stay charged: left out, 145 of them put the
+        # capture 0.79 GiB over the estimate (Qwen3.8-27B, k = 3, GB300).
         # TODO: drop once vLLM's estimate charges decode graphs at their own size.
         dispatcher = self.cudagraph_dispatcher
-        if is_profiling and dispatcher.cudagraph_mode == CUDAGraphMode.FULL:
+        if (
+            is_profiling
+            and dispatcher.cudagraph_mode == CUDAGraphMode.FULL
+            and self.uniform_decode_query_len == 1
+        ):
             keys = dispatcher.cudagraph_keys
             keys[CUDAGraphMode.FULL] = {
                 key for key in keys[CUDAGraphMode.FULL] if not key.uniform
@@ -383,6 +427,26 @@ class TorchTitanEagleProposer(EagleProposer):
                 "num_speculative_tokens supports Qwen3.5-architecture MTP drafts, got "
                 f"{self.draft_model_config.architecture}"
             )
+
+    def dummy_run(
+        self,
+        num_tokens: int,
+        use_cudagraphs: bool = True,
+        is_graph_capturing: bool = False,
+        slot_mappings: dict[str, torch.Tensor] | None = None,
+    ) -> None:
+        # vLLM's _dummy_run asks for drafter graphs only while the target captures piecewise
+        # graphs, so under a FULL target the first draft step would capture while serving.
+        # TODO: drop with the move to vLLM's V2 model runner (pytorch/torchtitan#5956); V1's
+        # GPUModelRunner._dummy_run captures drafter graphs only for piecewise targets
+        # ("Eagle currently only supports PIECEWISE cudagraphs").
+        capture = is_graph_capturing and not self.speculative_config.enforce_eager
+        super().dummy_run(
+            num_tokens,
+            use_cudagraphs=use_cudagraphs or capture,
+            is_graph_capturing=is_graph_capturing,
+            slot_mappings=slot_mappings,
+        )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         # vLLM's MTP models read their HF config from `vllm_config.model_config`.

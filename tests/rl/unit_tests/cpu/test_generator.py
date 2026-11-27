@@ -1568,6 +1568,9 @@ def test_cuda_graph_config_with_draft_tokens():
         **kwargs
     )
     assert cfg.cudagraph_capture_sizes[-1] == 256
+    # FULL with drafts stays FULL: the runner captures verify and mixed graphs, no piecewise ones.
+    cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**kwargs)
+    assert cfg.cudagraph_mode == CUDAGraphMode.FULL
 
 
 def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():

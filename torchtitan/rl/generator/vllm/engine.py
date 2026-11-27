@@ -155,6 +155,32 @@ def _validate_platform(
         )
 
 
+def _enable_breakable_cuda_graphs() -> None:
+    """Turn on vLLM's breakable CUDA graphs: piecewise graphs that run attention eagerly,
+    which the MTP drafter replays.
+
+    vLLM makes its attention op a graph break when it imports the op, and only if this
+    variable is set then. Raises if the op was imported before.
+    """
+    # TODO: drop the import check once the pin reaches vLLM v0.33+, where graph breaks are
+    # decided at call time (our pin, vLLM 9f03b510c from 2026-09-13, decides them at import).
+    # Keep the variable until vLLM honors an explicit CompilationConfig.use_breakable_cudagraph
+    # (https://github.com/felipemello1/vllm/issues/3).
+    os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+    from vllm.compilation import breakable_cudagraph
+    from vllm.model_executor.layers.attention import attention as vllm_attention
+
+    attention_op = vllm_attention.unified_attention_with_output
+    # The wrapper that `eager_break_during_capture` returns is defined in breakable_cudagraph.py.
+    # If vLLM moves it, this check raises on a wrapped op.
+    if attention_op.__code__.co_filename != breakable_cudagraph.__file__:
+        raise RuntimeError(
+            "num_speculative_tokens > 0 with cuda_graph.mode='FULL' needs vLLM's attention "
+            "op to be a graph break, but vLLM imported it before VLLM_USE_BREAKABLE_CUDAGRAPH "
+            "was set: set VLLM_USE_BREAKABLE_CUDAGRAPH=1 at process start"
+        )
+
+
 def _use_mooncake_master(address: str) -> None:
     """Point this process's Store config (``MOONCAKE_CONFIG_PATH``) at the master the
     controller started. vLLM reads the master address only from that file, so write
@@ -237,7 +263,8 @@ class VLLMEngine(GenerationEngine):
         - Weights: the draft shares the target's embedding and lm_head storage, so it sees
           their updates. Its own layers (`mtp.*`) keep the checkpoint's weights, so
           acceptance can fall as the policy drifts.
-        - `cuda_graph.mode="FULL"` is not supported; use FULL_DECODE_ONLY.
+        - With `cuda_graph.mode="FULL"`, every target step up to the largest capture size
+          replays a FULL graph; the drafter replays piecewise graphs (`VLLMCudaGraphConfig.mode`).
         - Not supported with `session_kv_holder`, `debug.batch_invariant`, generator data
           parallelism > 1, models with a vision encoder or non-CUDA devices. `add_requests`
           rejects prompts under 2 tokens."""
@@ -260,12 +287,6 @@ class VLLMEngine(GenerationEngine):
             if self.num_speculative_tokens < 0:
                 raise ValueError(
                     f"num_speculative_tokens must be >= 0, got {self.num_speculative_tokens}"
-                )
-            if self.num_speculative_tokens > 0 and self.cuda_graph.mode == "FULL":
-                raise ValueError(
-                    f"num_speculative_tokens={self.num_speculative_tokens} needs "
-                    'cuda_graph.mode="FULL_DECODE_ONLY" or "NONE": FULL graphs with drafts '
-                    "are not supported"
                 )
 
     def __init__(
@@ -330,6 +351,8 @@ class VLLMEngine(GenerationEngine):
                 "DP > 1 are untested (verify graphs padded to a peer rank's size, idle ranks' "
                 "dummy batches)"
             )
+        if config.cuda_graph.uses_breakable_cuda_graphs(config.num_speculative_tokens):
+            _enable_breakable_cuda_graphs()
         if config.num_speculative_tokens > 0 and vision_processor is not None:
             # TODO: vLLM's drafter reads the image token id from the target's config
             # (SpecDecodeBaseProposer.load_model); support vision models once tested.
