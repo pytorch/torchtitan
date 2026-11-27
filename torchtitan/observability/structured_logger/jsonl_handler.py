@@ -10,6 +10,7 @@
 formatters (e.g. the Scuba formatter under ``fb/``).
 """
 
+import atexit
 import datetime as dt
 import functools
 import itertools
@@ -21,6 +22,7 @@ import random
 import socket
 import string
 import threading
+import weakref
 from logging.handlers import QueueHandler, QueueListener
 from timeit import default_timer as timer
 from typing import Any
@@ -208,13 +210,21 @@ class _JsonlQueueHandler(QueueHandler):
     """Format records on the emitting thread; write them on a listener thread.
 
     A stalled file write (e.g. on NFS) then does not block training. At
-    interpreter exit, ``logging.shutdown`` calls ``close()``, which writes
-    every queued record. Records emitted after ``close()`` (e.g. from an
-    ``atexit`` hook registered before ``logging`` was imported, or a daemon
+    interpreter exit, this module's ``atexit`` hook calls ``close()``, which
+    writes every queued record. Records emitted after that (e.g. from an
+    ``atexit`` hook registered before this module was imported, or a daemon
     thread) are written synchronously. Records still queued when the process
     is killed (SIGKILL, SIGTERM, a native crash, ``os._exit``) are lost:
     normally the listener lags by well under a millisecond, but longer while
     the emitting thread keeps the GIL busy with pure-Python work.
+
+    ``logging.config.dictConfig`` (which ``import vllm`` runs) closes every
+    existing handler and drops it from ``logging``'s exit list. Like
+    ``FileHandler``, which reopens its file on the next record, this handler
+    restarts its listener on the next record after a ``close()`` before exit.
+    Otherwise every later record would be written on the emitting thread: on a
+    network file system, the RL generator's engine thread then blocked for
+    0.5-3 s on each periodic file flush, and every rank of its generator waited.
     """
 
     def __init__(self, file_handler: logging.Handler) -> None:
@@ -231,14 +241,19 @@ class _JsonlQueueHandler(QueueHandler):
         self._listener = QueueListener(self.queue, file_handler)
         self._listener.start()
         self._listening = True
+        _live_queue_handlers.add(self)
 
     def enqueue(self, record: logging.LogRecord) -> None:
         # Called from emit() under the handler lock, which close() also holds.
+        if not self._listening and not _exiting:
+            # Closed by dictConfig, not at exit: resume writing off this thread.
+            self._listener.start()
+            self._listening = True
         if self._listening:
             self.queue.put_nowait(record)
         else:
-            # After close(): write synchronously, like the old FileHandler did
-            # (it reopens the file in append mode).
+            # After the exit hook's close(): write synchronously, like the old
+            # FileHandler did (it reopens the file in append mode).
             self._listener.handle(record)
 
     def flush(self) -> None:
@@ -277,6 +292,23 @@ class _JsonlQueueHandler(QueueHandler):
         finally:
             self.release()
         super().close()
+
+
+_live_queue_handlers: "weakref.WeakSet[_JsonlQueueHandler]" = weakref.WeakSet()
+_exiting = False
+
+
+@atexit.register
+def _close_queue_handlers_at_exit() -> None:
+    """Write every queued record and close the files.
+
+    ``logging.shutdown`` may no longer list these handlers (see
+    ``_JsonlQueueHandler``), so this hook closes them itself.
+    """
+    global _exiting
+    _exiting = True
+    for handler in list(_live_queue_handlers):
+        handler.close()
 
 
 def register_jsonl_handler(
