@@ -156,9 +156,10 @@ class SGLangEngine(GenerationEngine):
             # cuda_graph owns SGLang's CUDA-graph settings: SGLang applies its
             # per-phase graph keys (e.g. cuda_graph_backend_decode) over
             # disable_cuda_graph, so one would capture graphs that the engine's
-            # checks of cuda_graph assume are off. SGLang's default capture sizes
-            # also stay within the step budget that Dist-MoE's buffers and the
-            # DeepEP / HybridEP capacity check assume.
+            # checks of cuda_graph assume are off. SGLang's prefill capture sizes and
+            # the decode graphs, which stop at max_num_seqs (a DP rank's decode
+            # tokens per step), stay within the step budget that Dist-MoE's buffers
+            # and the DeepEP / HybridEP capacity check assume.
             owned_keys = sorted(
                 key
                 for key in self.extra_server_args
