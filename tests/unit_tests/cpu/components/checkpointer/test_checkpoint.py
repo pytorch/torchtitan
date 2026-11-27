@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import fsspec
+import pytest
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dist_checkpoint
@@ -1880,6 +1881,7 @@ class TestModelWrapper(unittest.TestCase):
         self.assertTrue(torch.all(model.w._tensor == 3.0))
 
 
+@pytest.mark.xdist_group("tcp_port_29511")
 class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
     """Exercises the real EMA + CheckpointManager save/load path (no dcp
     mocking) across combinations of ``ema`` being ``None`` vs. configured,
