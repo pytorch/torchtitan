@@ -329,8 +329,9 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
             # For each trace, release its routing session (Verifiers sends the trace id as X-Session-ID)
 
             # TODO: an attempt Verifiers retried has no trace here, so its cached KV waits for the
-            # group's release. The generation server could record each rollout's session ids and
-            # release those too.
+            # group's release. Fix: send the rollout id as a sampling param, as the group id is, and
+            # have the generation server record each rollout's session ids. Not done: only retried
+            # attempts wait, and `release_groups` frees them at the group's end.
             generation_metadata_by_session = {
                 trace.id: self._generation_server.pop_generation_metadata(trace.id)
                 for trace in verifiers_episode.traces
