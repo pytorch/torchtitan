@@ -110,6 +110,9 @@ class InterGeneratorRouter(Configurable):
         under different policy versions. A turn whose session is pinned to a
         draining generator waits for it instead of moving to another one."""
 
+        # TODO: set admission in the agent recipes, so a full KV cache makes new groups wait instead of
+        #   evicting the histories of sessions that wait on a tool call. Needs a cluster A/B against
+        #   admission=None first; no cluster run has used it yet.
         admission: KVRoomAdmission.Config | None = None
         """When set, a new rollout group waits in ``acquire_group`` until a generator's KV
         cache has room for its sessions, and every call of the group goes to that generator.
