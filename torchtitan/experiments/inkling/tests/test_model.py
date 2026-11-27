@@ -75,7 +75,8 @@ def test_padding_cannot_split_a_training_document():
 
 def test_flops_count_nonpadding_and_visible_keys_per_visit():
     config = build_model_config("debugmodel")
-    estimate = config.build_flops_estimator(config.build(), seq_len=8)
+    lora = LoRATransform(rank=4, alpha=4, target_modules=["attn.wq_du"])
+    estimate = config.build_flops_estimator(lora.transform(config).build(), seq_len=8)
 
     def work(positions, padding):
         return estimate(
@@ -87,6 +88,13 @@ def test_flops_count_nonpadding_and_visible_keys_per_visit():
         )
 
     first = work([0], [False])
+    # Hand-counted multiply-adds for the first token of the debug model:
+    # 6 visits contribute 68,352 frozen attention, router, expert and conv MACs,
+    # plus 2,112 for relative projections and full-attention dynamic taps.
+    # The 2 later core visits add 4,096 controller MACs; the head adds 4,096.
+    # The rank-4 query adapters add 1,536 trainable MACs across the 6 visits.
+    # With one visible key, the score and value products add 384 MACs.
+    assert first == 4 * 78_656 + 6 * (1_536 + 384)
     assert first == work([0, 0], [False, True])
     # Three full and three local visits. At position 5, full attention sees
     # five more keys than at position 0; local attention sees three more.

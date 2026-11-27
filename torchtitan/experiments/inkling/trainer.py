@@ -11,6 +11,8 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+import torch
+
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     GrainDataLoader,
@@ -27,6 +29,12 @@ logger = logging.getLogger(__name__)
 
 def _corpus_path(dataloader: BaseDataLoader.Config) -> Path:
     if isinstance(dataloader, GrainDataLoader.Config):
+        if (
+            dataloader.shuffle
+            or dataloader.balancer is not None
+            or dataloader.max_num_documents != 1
+        ):
+            raise ValueError("Inkling requires one document per row in corpus order")
         packing = dataloader.dataset
         if isinstance(packing, ConcatThenSplitPackingConfig) and isinstance(
             packing.dataset, SingleDatasetConfig
@@ -40,6 +48,10 @@ def _corpus_path(dataloader: BaseDataLoader.Config) -> Path:
             ):
                 path = source.load_dataset_kwargs["data_files"]
                 if isinstance(path, str):
+                    if any(char in path for char in "*?["):
+                        raise ValueError(
+                            f"Corpus path must not contain glob syntax: {path}"
+                        )
                     return Path(path)
     raise ValueError("Inkling requires one local text corpus for checked resume")
 
@@ -95,8 +107,6 @@ class InklingTrainer(Trainer):
                     "The native checkpoint must be inside the training output"
                 )
 
-    config: Config
-
     def __init__(self, config: Config) -> None:
         self._source = Path(config.hf_assets_path).resolve()
         self._run = Path(config.dump_folder).resolve()
@@ -109,7 +119,7 @@ class InklingTrainer(Trainer):
         )
         super().__init__(config)
 
-    def _verify_inputs(self, config: Config, *, allow_create: bool) -> None:
+    def _verify_inputs(self, config: Trainer.Config, *, allow_create: bool) -> None:
         manifest_path = self._run / "run-manifest.json"
         exists = manifest_path.exists()
         if not exists and not allow_create:
@@ -147,7 +157,16 @@ class InklingTrainer(Trainer):
                 stream.write("\n")
 
     def train(self) -> None:
-        super().train()
+        # Match the published reference: BF16 inputs, no reduced-precision
+        # intermediate reductions. Leave the caller's split-K policy intact.
+        matmul = torch.backends.cuda.matmul
+        previous = matmul.allow_bf16_reduced_precision_reduction
+        split_k = matmul.allow_bf16_reduced_precision_reduction_split_k
+        try:
+            matmul.allow_bf16_reduced_precision_reduction = (False, split_k)
+            super().train()
+        finally:
+            matmul.allow_bf16_reduced_precision_reduction = (previous, split_k)
         steps = self.config.training.steps
         if self.engine.num_completed_steps != steps:
             raise ValueError(

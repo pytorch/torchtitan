@@ -100,6 +100,34 @@ def test_resume_binds_the_data_cursor_to_corpus_and_context(
         ).build()
 
 
+def test_rejects_corpus_glob_before_loading_a_different_file(monkeypatch, inputs):
+    source, corpus, run = inputs
+    corpus = corpus.rename(corpus.with_name("train[1].txt"))
+    corpus.with_name("train1.txt").write_text("wrong document\n", encoding="utf-8")
+
+    def init(trainer, config):
+        dataset = config.dataloader.dataset.dataset.source.build()
+        pytest.fail(f"Unexpectedly loaded {dataset[0]['text']!r}")
+
+    monkeypatch.setattr(Trainer, "__init__", init)
+    with pytest.raises(ValueError, match="glob"):
+        _launch_config(monkeypatch, source, corpus, run).build()
+    assert not (run / "run-manifest.json").exists()
+
+
+@pytest.mark.parametrize("change", ["shuffle", "packing"])
+def test_resume_rejects_changed_document_order_or_packing(monkeypatch, inputs, change):
+    monkeypatch.setattr(Trainer, "__init__", lambda self, config: None)
+    _launch_config(monkeypatch, *inputs).build()
+    config = _launch_config(monkeypatch, *inputs, steps=20)
+    if change == "shuffle":
+        config.dataloader.shuffle = True
+    else:
+        config.dataloader.max_num_documents = 2
+    with pytest.raises(ValueError, match="document"):
+        config.build()
+
+
 def test_refuses_to_adopt_unverified_native_checkpoint(monkeypatch, inputs):
     monkeypatch.setattr(Trainer, "__init__", lambda self, config: None)
     _, _, run = inputs
@@ -123,6 +151,7 @@ def test_native_training_exports_only_from_verified_source(
         trainer.engine = SimpleNamespace(num_completed_steps=0, model_parts=[model])
 
     def train(trainer):
+        assert not torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
         trainer.engine.num_completed_steps = trainer.config.training.steps
         with torch.no_grad():
             trainer.engine.model_parts[0].attn.lora_b.weight.fill_(1)

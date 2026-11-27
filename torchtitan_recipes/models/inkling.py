@@ -67,7 +67,7 @@ def inkling_2_mini_lora(
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=1, enable_sequence_parallel=False
         ),
-        precision=PrecisionConfig(dtype="bfloat16", param_dtype="bfloat16"),
+        precision=PrecisionConfig(dtype="float32", param_dtype="bfloat16"),
         training=TrainingConfig(
             steps=steps,
             num_tokens_per_microbatch_per_dp_rank=seq_len,

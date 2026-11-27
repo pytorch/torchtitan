@@ -11,7 +11,9 @@ Q: residual queries, S: residual source blocks, V: vocabulary.
 """
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch import nn
@@ -20,7 +22,7 @@ from torch.nn import functional as F
 from torchtitan.experiments.inkling.experts import InklingMoE
 from torchtitan.experiments.inkling.state_dict_adapter import InklingStateDictAdapter
 
-from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.model import BaseModel, FlopsEstimator
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.flops import quadratic_attention_flops
 from torchtitan.models.common.linear import Linear
@@ -367,40 +369,73 @@ class InklingModel(BaseModel):
                 other + expert_count * s.experts_per_token,
             )
 
-        def build_flops_estimator(self, model, *, seq_len):
+        def build_flops_estimator(
+            self, model: Module, *, seq_len: int
+        ) -> FlopsEstimator:
             s = self.shape
-            # Estimate dense and routed matmul work per visit, not per unique layer.
-            linear_per_token = 0
-            for i, layer in enumerate(model.layers):
-                visits = s.num_passes if i in s.loop_layers else 1
-                dense = sum(
-                    t.numel()
-                    for n, t in layer.state_dict().items()
-                    if ".experts." not in n and t.ndim >= 2
-                )
-                linear_per_token += visits * (
-                    dense
-                    + 3 * s.hidden_size * s.intermediate_size * s.experts_per_token
-                )
-            linear_per_token += s.vocab_size * s.hidden_size
-            full_visits = sum(
-                s.num_passes if i in s.loop_layers else 1 for i in s.full_layers
-            )
-            local_visits = (
-                s.num_layers + len(s.loop_layers) * (s.num_passes - 1) - full_visits
-            )
+            model = cast("InklingModel", model)
 
-            def estimate(batch):
-                keys_T = batch["positions"][~batch["padding_mask"]] + 1
-                return (
-                    6 * linear_per_token * keys_T.numel()
-                    + quadratic_attention_flops(
-                        num_heads=s.num_q_heads,
-                        qk_head_dim=s.head_dim,
-                        v_head_dim=s.head_dim,
-                        num_keys=full_visits * keys_T
-                        + local_visits * keys_T.clamp(max=s.sliding_window),
+            # Count forward and dX for each projection, plus dW for trainable
+            # weights. This estimate does not prune dX on frozen-only inputs
+            # or include block-residual mixing, elementwise work, or remat.
+            def projection_flops(module: nn.Module) -> int:
+                return sum(
+                    (6 if weight.requires_grad else 4) * weight.numel()
+                    for weight in module.parameters()
+                    if weight.ndim > 1
+                )
+
+            # The output projection computes the padded vocabulary before slicing.
+            flops_per_token = projection_flops(model.unembed)
+            num_full_visits = num_local_visits = 0
+            for module in model.layers:
+                layer = cast(InklingLayer, module)
+                attn = layer.attn
+                # Messages and controllers start on the second core visit.
+                num_controller_visits = (
+                    s.num_passes - 1 if layer.index in s.loop_layers else 0
+                )
+                num_visits = 1 + num_controller_visits
+                if attn.full:
+                    num_full_visits += num_visits
+                else:
+                    num_local_visits += num_visits
+                dense_flops = sum(
+                    projection_flops(projection)
+                    for projection in attn.children()
+                    if isinstance(projection, Linear)
+                )
+                conv_flops = sum(
+                    projection_flops(conv)
+                    for conv in (
+                        attn.k_sconv,
+                        attn.v_sconv,
+                        layer.attn_sconv,
+                        layer.mlp_sconv,
                     )
+                )
+                moe = layer.mlp.config
+                weights_per_expert = 3 * moe.hidden_size * moe.intermediate_size
+                flops_per_token += num_visits * (
+                    dense_flops
+                    + conv_flops
+                    + s.num_q_heads * projection_flops(attn.rel_logits_proj)
+                    + projection_flops(layer.mlp.gate)
+                    + 4 * weights_per_expert * moe.experts_per_token
+                )
+                if num_controller_visits:
+                    flops_per_token += num_controller_visits * projection_flops(
+                        layer.controllers
+                    )
+
+            def estimate(batch: Mapping[str, torch.Tensor]) -> int:
+                keys_T = batch["positions"][~batch["padding_mask"]] + 1
+                return flops_per_token * keys_T.numel() + quadratic_attention_flops(
+                    num_heads=s.num_q_heads,
+                    qk_head_dim=s.head_dim,
+                    v_head_dim=s.head_dim,
+                    num_keys=num_full_visits * keys_T
+                    + num_local_visits * keys_T.clamp(max=s.sliding_window),
                 )
 
             return estimate

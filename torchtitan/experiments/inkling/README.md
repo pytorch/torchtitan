@@ -8,7 +8,9 @@ the previous one. Attention includes sliding/full masks, relative logits,
 sinks, and short convolutions.
 
 The single-device recipe adapts **`layers.*.attn.wq_du`**, the internal query
-projections, not the language head. The backbone stays in its published
+projections, not the language head. The optimizer updates FP32 adapter masters;
+the training forward uses BF16 projections with reduced-precision BF16 GEMM
+reductions disabled. The backbone stays in its published
 formats. The MoE path decodes only the experts used by each input and computes
 input gradients through those frozen weights using a straight-through
 estimator for activation quantization. The unchanged vision tower and
