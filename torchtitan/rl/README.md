@@ -81,7 +81,7 @@ The package is organized by responsibility and dependency boundary:
   training-sample construction, losses, and the controller state it
   checkpoints. Each component defines the data types it produces (e.g.
   `TrainingSample` in `training_sample_builder.py`, `TrainerStepBatch` in
-  `batcher.py`).
+  `training_batch_builder.py`).
 - `generator/` contains the standalone generator service (`generator.py`), the
   SPMD engine loop that drives it (`engine_loop.py`), request dispatch across
   data-parallel replicas (`dispatcher.py`), the inference engine interface

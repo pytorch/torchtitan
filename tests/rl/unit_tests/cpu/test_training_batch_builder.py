@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""CPU tests for batcher packing (fixed-bin LPT, FFD fallback) and image microbatches."""
+"""CPU tests for training batch builder packing (fixed-bin LPT, FFD fallback) and image microbatches."""
 
 import dataclasses
 import random
@@ -27,7 +27,7 @@ from torchtitan.models.common.attention.attention import (
 from torchtitan.models.qwen3_5 import QWEN3_5_VISION_PROCESSOR_KWARGS
 from torchtitan.rl.rollout.types import KeptSets, PromptImage, RolloutTurnID
 
-from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.training_batch_builder import TrainingBatchBuilder
 from torchtitan.rl.trainer.training_sample_builder import TrainingSample
 
 
@@ -47,7 +47,7 @@ def _make_samples(lengths: list[int]) -> list[TrainingSample]:
 
 
 def test_padding_workload_matches_existing_full_length_segments() -> None:
-    batcher = Batcher.Config(max_num_documents=20, rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(max_num_documents=20, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=60,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -60,12 +60,12 @@ def test_padding_workload_matches_existing_full_length_segments() -> None:
     long_samples = _make_samples([8] * 6)
     short_samples = _make_samples([1] * 20)
 
-    assert batcher._attention_workload(long_samples) == 6 * 8**2 + 10**2 + 2**2
-    assert batcher._attention_workload(short_samples) == 20 + 4 * 10**2
-    assert batcher._attention_workload([]) == 6 * 10**2
+    assert training_batch_builder._attention_workload(long_samples) == 6 * 8**2 + 10**2 + 2**2
+    assert training_batch_builder._attention_workload(short_samples) == 20 + 4 * 10**2
+    assert training_batch_builder._attention_workload([]) == 6 * 10**2
 
     for samples in (long_samples, short_samples, []):
-        microbatch = batcher._pack_training_samples(samples)
+        microbatch = training_batch_builder._pack_training_samples(samples)
         num_padding_segments = int(
             ((microbatch.positions == 0) & microbatch.padding_mask).sum().item()
         )
@@ -73,7 +73,7 @@ def test_padding_workload_matches_existing_full_length_segments() -> None:
 
 
 def test_lpt_uses_padding_workload_for_full_length_documents() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=48,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -85,22 +85,22 @@ def test_lpt_uses_padding_workload_for_full_length_documents() -> None:
     )
     samples = _make_samples([8] * 3 + [2] * 16)
 
-    assignments = batcher._assign_training_samples_to_microbatches(samples)
+    assignments = training_batch_builder._assign_training_samples_to_microbatches(samples)
 
     assert [
-        batcher._attention_workload(rank_samples)
+        training_batch_builder._attention_workload(rank_samples)
         for row in assignments
         for rank_samples in row
     ] == [288, 264]
     assert sorted(
-        sum(map(batcher.num_tokens_to_pack, rank_samples))
+        sum(map(training_batch_builder.num_tokens_to_pack, rank_samples))
         for row in assignments
         for rank_samples in row
     ) == [26, 30]
 
 
 def test_lpt_does_not_leave_a_full_length_document_in_an_expensive_bin() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=20,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -112,17 +112,17 @@ def test_lpt_does_not_leave_a_full_length_document_in_an_expensive_bin() -> None
     )
     samples = _make_samples([10, 5, 5, 5, 5])
 
-    assignments = batcher._assign_training_samples_to_microbatches(samples)
+    assignments = training_batch_builder._assign_training_samples_to_microbatches(samples)
 
     assert [
-        batcher._attention_workload(rank_samples)
+        training_batch_builder._attention_workload(rank_samples)
         for row in assignments
         for rank_samples in row
     ] == [150, 100]
 
 
 def test_lpt_rebalances_ffd_bins_with_document_limit() -> None:
-    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -134,15 +134,15 @@ def test_lpt_rebalances_ffd_bins_with_document_limit() -> None:
     )
     samples = _make_samples([4, 4, 3, 3, 3, 3, 2, 2])
 
-    assignments = batcher._assign_training_samples_to_microbatches(samples)
+    assignments = training_batch_builder._assign_training_samples_to_microbatches(samples)
 
     assert [
-        [batcher._attention_workload(rank_samples) for rank_samples in microbatch]
+        [training_batch_builder._attention_workload(rank_samples) for rank_samples in microbatch]
         for microbatch in assignments
     ] == [[26, 26], [22, 22]]
     assert all(
         len(rank_samples) <= 3
-        and sum(map(batcher.num_tokens_to_pack, rank_samples)) <= 8
+        and sum(map(training_batch_builder.num_tokens_to_pack, rank_samples)) <= 8
         for microbatch in assignments
         for rank_samples in microbatch
     )
@@ -155,7 +155,7 @@ def test_lpt_rebalances_ffd_bins_with_document_limit() -> None:
 
 
 def test_lpt_falls_back_when_ffd_fits_but_lpt_cannot() -> None:
-    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=6,
         max_context_length=3,
         num_prompts_per_train_step=1,
@@ -166,13 +166,13 @@ def test_lpt_falls_back_when_ffd_fits_but_lpt_cannot() -> None:
         max_kept_set_size=None,
     )
     samples = _make_samples([3] * 8 + [2] * 9)
-    assert batcher._pack_with_lpt(samples, target_num_bins=7) is None
+    assert training_batch_builder._pack_with_lpt(samples, target_num_bins=7) is None
 
-    assignments = batcher._assign_training_samples_to_microbatches(samples)
+    assignments = training_batch_builder._assign_training_samples_to_microbatches(samples)
 
     assert len(assignments) == 7
     assert [
-        sum(batcher.num_tokens_to_pack(sample) for sample in rank_samples)
+        sum(training_batch_builder.num_tokens_to_pack(sample) for sample in rank_samples)
         for (rank_samples,) in assignments
     ] == [6] * 7
     assert (
@@ -182,7 +182,7 @@ def test_lpt_falls_back_when_ffd_fits_but_lpt_cannot() -> None:
 
 
 def test_three_pp_microbatches_balance_rank_costs_within_step() -> None:
-    batcher = Batcher.Config(max_num_documents=1, rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(max_num_documents=1, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -194,13 +194,13 @@ def test_three_pp_microbatches_balance_rank_costs_within_step() -> None:
     )
     samples = _make_samples([10, 9, 8, 7, 6, 5])
 
-    assignments = batcher._assign_training_samples_to_microbatches(
+    assignments = training_batch_builder._assign_training_samples_to_microbatches(
         samples, num_pp_microbatches=3
     )
 
     assert len(assignments) == 3
     workloads = [
-        [batcher._attention_workload(rank_samples) for rank_samples in microbatch]
+        [training_batch_builder._attention_workload(rank_samples) for rank_samples in microbatch]
         for microbatch in assignments
     ]
     assert workloads == [[100, 82], [58, 68], [50, 52]]
@@ -216,7 +216,7 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
         dp_degree = rng.randint(1, 4)
         num_pp_microbatches = rng.choice([1, 3])
         max_num_documents = rng.choice([None, 1, 3, 6])
-        batcher = Batcher.Config(
+        training_batch_builder = TrainingBatchBuilder.Config(
             max_num_documents=max_num_documents,
             per_sample_pad_multiple=pad_multiple,
             rdma_min_tensor_bytes=None,
@@ -234,7 +234,7 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
             [rng.randint(1, seq_len) for _ in range(rng.randint(1, 30))]
         )
 
-        assignments = batcher._assign_training_samples_to_microbatches(
+        assignments = training_batch_builder._assign_training_samples_to_microbatches(
             samples, num_pp_microbatches=num_pp_microbatches
         )
 
@@ -242,12 +242,12 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
         assert all(len(row) == dp_degree for row in assignments)
         for row in assignments:
             for rank_samples in row:
-                assert sum(map(batcher.num_tokens_to_pack, rank_samples)) <= (
+                assert sum(map(training_batch_builder.num_tokens_to_pack, rank_samples)) <= (
                     num_rows * seq_len
                 )
                 if max_num_documents is not None:
                     assert len(rank_samples) <= max_num_documents
-                microbatch = batcher._pack_training_samples(rank_samples)
+                microbatch = training_batch_builder._pack_training_samples(rank_samples)
                 assert int((~microbatch.padding_mask).sum()) == sum(
                     len(sample.token_ids) - 1 for sample in rank_samples
                 )
@@ -268,7 +268,7 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
     samples[0].logprobs = np.array([0, -1, -2, -np.inf, -4, -5], dtype=np.float64)
     samples[0].advantage = np.arange(6, dtype=np.float32)
     samples[0].loss_mask[1] = False
-    batcher = Batcher.Config(
+    training_batch_builder = TrainingBatchBuilder.Config(
         per_sample_pad_multiple=pad_multiple, rdma_min_tensor_bytes=None
     ).build(
         num_tokens_per_microbatch_per_dp_rank=24,
@@ -280,7 +280,7 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
         num_topk_logprobs=0,
         max_kept_set_size=None,
     )
-    microbatch = batcher._pack_training_samples(samples)
+    microbatch = training_batch_builder._pack_training_samples(samples)
     valid = ~microbatch.padding_mask
     assert microbatch.input[valid].tolist() == [10, 11, 12, 13, 14, 20, 21, 22]
     assert microbatch.labels[valid].tolist() == [11, 12, 13, 14, 15, 21, 22, 23]
@@ -296,7 +296,7 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
     assert microbatch.loss_token_counts.tolist() == [6]
     assert microbatch.routing_token_counts.tolist() == [8]
     lengths = {1: [5, 3], 4: [8, 4], 8: [8, 8]}[pad_multiple]
-    assert [batcher.num_tokens_to_pack(sample) for sample in samples] == lengths
+    assert [training_batch_builder.num_tokens_to_pack(sample) for sample in samples] == lengths
     assert microbatch.positions.tolist() == [
         position
         for length in (*lengths, 24 - sum(lengths))
@@ -306,11 +306,11 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
     samples[0].advantage = samples[0].advantage[:-1]
     samples[1].advantage = np.pad(samples[1].advantage, (0, 1))
     with pytest.raises(ValueError, match="Segment fields must share one length"):
-        batcher._pack_training_samples(samples)
+        training_batch_builder._pack_training_samples(samples)
 
 
 def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -320,7 +320,7 @@ def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
         num_topk_logprobs=0,
         max_kept_set_size=None,
     )
-    microbatch = batcher._pack_training_samples(_make_samples([3]))
+    microbatch = training_batch_builder._pack_training_samples(_make_samples([3]))
 
     temperature = microbatch.as_input_dict()["loss_kwargs"]["temperature"]
     assert temperature.dtype == torch.float32
@@ -328,7 +328,7 @@ def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
 
 
 def test_microbatch_moves_loss_kwargs_with_the_model_inputs() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -338,7 +338,7 @@ def test_microbatch_moves_loss_kwargs_with_the_model_inputs() -> None:
         num_topk_logprobs=0,
         max_kept_set_size=None,
     )
-    microbatch = batcher._pack_training_samples(_make_samples([3]))
+    microbatch = training_batch_builder._pack_training_samples(_make_samples([3]))
 
     input_dict = microbatch.to_input_dict("meta")
 
@@ -407,7 +407,7 @@ def _image_sample(
 
 
 def test_microbatch_encodes_each_distinct_image_once(image_paths) -> None:
-    batcher = Batcher.Config(
+    training_batch_builder = TrainingBatchBuilder.Config(
         build_mrope_positions=True, rdma_min_tensor_bytes=None
     ).build(
         num_tokens_per_microbatch_per_dp_rank=64,
@@ -431,10 +431,10 @@ def test_microbatch_encodes_each_distinct_image_once(image_paths) -> None:
         _image_sample(2, [], 5),
     ]
 
-    microbatch = batcher._pack_training_samples(samples)
+    microbatch = training_batch_builder._pack_training_samples(samples)
     kwargs = microbatch.model_kwargs
 
-    # The batcher ships the image files once each; moving the inputs to the trainer's
+    # The training batch builder ships the image files once each; moving the inputs to the trainer's
     # device turns them into the model's pixel_values.
     processor = _VISION_PROCESSOR.build()
     pixel_values = torch.cat(
@@ -481,10 +481,10 @@ def test_microbatch_encodes_each_distinct_image_once(image_paths) -> None:
     assert torch.equal(kwargs["mrope_positions"], expected_mrope)
 
 
-def _image_batcher(
+def _image_training_batch_builder(
     num_tokens: int = 16, *, build_mrope_positions: bool = True
-) -> Batcher:
-    return Batcher.Config(
+) -> TrainingBatchBuilder:
+    return TrainingBatchBuilder.Config(
         build_mrope_positions=build_mrope_positions, rdma_min_tensor_bytes=None
     ).build(
         num_tokens_per_microbatch_per_dp_rank=num_tokens,
@@ -500,9 +500,9 @@ def _image_batcher(
 
 
 def test_text_microbatch_with_a_vision_processor_has_no_image_inputs() -> None:
-    batcher = _image_batcher()
+    training_batch_builder = _image_training_batch_builder()
 
-    microbatch = batcher._pack_training_samples(_make_samples([5]))
+    microbatch = training_batch_builder._pack_training_samples(_make_samples([5]))
 
     # The model uses the 1D positions and runs its dummy vision forward, as on every
     # rank without images.
@@ -513,9 +513,9 @@ def test_image_microbatch_without_mrope_positions(image_paths) -> None:
     """Without build_mrope_positions (a model whose image tokens take 1D positions, e.g.
     Muse Spark), an image microbatch carries no mrope_positions: the model uses positions."""
     image, placeholder = _prompt_image(image_paths[0], offset=1)
-    batcher = _image_batcher(num_tokens=64, build_mrope_positions=False)
+    training_batch_builder = _image_training_batch_builder(num_tokens=64, build_mrope_positions=False)
 
-    microbatch = batcher._pack_training_samples(
+    microbatch = training_batch_builder._pack_training_samples(
         [_image_sample(0, [(image, placeholder)], 12)]
     )
 
@@ -530,12 +530,12 @@ def test_image_grid_must_match_the_resized_image(image_paths) -> None:
     # count) for the same image.
     image = dataclasses.replace(image, grid_thw=(t, h + 2, w))
     placeholder = PlaceholderRange(offset=1, length=t * (h + 2) * w // 4)
-    batcher = _image_batcher(num_tokens=64)
-    microbatch = batcher._pack_training_samples(
+    training_batch_builder = _image_training_batch_builder(num_tokens=64)
+    microbatch = training_batch_builder._pack_training_samples(
         [_image_sample(0, [(image, placeholder)], 12)]
     )
 
-    # The trainer resizes the file and finds the batcher's vision processor's grid.
+    # The trainer resizes the file and finds the training_batch_builder's vision processor's grid.
     with pytest.raises(ValueError, match="same vision processor"):
         microbatch.preprocess_images()
 
@@ -544,15 +544,15 @@ def test_placeholder_count_must_match_the_grid(image_paths) -> None:
     image, placeholder = _prompt_image(image_paths[0], offset=1)
     # Embedding rows follow the placeholder count, the vision encoder's embeddings the grid.
     placeholder = PlaceholderRange(offset=1, length=placeholder.length - 1)
-    batcher = _image_batcher(num_tokens=64)
+    training_batch_builder = _image_training_batch_builder(num_tokens=64)
 
     with pytest.raises(ValueError, match="placeholders"):
-        batcher._pack_training_samples([_image_sample(0, [(image, placeholder)], 12)])
+        training_batch_builder._pack_training_samples([_image_sample(0, [(image, placeholder)], 12)])
 
 
 def test_packing_keeps_samples_of_an_image_together(image_paths) -> None:
     # Two groups of three samples, one image per group: each group fits one microbatch.
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=64,
         max_context_length=64,
         num_prompts_per_train_step=1,
@@ -571,7 +571,7 @@ def test_packing_keeps_samples_of_an_image_together(image_paths) -> None:
             for index in range(3)
         ]
 
-    [row] = batcher._assign_training_samples_to_microbatches(samples)
+    [row] = training_batch_builder._assign_training_samples_to_microbatches(samples)
 
     hashes_per_microbatch = sorted(
         sorted({image.hash_value for sample in bin_ for image in sample.images})
@@ -582,7 +582,7 @@ def test_packing_keeps_samples_of_an_image_together(image_paths) -> None:
 
 def test_token_budget_need_not_be_a_multiple_of_the_context() -> None:
     """A 2.5-context budget packs whole samples; padding positions wrap at the context."""
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=25,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -594,8 +594,8 @@ def test_token_budget_need_not_be_a_multiple_of_the_context() -> None:
     )
     samples = _make_samples([10, 10, 4])
 
-    assignments = batcher._assign_training_samples_to_microbatches(samples)
-    microbatch = batcher._pack_training_samples(samples)
+    assignments = training_batch_builder._assign_training_samples_to_microbatches(samples)
+    microbatch = training_batch_builder._pack_training_samples(samples)
     metadata = create_varlen_metadata_for_document(
         microbatch.positions,
         padding_mask=microbatch.padding_mask,
@@ -612,7 +612,7 @@ def test_token_budget_need_not_be_a_multiple_of_the_context() -> None:
 
 def test_token_budget_must_fit_a_full_context_sample() -> None:
     with pytest.raises(ValueError, match="must be at least max_context_length"):
-        Batcher.Config(rdma_min_tensor_bytes=None).build(
+        TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
             num_tokens_per_microbatch_per_dp_rank=9,
             max_context_length=10,
             num_prompts_per_train_step=1,
@@ -625,7 +625,7 @@ def test_token_budget_must_fit_a_full_context_sample() -> None:
 
 
 def test_microbatch_ships_topk_rows_for_loss_tokens_only() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -644,7 +644,7 @@ def test_microbatch_ships_topk_rows_for_loss_tokens_only() -> None:
     second.topk_token_ids = np.array([[1, 2], [3, 7]], dtype=np.int32)
     second.topk_logprobs = np.array([[-0.5, -1.0], [-0.6, -1.1]], dtype=np.float32)
 
-    microbatch = batcher._pack_training_samples([first, second])
+    microbatch = training_batch_builder._pack_training_samples([first, second])
     loss_kwargs = microbatch.to_input_dict("cpu")["loss_kwargs"]
 
     assert microbatch.generator_topk_token_ids.shape == (4, 2)
@@ -661,7 +661,7 @@ def test_microbatch_ships_topk_rows_for_loss_tokens_only() -> None:
         ),
     )
     # An empty bin ships no rows but still gives the loss [T, k], so every rank calls it alike.
-    empty_microbatch = batcher._pack_training_samples([])
+    empty_microbatch = training_batch_builder._pack_training_samples([])
     assert empty_microbatch.generator_topk_token_ids.shape == (0, 2)
     empty_loss_kwargs = empty_microbatch.to_input_dict("cpu")["loss_kwargs"]
     assert empty_loss_kwargs["generator_topk_token_ids"].tolist() == [[0, 0]] * 8
@@ -672,11 +672,11 @@ def test_microbatch_ships_topk_rows_for_loss_tokens_only() -> None:
     second.topk_token_ids = second.topk_token_ids[:1]
     second.topk_logprobs = second.topk_logprobs[:1]
     with pytest.raises(ValueError, match="3 top-k rows for 2 loss tokens"):
-        batcher._pack_training_samples([first, second])
+        training_batch_builder._pack_training_samples([first, second])
 
 
 def test_microbatch_ships_kept_sets_for_loss_tokens_only() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -701,7 +701,7 @@ def test_microbatch_ships_kept_sets_for_loss_tokens_only() -> None:
         lengths=np.array([1, 3], dtype=np.int32),
     )
 
-    microbatch = batcher._pack_training_samples([first, second])
+    microbatch = training_batch_builder._pack_training_samples([first, second])
     loss_kwargs = microbatch.to_input_dict("cpu")["loss_kwargs"]
 
     kept_token_ids = loss_kwargs["generator_kept_token_ids"]
@@ -725,10 +725,10 @@ def test_microbatch_ships_kept_sets_for_loss_tokens_only() -> None:
         second.kept_sets, lengths=np.array([4], dtype=np.int32)
     )
     with pytest.raises(ValueError, match="1 kept sets of 4 tokens for 2 tokens"):
-        batcher._pack_training_samples([first, second])
+        training_batch_builder._pack_training_samples([first, second])
     # A kept set wider than top_k raises instead of being cut.
     second.kept_sets = dataclasses.replace(
         second.kept_sets, lengths=np.array([0, 4], dtype=np.int32)
     )
     with pytest.raises(ValueError, match="kept set of 4 tokens, more than top_k = 3"):
-        batcher._pack_training_samples([first, second])
+        training_batch_builder._pack_training_samples([first, second])

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for async-controller pieces: batcher group-counting, the active-slot buffer backpressure,
+"""Unit tests for async-controller pieces: training batch builder group-counting, the active-slot buffer backpressure,
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
@@ -39,7 +39,7 @@ from torchtitan.rl.rollout.types import (
     RolloutTurnID,
 )
 
-from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.training_batch_builder import TrainingBatchBuilder
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
     TrainingSampleGroup,
@@ -102,7 +102,7 @@ def test_a_group_larger_than_rollouts_per_worker_raises(
 
 
 def test_greedy_training_sampling_raises() -> None:
-    # The batcher hands this temperature to the loss, which divides the logits by it.
+    # The training batch builder hands this temperature to the loss, which divides the logits by it.
     config = _controller_config_with_groups(num_groups=16, group_size=8)
     generator = dataclasses.replace(
         config.generator,
@@ -209,10 +209,10 @@ def _untrainable_group(group_id: int) -> TrainingSampleGroup:
     return TrainingSampleGroup(group_id=group_id, training_samples=[], metrics=[])
 
 
-def _build_batcher(
+def _build_training_batch_builder(
     *, num_prompts_per_train_step: int, num_mtp_layers: int = 0
-) -> Batcher:
-    config = Batcher.Config(rdma_min_tensor_bytes=None)
+) -> TrainingBatchBuilder:
+    config = TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None)
     config.num_mtp_layers = num_mtp_layers
     return config.build(
         num_tokens_per_microbatch_per_dp_rank=16384,
@@ -226,48 +226,52 @@ def _build_batcher(
     )
 
 
-def test_batcher_counts_trainable_groups_not_rollouts() -> None:
+def test_training_batch_builder_counts_trainable_groups_not_rollouts() -> None:
     # Target is 2 GROUPS. A single group with many rollouts is not a full batch; two groups are,
     # regardless of how many rollouts each contributes.
-    batcher = _build_batcher(num_prompts_per_train_step=2)
-    batch, group_is_trainable = batcher.add_training_samples(
+    training_batch_builder = _build_training_batch_builder(num_prompts_per_train_step=2)
+    batch, group_is_trainable = training_batch_builder.add_training_samples(
         training_sample_group=_trainable_group(0, num_samples=8)
     )
     assert batch is None
     assert group_is_trainable
-    batch, group_is_trainable = batcher.add_training_samples(
+    batch, group_is_trainable = training_batch_builder.add_training_samples(
         training_sample_group=_trainable_group(1, num_samples=1)
     )
     assert batch is not None
     assert group_is_trainable
 
 
-def test_batcher_packs_groups_in_id_order_regardless_of_arrival() -> None:
-    batcher = _build_batcher(num_prompts_per_train_step=2)
+def test_training_batch_builder_packs_groups_in_id_order_regardless_of_arrival() -> None:
+    training_batch_builder = _build_training_batch_builder(num_prompts_per_train_step=2)
     late_group = _trainable_group(7, num_samples=1)
     early_group = _trainable_group(3, num_samples=1)
     late_group.training_samples[0].min_policy_version = 7
     early_group.training_samples[0].min_policy_version = 3
 
     # g7 finishes first; the packed batch still lists g3 before g7.
-    batcher.add_training_samples(training_sample_group=late_group)
-    batch, _ = batcher.add_training_samples(training_sample_group=early_group)
+    training_batch_builder.add_training_samples(training_sample_group=late_group)
+    batch, _ = training_batch_builder.add_training_samples(
+        training_sample_group=early_group
+    )
 
     assert batch is not None
     assert batch.min_policy_versions == [3, 7]
     assert batch.group_ids == [3, 7]
 
 
-def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
+def test_training_batch_builder_carries_metric_only_groups_until_trainable_batch() -> None:
     # Metric-only (empty) groups do not count toward the target and cannot form a zero-token batch;
     # they ride along until a trainable group completes the batch.
-    batcher = _build_batcher(num_prompts_per_train_step=1)
+    training_batch_builder = _build_training_batch_builder(num_prompts_per_train_step=1)
     metric_only = TrainingSampleGroup(group_id=0, training_samples=[], metrics=[])
-    assert batcher.add_training_samples(training_sample_group=metric_only) == (
+    assert training_batch_builder.add_training_samples(
+        training_sample_group=metric_only
+    ) == (
         None,
         False,
     )
-    batch, group_is_trainable = batcher.add_training_samples(
+    batch, group_is_trainable = training_batch_builder.add_training_samples(
         training_sample_group=_trainable_group(1, num_samples=2)
     )
     assert batch is not None
@@ -277,9 +281,11 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert batch.group_ids == [0, 1]
 
 
-def test_batcher_prepares_per_depth_mtp_token_counts() -> None:
-    batcher = _build_batcher(num_prompts_per_train_step=1, num_mtp_layers=2)
-    batch, _ = batcher.add_training_samples(
+def test_training_batch_builder_prepares_per_depth_mtp_token_counts() -> None:
+    training_batch_builder = _build_training_batch_builder(
+        num_prompts_per_train_step=1, num_mtp_layers=2
+    )
+    batch, _ = training_batch_builder.add_training_samples(
         training_sample_group=_trainable_group(1, num_samples=2)
     )
 
@@ -288,14 +294,18 @@ def test_batcher_prepares_per_depth_mtp_token_counts() -> None:
     assert batch.global_routing_token_counts.shape == (3,)
 
 
-def test_batcher_warns_after_each_batch_of_untrainable_groups(
+def test_training_batch_builder_warns_after_each_batch_of_untrainable_groups(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    batcher = _build_batcher(num_prompts_per_train_step=2)
+    training_batch_builder = _build_training_batch_builder(num_prompts_per_train_step=2)
 
     with caplog.at_level(logging.WARNING):
-        batcher.add_training_samples(training_sample_group=_untrainable_group(0))
-        batcher.add_training_samples(training_sample_group=_untrainable_group(1))
+        training_batch_builder.add_training_samples(
+            training_sample_group=_untrainable_group(0)
+        )
+        training_batch_builder.add_training_samples(
+            training_sample_group=_untrainable_group(1)
+        )
 
     assert (
         "Consecutive untrainable batches: 1/10 "
@@ -303,37 +313,49 @@ def test_batcher_warns_after_each_batch_of_untrainable_groups(
     ) in caplog.text
 
 
-def test_batcher_resets_no_progress_count_on_trainable_group(
+def test_training_batch_builder_resets_no_progress_count_on_trainable_group(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    batcher = _build_batcher(num_prompts_per_train_step=2)
+    training_batch_builder = _build_training_batch_builder(num_prompts_per_train_step=2)
 
     with caplog.at_level(logging.WARNING):
-        batcher.add_training_samples(training_sample_group=_untrainable_group(0))
-        batcher.add_training_samples(training_sample_group=_untrainable_group(1))
-        batcher.add_training_samples(
+        training_batch_builder.add_training_samples(
+            training_sample_group=_untrainable_group(0)
+        )
+        training_batch_builder.add_training_samples(
+            training_sample_group=_untrainable_group(1)
+        )
+        training_batch_builder.add_training_samples(
             training_sample_group=_trainable_group(2, num_samples=1)
         )
         caplog.clear()
-        batcher.add_training_samples(training_sample_group=_untrainable_group(3))
+        training_batch_builder.add_training_samples(
+            training_sample_group=_untrainable_group(3)
+        )
 
     assert "zero-output batch equivalents" not in caplog.text
 
 
-def test_batcher_raises_at_consecutive_untrainable_group_limit() -> None:
-    batcher = _build_batcher(num_prompts_per_train_step=2)
+def test_training_batch_builder_raises_at_consecutive_untrainable_group_limit() -> None:
+    training_batch_builder = _build_training_batch_builder(num_prompts_per_train_step=2)
 
     for group_id in range(19):
-        batcher.add_training_samples(training_sample_group=_untrainable_group(group_id))
+        training_batch_builder.add_training_samples(
+            training_sample_group=_untrainable_group(group_id)
+        )
 
     with pytest.raises(RuntimeError, match="10 consecutive untrainable batches"):
-        batcher.add_training_samples(training_sample_group=_untrainable_group(19))
+        training_batch_builder.add_training_samples(
+            training_sample_group=_untrainable_group(19)
+        )
 
 
 def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
     # Five two-token samples need four rank inputs across two microbatches.
     # Redistributing one sample keeps every rank input trainable.
-    batcher = Batcher.Config(max_num_documents=4, rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(
+        max_num_documents=4, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=2,
         num_prompts_per_train_step=1,
@@ -343,7 +365,7 @@ def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
         num_topk_logprobs=0,
         max_kept_set_size=None,
     )
-    batch, group_is_trainable = batcher.add_training_samples(
+    batch, group_is_trainable = training_batch_builder.add_training_samples(
         training_sample_group=_trainable_group(0, num_samples=5)
     )
     assert batch is not None
@@ -361,8 +383,10 @@ def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
         assert not cell.padding_mask[cell.loss_mask].any()
 
 
-def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+def test_training_batch_builder_uses_flat_rank_capacity_and_reports_padding() -> None:
+    training_batch_builder = TrainingBatchBuilder.Config(
+        rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -372,7 +396,7 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
         num_topk_logprobs=0,
         max_kept_set_size=None,
     )
-    batch, group_is_trainable = batcher.add_training_samples(
+    batch, group_is_trainable = training_batch_builder.add_training_samples(
         training_sample_group=_variable_length_group(
             0,
             token_lengths=[4, 4, 3],
@@ -390,7 +414,7 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
 
 
 def test_flat_rank_packing_preserves_padding_mask() -> None:
-    batcher = Batcher.Config(
+    training_batch_builder = TrainingBatchBuilder.Config(
         per_sample_pad_multiple=4, rdma_min_tensor_bytes=None
     ).build(
         num_tokens_per_microbatch_per_dp_rank=8,
@@ -402,7 +426,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
         num_topk_logprobs=0,
         max_kept_set_size=None,
     )
-    batch, _ = batcher.add_training_samples(
+    batch, _ = training_batch_builder.add_training_samples(
         training_sample_group=_variable_length_group(0, token_lengths=[4])
     )
 
@@ -422,8 +446,10 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
     ]
 
 
-def test_batcher_balances_packing_across_dp_ranks() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+def test_training_batch_builder_balances_packing_across_dp_ranks() -> None:
+    training_batch_builder = TrainingBatchBuilder.Config(
+        rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -433,7 +459,7 @@ def test_batcher_balances_packing_across_dp_ranks() -> None:
         num_topk_logprobs=0,
         max_kept_set_size=None,
     )
-    batch, group_is_trainable = batcher.add_training_samples(
+    batch, group_is_trainable = training_batch_builder.add_training_samples(
         training_sample_group=_variable_length_group(
             0,
             token_lengths=[5, 4, 4, 3],
@@ -448,8 +474,10 @@ def test_batcher_balances_packing_across_dp_ranks() -> None:
     ] == [[6, 6]]
 
 
-def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+def test_training_batch_builder_fills_new_bin_from_multiple_heaviest_bins() -> None:
+    training_batch_builder = TrainingBatchBuilder.Config(
+        rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=40,
         max_context_length=40,
         num_prompts_per_train_step=1,
@@ -465,14 +493,18 @@ def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
     ).training_samples
     bins = [samples[:4], samples[4:8], samples[8:]]
 
-    batcher._expand_bins_by_splitting(bins, target_num_bins=4)
+    training_batch_builder._expand_bins_by_splitting(bins, target_num_bins=4)
 
     assert [len(bin_) for bin_ in bins] == [3, 3, 3, 3]
-    assert [batcher._attention_workload(bin_) for bin_ in bins] == [400] * 4
+    assert [training_batch_builder._attention_workload(bin_) for bin_ in bins] == [
+        400
+    ] * 4
 
 
-def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+def test_training_batch_builder_pads_when_no_bin_can_donate_a_sample() -> None:
+    training_batch_builder = TrainingBatchBuilder.Config(
+        rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -485,13 +517,15 @@ def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
     samples = _variable_length_group(0, token_lengths=[6, 6]).training_samples
     bins = [[samples[0]], [samples[1]]]
 
-    batcher._expand_bins_by_splitting(bins, target_num_bins=4)
+    training_batch_builder._expand_bins_by_splitting(bins, target_num_bins=4)
 
     assert bins == [[samples[0]], [samples[1]], [], []]
 
 
-def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+def test_training_batch_builder_splits_sorts_and_zigzags_by_attention_workload() -> None:
+    training_batch_builder = TrainingBatchBuilder.Config(
+        rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -508,9 +542,14 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
         token_lengths=[7, 7, 7, 5, 5, 5],
     ).training_samples
 
-    assignments = batcher._assign_training_samples_to_microbatches(samples)
+    assignments = training_batch_builder._assign_training_samples_to_microbatches(
+        samples
+    )
     workloads = [
-        [batcher._attention_workload(rank_samples) for rank_samples in microbatch]
+        [
+            training_batch_builder._attention_workload(rank_samples)
+            for rank_samples in microbatch
+        ]
         for microbatch in assignments
     ]
 
@@ -519,8 +558,10 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
     assert workloads == [[52, 52], [36, 52]]
 
 
-def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
-    batcher = Batcher.Config(max_num_documents=1, rdma_min_tensor_bytes=None).build(
+def test_training_batch_builder_zigzags_workloads_across_dp_ranks() -> None:
+    training_batch_builder = TrainingBatchBuilder.Config(
+        max_num_documents=1, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -537,9 +578,14 @@ def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
         token_lengths=[11, 9, 7, 5],
     ).training_samples
 
-    assignments = batcher._assign_training_samples_to_microbatches(samples)
+    assignments = training_batch_builder._assign_training_samples_to_microbatches(
+        samples
+    )
     workloads = [
-        [batcher._attention_workload(rank_samples) for rank_samples in microbatch]
+        [
+            training_batch_builder._attention_workload(rank_samples)
+            for rank_samples in microbatch
+        ]
         for microbatch in assignments
     ]
 
@@ -547,8 +593,10 @@ def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
     assert [sum(rank_workloads) for rank_workloads in zip(*workloads)] == [152, 120]
 
 
-def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> None:
-    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
+def test_training_batch_builder_reports_padding_when_document_limit_blocks_greedy_order() -> None:
+    training_batch_builder = TrainingBatchBuilder.Config(
+        max_num_documents=3, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=6,
         max_context_length=3,
         num_prompts_per_train_step=1,
@@ -558,7 +606,7 @@ def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> No
         num_topk_logprobs=0,
         max_kept_set_size=None,
     )
-    batch, _ = batcher.add_training_samples(
+    batch, _ = training_batch_builder.add_training_samples(
         training_sample_group=_variable_length_group(
             0,
             token_lengths=[2, 2, 4, 2, 2, 4],
@@ -575,9 +623,11 @@ def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> No
 
 
 def test_document_limit_applies_to_each_local_microbatch() -> None:
-    # A local microbatch is capped at three documents. The batcher must keep all
+    # A local microbatch is capped at three documents. The training batch builder must keep all
     # five documents and distribute them 2 + 3 across two microbatches.
-    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(
+        max_num_documents=3, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -587,7 +637,7 @@ def test_document_limit_applies_to_each_local_microbatch() -> None:
         num_topk_logprobs=0,
         max_kept_set_size=None,
     )
-    batch, group_is_trainable = batcher.add_training_samples(
+    batch, group_is_trainable = training_batch_builder.add_training_samples(
         training_sample_group=_trainable_group(0, num_samples=5)
     )
 
@@ -603,7 +653,9 @@ def test_document_limit_applies_to_each_local_microbatch() -> None:
 
 
 def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
-    batcher = Batcher.Config(max_num_documents=1, rdma_min_tensor_bytes=None).build(
+    training_batch_builder = TrainingBatchBuilder.Config(
+        max_num_documents=1, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=2,
         num_prompts_per_train_step=1,
@@ -613,7 +665,7 @@ def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
         num_topk_logprobs=0,
         max_kept_set_size=None,
     )
-    batch, _ = batcher.add_training_samples(
+    batch, _ = training_batch_builder.add_training_samples(
         training_sample_group=_trainable_group(0, num_samples=2)
     )
 
@@ -624,8 +676,10 @@ def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
         assert int(real_document_starts.sum().item()) == 1
 
 
-def test_batcher_filters_training_samples_longer_than_context() -> None:
-    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+def test_training_batch_builder_filters_training_samples_longer_than_context() -> None:
+    training_batch_builder = TrainingBatchBuilder.Config(
+        rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -641,7 +695,7 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
     sample.logprobs = np.zeros(6, dtype=np.float32)
     sample.advantage = np.zeros(6, dtype=np.float32)
 
-    pending, group_is_trainable = batcher.add_training_samples(
+    pending, group_is_trainable = training_batch_builder.add_training_samples(
         training_sample_group=TrainingSampleGroup(
             group_id=0,
             training_samples=[sample],
@@ -651,7 +705,7 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
     assert pending is None
     assert not group_is_trainable
 
-    batch, _ = batcher.add_training_samples(
+    batch, _ = training_batch_builder.add_training_samples(
         training_sample_group=_trainable_group(1, num_samples=1)
     )
     assert batch is not None
@@ -659,7 +713,7 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
     dropped_metric = next(
         metric
         for metric in batch.metrics
-        if metric.key == "batcher/num_samples_dropped_oversized"
+        if metric.key == "training_batch_builder/num_samples_dropped_oversized"
     )
     assert dropped_metric.value.value == 1
 
@@ -739,7 +793,9 @@ def test_untrainable_group_releases_before_training() -> None:
         buffer = RolloutGroupWorkBuffer.Config().build(
             max_active_rollout_groups=1, window_size=None
         )
-        batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+        training_batch_builder = TrainingBatchBuilder.Config(
+            rdma_min_tensor_bytes=None
+        ).build(
             num_tokens_per_microbatch_per_dp_rank=16384,
             max_context_length=2048,
             num_prompts_per_train_step=1,
@@ -758,7 +814,7 @@ def test_untrainable_group_releases_before_training() -> None:
             group_id=0, training_samples=[], metrics=[]
         )
         await buffer.release_active_groups(1, reason="untrainable_group")
-        assert batcher.add_training_samples(
+        assert training_batch_builder.add_training_samples(
             training_sample_group=training_sample_group
         ) == (
             None,
@@ -960,7 +1016,7 @@ def _run_with_generator_watcher(
             _make_generate_fn=lambda self: None,
             _data_input_loop=_block_forever,
             _rollout_loop=_block_forever,
-            _batcher_loop=_block_forever,
+            _training_batch_builder_loop=_block_forever,
             _trainer_loop=trainer_loop,
         ),
     ):

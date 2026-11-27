@@ -12,7 +12,7 @@ This design is inspired by the windowed FIFO rollout scheduling described in Sec
 
 ## Greedy consumption
 
-With `windowed_fifo_batches = None` the batcher takes the oldest finalized group anywhere in the buffer. It does not wait for an unfinished older group while a younger finished group is ready.
+With `windowed_fifo_batches = None` the training batch builder takes the oldest finalized group anywhere in the buffer. It does not wait for an unfinished older group while a younger finished group is ready.
 
 There is no maximum offpolicy age. A slow group is trained when it lands, however old. The share of samples older than `S` is reported in `train_batch/pct_samples_over_target_age` and logged with a warning; they are never dropped.
 
@@ -28,7 +28,7 @@ Why bound the age at all? If the oldest group is slow, greedy consumption keeps 
 
 Windowed FIFO is a bounded compromise. It lets a limited number of younger groups bypass a slow group, buying time for that group to finish. A bypassed straggler is consumed at most `windowed_fifo_batches` steps older than the target, and the buffer size is not increased for every sample.
 
-The window is anchored at the oldest group still in the buffer. Consuming a younger group does not slide it forward, so no more than `W - 1` younger groups can bypass the oldest group before the batcher waits for it.
+The window is anchored at the oldest group still in the buffer. Consuming a younger group does not slide it forward, so no more than `W - 1` younger groups can bypass the oldest group before the training batch builder waits for it.
 
 ## Windowed FIFO configuration
 
@@ -58,7 +58,7 @@ Let `target_offpolicy_steps = 1`, `num_prompts_per_train_step = 3`, and `windowe
 [ 0 ready ][ 1 ready ][ 2 slow ][ 3 ready ][ 4 ready ][ 5 ready ]
 ```
 
-The batcher consumes groups `0` and `1`. The window is now anchored at group `2` and covers groups `[2, 4]`:
+The training batch builder consumes groups `0` and `1`. The window is now anchored at group `2` and covers groups `[2, 4]`:
 
 ```text
 anchored window

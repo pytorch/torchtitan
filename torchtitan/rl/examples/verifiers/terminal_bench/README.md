@@ -100,7 +100,7 @@ python -m torchtitan.rl.examples.verifiers.terminal_bench.prepare_tmax \
   controller host needs that access.
 - **The run fails after 10 untrainable batches.** A group whose samples all get the
   same reward is dropped (`TrainingSampleBuilder.drop_zero_std_reward_groups`). The
-  batcher warns after each batch's worth of such groups in a row and raises
+  training batch builder warns after each batch's worth of such groups in a row and raises
   "consecutive untrainable batches" after 10. Check grading on a few tasks, and that
   the model solves some of them, before a long run.
 

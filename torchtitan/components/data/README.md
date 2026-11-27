@@ -498,7 +498,7 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
-The default cost, `document_attention_cost`, is the sum of squared attention segment lengths, read from `positions` as the varlen attention metadata does: documents plus the padding tail, which attention computes as segments of `max_context_length`. RL's batcher uses the same model (`packed_attention_cost`).
+The default cost, `document_attention_cost`, is the sum of squared attention segment lengths, read from `positions` as the varlen attention metadata does: documents plus the padding tail, which attention computes as segments of `max_context_length`. RL's training batch builder uses the same model (`packed_attention_cost`).
 
 Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. Local balancing works the same for `dp_replicate`, `dp_shard`, CP, and gradient accumulation when FSDP synchronizes every microbatch (the default). It does not help when ranks synchronize once per several microbatches (pipeline parallelism, `defer_fsdp_gradient_reduction`): there each rank's sum over the step matters, and reordering within a window does not balance it.
 

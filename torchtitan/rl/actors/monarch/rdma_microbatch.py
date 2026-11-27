@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Monarch's RDMA microbatch for the default RDMA path (`Batcher.Config.rdma_min_tensor_bytes`): the
-batcher registers each microbatch's large tensors as Monarch RDMA buffers, and each trainer rank reads its own
+"""Monarch's RDMA microbatch for the default RDMA path (`TrainingBatchBuilder.Config.rdma_min_tensor_bytes`): the
+training batch builder registers each microbatch's large tensors as Monarch RDMA buffers, and each trainer rank reads its own
 column.
 """
 
@@ -19,7 +19,7 @@ import torch
 from monarch.rdma import RDMAAction, RDMABuffer
 from torch.utils import _pytree as pytree
 
-from torchtitan.rl.trainer.batcher import TrainingMicrobatch
+from torchtitan.rl.trainer.training_batch_builder import TrainingMicrobatch
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -108,7 +108,7 @@ class _TensorRef:
     @classmethod
     def register(cls, tensor: torch.Tensor) -> _TensorRef:
         # A view, not a copy: the buffer keeps the tensor's storage alive until drop().
-        # view(-1) needs a contiguous tensor; the batcher builds only contiguous ones.
+        # view(-1) needs a contiguous tensor; the training batch builder builds only contiguous ones.
         return cls(
             buffer=RDMABuffer(tensor.view(-1).view(torch.uint8)),
             shape=tensor.shape,

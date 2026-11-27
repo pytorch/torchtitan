@@ -28,11 +28,14 @@ from torchtitan.rl.actors.monarch.rdma_microbatch import (
     MonarchRDMAMicrobatch,
 )
 from torchtitan.rl.rollout.types import RolloutTurnID
-from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     _NUM_MICROBATCHES_READ_AHEAD,
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
+)
+from torchtitan.rl.trainer.training_batch_builder import (
+    TrainingBatchBuilder,
+    TrainingMicrobatch,
 )
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
@@ -141,10 +144,14 @@ def test_only_registered_microbatches_are_rdma_microbatches(monkeypatch) -> None
     assert not isinstance(microbatch, RDMAMicrobatch)
 
 
-def _build_batcher(rdma_min_tensor_bytes: int | None) -> Batcher:
+def _build_training_batch_builder(
+    rdma_min_tensor_bytes: int | None,
+) -> TrainingBatchBuilder:
     # One group per batch, one 256-token microbatch: the int64 (2 KiB) and float32 (1 KiB) fields
     # reach 1 KiB; the bool masks and token counts stay in the message.
-    return Batcher.Config(rdma_min_tensor_bytes=rdma_min_tensor_bytes).build(
+    return TrainingBatchBuilder.Config(
+        rdma_min_tensor_bytes=rdma_min_tensor_bytes
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=256,
         max_context_length=256,
         num_prompts_per_train_step=1,
@@ -157,9 +164,9 @@ def _build_batcher(rdma_min_tensor_bytes: int | None) -> Batcher:
     )
 
 
-def test_batcher_rejects_rdma_without_a_registration() -> None:
+def test_training_batch_builder_rejects_rdma_without_a_registration() -> None:
     with pytest.raises(ValueError, match="needs register_rdma_microbatch"):
-        Batcher.Config(rdma_min_tensor_bytes=1024).build(
+        TrainingBatchBuilder.Config(rdma_min_tensor_bytes=1024).build(
             num_tokens_per_microbatch_per_dp_rank=256,
             max_context_length=256,
             num_prompts_per_train_step=1,
@@ -190,32 +197,36 @@ def _training_sample_group(group_id: int, num_samples: int = 1) -> TrainingSampl
     return TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])
 
 
-def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> None:
+def test_training_batch_builder_without_rdma_min_tensor_bytes_never_registers(
+    monkeypatch,
+) -> None:
     def fail_to_register(tensor: torch.Tensor) -> None:
         pytest.fail("registered an RDMA buffer with rdma_min_tensor_bytes unset")
 
     monkeypatch.setattr(rdma_microbatch, "RDMABuffer", fail_to_register)
-    batcher = _build_batcher(rdma_min_tensor_bytes=None)
+    training_batch_builder = _build_training_batch_builder(rdma_min_tensor_bytes=None)
 
-    batch, _ = batcher.add_training_samples(
+    batch, _ = training_batch_builder.add_training_samples(
         training_sample_group=_training_sample_group(0)
     )
-    asyncio.run(batcher.maybe_release_oldest_batch())
+    asyncio.run(training_batch_builder.maybe_release_oldest_batch())
 
     assert isinstance(batch.microbatch_groups[0][0][0], TrainingMicrobatch)
 
 
-def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> None:
+def test_training_batch_builder_registers_each_batch_and_releases_the_oldest(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(rdma_microbatch, "RDMABuffer", _FakeRDMABuffer)
-    batcher = _build_batcher(rdma_min_tensor_bytes=1024)
+    training_batch_builder = _build_training_batch_builder(rdma_min_tensor_bytes=1024)
 
     batches = [
-        batcher.add_training_samples(
+        training_batch_builder.add_training_samples(
             training_sample_group=_training_sample_group(group_id)
         )[0]
         for group_id in (0, 1)
     ]
-    asyncio.run(batcher.maybe_release_oldest_batch())
+    asyncio.run(training_batch_builder.maybe_release_oldest_batch())
 
     buffers = [
         [
@@ -343,7 +354,7 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
 ) -> None:
     # Real Monarch RDMA over TCP (works on any CI host; the rank processes inherit the env var).
     monkeypatch.setenv("MONARCH_RDMA_DISABLE_IBVERBS", "1")
-    batcher_kwargs = dict(
+    training_batch_builder_kwargs = dict(
         num_tokens_per_microbatch_per_dp_rank=64,
         max_context_length=16,
         num_prompts_per_train_step=1,
@@ -353,12 +364,15 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
         num_topk_logprobs=0,
         max_kept_set_size=None,
     )
-    rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(
-        **batcher_kwargs, register_rdma_microbatch=MonarchRDMAMicrobatch.register
+    rdma_training_batch_builder = TrainingBatchBuilder.Config(
+        rdma_min_tensor_bytes=256
+    ).build(
+        **training_batch_builder_kwargs,
+        register_rdma_microbatch=MonarchRDMAMicrobatch.register
     )
-    by_value_batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
-        **batcher_kwargs
-    )
+    by_value_training_batch_builder = TrainingBatchBuilder.Config(
+        rdma_min_tensor_bytes=None
+    ).build(**training_batch_builder_kwargs)
 
     async def run() -> None:
         mesh = this_host().spawn_procs(per_host={"procs": 4})
@@ -366,10 +380,10 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
             ranks = mesh.spawn("rank", _TrainerRank)
             for batch_index in range(3):
                 group = _training_sample_group(batch_index, num_samples=8)
-                batch, _ = rdma_batcher.add_training_samples(
+                batch, _ = rdma_training_batch_builder.add_training_samples(
                     training_sample_group=group
                 )
-                expected, _ = by_value_batcher.add_training_samples(
+                expected, _ = by_value_training_batch_builder.add_training_samples(
                     training_sample_group=group
                 )
                 # All 4 ranks read at once, while the previous batch is still registered.
@@ -388,8 +402,8 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
                     )
                 if batch_index > 0:
                     # Free the previous batch; the next one registers fresh buffers.
-                    await rdma_batcher.maybe_release_oldest_batch()
-            await rdma_batcher.maybe_release_oldest_batch()
+                    await rdma_training_batch_builder.maybe_release_oldest_batch()
+            await rdma_training_batch_builder.maybe_release_oldest_batch()
         finally:
             await mesh.stop()
 

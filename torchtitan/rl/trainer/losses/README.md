@@ -43,7 +43,7 @@ The controller then asks the generator for its top-k logprobs on every training 
 (validation requests get none) and the loss receives them as `[T, k]` inputs:
 
 ```
-generator (vLLM, SGLang)    batcher                          PolicyGradientLoss
+generator (vLLM, SGLang)    TrainingBatchBuilder             PolicyGradientLoss
   top-k ids, logprobs  -->    one row per loss token   -->     correction = sum_H c_v * log p_v
   [num_generated, k]          scattered to [T, k] on device    token_loss += A * correction
 ```
@@ -99,13 +99,13 @@ gradient    : B up, A down; C and D get none
 ```
 
 The generator returns each token's kept set and `q_S` over it (SGLang's sampling mask, in
-"support" mode). They travel packed, and the batcher pads each loss token's kept set to a row of
+"support" mode). They travel packed, and the training batch builder pads each loss token's kept set to a row of
 `top_k` (ids padded with 0, logprobs with -inf, which marks the padding; a larger kept set
 raises). The trainer receives `[T, top_k]` tensors, which CP, SPMD typing and the chunked loss
 treat like the top-k rows:
 
 ```
-generator (SGLang)          batcher                         PolicyGradientLoss
+generator (SGLang)          TrainingBatchBuilder            PolicyGradientLoss
   kept ids, q_S, sizes -->    one row per loss token   -->    log p_S over each kept set
   [num_kept], [num_gen]       [T, top_k], -inf padding        score centering over S
 ```

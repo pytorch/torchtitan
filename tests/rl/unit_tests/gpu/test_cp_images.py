@@ -6,7 +6,7 @@
 
 """Context parallelism with image inputs on the RL trainer path.
 
-Packs image microbatches with the batcher (each distinct image once per microbatch, every
+Packs image microbatches with the training batch builder (each distinct image once per microbatch, every
 placeholder token pointing at its row of the image embeddings), then trains them through
 `Trainer.forward_backward` with Qwen3.5-0.8B: once without CP (FSDP=2, each rank the same
 microbatch) and once per CP layout. CP shards the tokens, their embedding rows and their
@@ -66,9 +66,9 @@ from torchtitan.models.qwen3_5 import (
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
-from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.trainer.training_batch_builder import TrainingBatchBuilder
 from torchtitan.rl.trainer.training_sample_builder import TrainingSample
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -246,8 +246,10 @@ def _global_token_index(trainer: Trainer, layout: str) -> torch.Tensor:
     return order[cp_rank * local : (cp_rank + 1) * local]
 
 
-def _batcher() -> Batcher:
-    return Batcher.Config(build_mrope_positions=True, rdma_min_tensor_bytes=None).build(
+def _training_batch_builder() -> TrainingBatchBuilder:
+    return TrainingBatchBuilder.Config(
+        build_mrope_positions=True, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=SEQ_LEN,
         max_context_length=SEQ_LEN,
         num_prompts_per_train_step=1,
@@ -264,7 +266,7 @@ def _run(layout: str) -> dict[str, dict]:
     """Per case: the full-microbatch decoder input embeddings and positions (on rank 0),
     and the vision encoder's gradients."""
     trainer = _build_trainer(layout)
-    batcher = _batcher()
+    training_batch_builder = _training_batch_builder()
     fsdp = LAYOUTS[layout][0]
     model = trainer.engine.model_parts[0]
     captured = {}
@@ -279,7 +281,9 @@ def _run(layout: str) -> dict[str, dict]:
     index = _global_token_index(trainer, layout)
     results = {}
     for case, samples in _cases().items():
-        microbatch = batcher._pack_training_samples(samples).preprocess_images()
+        microbatch = training_batch_builder._pack_training_samples(
+            samples
+        ).preprocess_images()
         # Without CP, both FSDP ranks train the microbatch: the global counts double.
         asyncio.run(
             trainer.forward_backward(

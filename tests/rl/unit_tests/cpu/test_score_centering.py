@@ -125,7 +125,7 @@ def _expected_kept_set_gradient(
     loss, logits_row, kept_ids, generator_kept_logprobs, advantage
 ):
     """``sum_{y in S} q_S(y) * d loss(y) / d logits`` at one position whose kept set is S,
-    padded with two columns as the batcher pads it."""
+    padded with two columns as the training batch builder pads it."""
     num_kept = kept_ids.shape[0]
     logits = logits_row.expand(num_kept, -1).clone().requires_grad_(True)
 

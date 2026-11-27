@@ -19,7 +19,6 @@ from monarch.rdma import get_rdma_backend
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
-from torchtitan.rl.actors.monarch.batcher import BatcherActor
 from torchtitan.rl.actors.monarch.generator import GeneratorActor
 from torchtitan.rl.actors.monarch.provisioning import (
     compute_generator_world_size,
@@ -34,6 +33,9 @@ from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.router import InterGeneratorRouterActor
 from torchtitan.rl.actors.monarch.torch_elastic import setup_torch_elastic_env
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
+from torchtitan.rl.actors.monarch.training_batch_builder import (
+    TrainingBatchBuilderActor,
+)
 from torchtitan.rl.actors.system import ActorSystem, ServiceHandle, TrainerHandle
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
@@ -43,8 +45,8 @@ from torchtitan.rl.model_state_dict_transport import (
 )
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.trainer.training_batch_builder import TrainingBatchBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,7 @@ class MonarchActorSystem(ActorSystem):
     partitioned with ``CUDA_VISIBLE_DEVICES``, or on the ``host_meshes`` a
     launcher passes in (e.g. ``MonarchControllerWithLauncher`` in
     ``launcher/base.py``, with the hosts of a submitted job). The router, the
-    batcher and the rollout worker pool get CPU procs on this host.
+    training batch builder and the rollout worker pool get CPU procs on this host.
 
     Example: a ``Controller`` subclass that allocated its hosts as
     ``self.host_meshes``::
@@ -80,7 +82,7 @@ class MonarchActorSystem(ActorSystem):
         self._trainer_mesh: ProcMesh | None = None
         self._generator_meshes: list[ProcMesh] = []
         self._router_mesh: ProcMesh | None = None
-        self._batcher_mesh: ProcMesh | None = None
+        self._training_batch_builder_mesh: ProcMesh | None = None
         self._rollout_worker_mesh: ProcMesh | None = None
         self._trainer: Any | None = None
         self._generators: list[ServiceHandle] = []
@@ -103,9 +105,9 @@ class MonarchActorSystem(ActorSystem):
         # controller's process so routing does not contend with the training
         # loop for the controller's GIL.
         self._router_mesh = spawn_cpu_procs(1)
-        # Same for the batcher: build + pack would contend for the controller's GIL.
+        # Same for the training batch builder: build + pack would contend for the controller's GIL.
         # It drops its own buffers (maybe_release_oldest_batch): Monarch's drop must run on the owner's host.
-        self._batcher_mesh = spawn_cpu_procs(1)
+        self._training_batch_builder_mesh = spawn_cpu_procs(1)
 
         await setup_torch_elastic_env(self._trainer_mesh)
         for generator_mesh in self._generator_meshes:
@@ -171,16 +173,22 @@ class MonarchActorSystem(ActorSystem):
             generators=self._generators,
         )
 
-    async def spawn_batcher(self, config: Batcher.Config, **kwargs: Any) -> Any:
+    async def spawn_training_batch_builder(
+        self, config: TrainingBatchBuilder.Config, **kwargs: Any
+    ) -> Any:
         if config.rdma_min_tensor_bytes is not None and get_rdma_backend() == "none":
             raise ValueError(
-                f"async_loop.batcher.rdma_min_tensor_bytes={config.rdma_min_tensor_bytes}, but "
+                f"async_loop.training_batch_builder.rdma_min_tensor_bytes={config.rdma_min_tensor_bytes}, but "
                 "Monarch has no RDMA backend (no RDMA bindings, or no ibverbs with TCP fallback "
                 "off). Set it to None, or set MONARCH_RDMA_ALLOW_TCP_FALLBACK=1."
             )
 
-        assert self._batcher_mesh is not None, "provision before spawning"
-        return self._batcher_mesh.spawn("batcher", BatcherActor, config, **kwargs)
+        assert (
+            self._training_batch_builder_mesh is not None
+        ), "provision before spawning"
+        return self._training_batch_builder_mesh.spawn(
+            "training_batch_builder", TrainingBatchBuilderActor, config, **kwargs
+        )
 
     async def spawn_rollout_workers(
         self,
@@ -264,13 +272,13 @@ class MonarchActorSystem(ActorSystem):
             mesh
             for mesh in (
                 self._router_mesh,
-                self._batcher_mesh,
+                self._training_batch_builder_mesh,
                 self._trainer_mesh,
                 *self._generator_meshes,
             )
             if mesh is not None
         ]
-        self._router_mesh, self._batcher_mesh = None, None
+        self._router_mesh, self._training_batch_builder_mesh = None, None
         self._trainer_mesh, self._generator_meshes = None, []
         self._trainer, self._generators = None, []
         for i, mesh in enumerate(meshes):

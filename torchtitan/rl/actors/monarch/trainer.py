@@ -19,10 +19,10 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch
 
 from torchtitan.rl.trainer.trainer import OptimizerStepOutput, Trainer
+from torchtitan.rl.trainer.training_batch_builder import TrainingMicrobatch
 
 
 class _TrainerActorEndpoints:

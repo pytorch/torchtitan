@@ -454,7 +454,7 @@ class TokenEnv(Configurable):
             if values
         }
         if modalities - {"image"}:
-            # TODO: video prompts need video grids in PromptImage, the generator and the batcher.
+            # TODO: video prompts need video grids in PromptImage, the generator and the training batch builder.
             raise NotImplementedError(
                 f"RL prompts support images only, got modalities {sorted(modalities)}."
             )

@@ -421,7 +421,7 @@ class Qwen35MultimodalModel(Qwen35Model, MultimodalModel):
             pixel_values = input_dict.get("pixel_values")
             # Under CP, give each token its row in the image embeddings by counting the
             # placeholder tokens (a block of rows per placeholder run, in order), unless the
-            # batch provides the rows: the RL batcher encodes each distinct image once and
+            # batch provides the rows: the RL training batch builder encodes each distinct image once and
             # points every run that shows it at the same rows, which counting would not.
             if (
                 pixel_values is not None
