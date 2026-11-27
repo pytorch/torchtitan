@@ -71,9 +71,9 @@ Accelerator graphs currently require `sdc_replayer.num_replays=1`. Additional re
 would require restoring graph-owned gradient and optional-buffer storage
 without changing its captured addresses.
 
-Sparse COO gradients and buffers are coalesced before checksumming their stored
-indices and values in order. This combines duplicate coordinates and avoids
-allocating a dense copy of the table.
+Gradients and buffers with the `torch.sparse_coo` layout are coalesced before
+checksumming their stored indices and values in order. This combines duplicate
+coordinates and avoids allocating a dense copy of the table.
 
 Dense tensors use the existing XOR-based `torch.hash_tensor` mode. This
 checksum is order-insensitive, so permutations and some repeated-value
