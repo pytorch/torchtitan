@@ -1,0 +1,40 @@
+name: Inkling CPU Unit Test
+
+on:
+  pull_request:
+    paths:
+      - 'torchtitan/experiments/inkling/**'
+      - 'torchtitan_recipes/models/inkling.py'
+      - '.github/workflows/unit_test_cpu_inkling.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'torchtitan/experiments/inkling/**'
+      - 'torchtitan_recipes/models/inkling.py'
+      - '.github/workflows/unit_test_cpu_inkling.yaml'
+
+concurrency:
+  group: inkling-cpu-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  set-matrix:
+    uses: ./.github/workflows/set-matrix.yaml
+
+  test:
+    needs: set-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    with:
+      runner: mt-l-x86iavx512-8-64
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:${{ needs.set-matrix.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      script: |
+        set -eux
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+        pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
+        pytest torchtitan/experiments/inkling/tests -v
