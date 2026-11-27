@@ -234,6 +234,13 @@ class Indexer(Module):
         return_scores: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Project features and return document-local selections and requested scores."""
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None and spmd.is_type_checking():
+            # The indexer is TP-invariant: its params only receive the aux-loss
+            # gradient, which is identical on every rank.
+            assert not x.requires_grad and not qr.requires_grad
+            x = spmd.reinterpret_no_grad(x, "tp", dst=spmd.I)
+            qr = spmd.reinterpret_no_grad(qr, "tp", dst=spmd.I)
         seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
@@ -321,7 +328,7 @@ class InnerIndexer(Module):
             ).squeeze(0)
 
         if not return_scores:
-            return topk_indices, idx_q.new_empty((idx_q.size(0), 0))
+            return topk_indices, torch.empty_like(idx_q[:, :0, 0])
 
         valid_TK = topk_indices >= 0
         gather_indices_TK = compressed_gather_indices(
@@ -461,8 +468,4 @@ class SparseIndexerLoss(AuxLoss):
         raw_sum = self._logged_kl(
             p_TK, t_TK, topk_scores_TK.float(), slot_valid_TK
         ).sum()
-        # TP-replicated students sum their gradients. Keep the globally correct
-        # metric, but contribute only 1/TP of its gradient on each rank.
-        tp_size = spmd_mesh_size("tp")
-        raw_sum = raw_sum.detach() + (raw_sum - raw_sum.detach()) / tp_size
         return self.inject(raw_sum, carrier=carrier, denominator=denominator)

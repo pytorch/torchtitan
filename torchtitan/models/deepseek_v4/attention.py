@@ -37,6 +37,20 @@ class DeepSeekV4CompressedSparseAttentionMetadata(VarlenAttentionMetadata):
     group_first: torch.Tensor
     compressed_causal_indices: torch.Tensor | None = None
 
+    def annotate_spmd_types(self) -> None:
+        VarlenAttentionMetadata.annotate_spmd_types(self)
+        # Compressed geometry is token-indexed and identical on every TP rank.
+        layout = spmd.SpmdType(
+            {
+                MeshAxisName.DP: spmd.V,
+                MeshAxisName.CP: spmd.V,
+                MeshAxisName.TP: spmd.I,
+            },
+            partition_spec=spmd.PartitionSpec((MeshAxisName.DP, MeshAxisName.CP)),
+        )
+        spmd.assert_type(self.group_start, layout)
+        spmd.assert_type(self.group_first, layout)
+
 
 register_dataclass(DeepSeekV4CompressedSparseAttentionMetadata)
 

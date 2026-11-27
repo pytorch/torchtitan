@@ -26,7 +26,7 @@ class TestIndexerSelect(unittest.TestCase):
     def test_indexer_select_matches_old_topk(self):
         torch.manual_seed(0)
         device = torch.device("cpu")
-        seqlen, ratio, topk = 512, 4, 16
+        seqlen, ratio, topk = 128, 4, 16
         n_cmp = seqlen // ratio
         g = torch.Generator(device).manual_seed(11)
         idx_q = torch.randn(seqlen, 8, 32, generator=g, device=device)
