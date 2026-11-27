@@ -90,12 +90,6 @@ class OffsetRMSNorm(Module):
         return ((1.0 + self.weight.float()) * input).to(input_dtype)
 
 
-@local_compile("attn_output_gate", batch_invariant=True)
-def _apply_output_gate(out_THV: torch.Tensor, gate_THV: torch.Tensor) -> torch.Tensor:
-    """Fuse attention output contiguity, sigmoid gating, and head flatten."""
-    return (out_THV * torch.sigmoid(gate_THV)).reshape(out_THV.shape[0], -1)
-
-
 class Qwen35Attention(Attention):
     """Full attention with output gating and partial RoPE for Qwen3.5.
 
@@ -195,8 +189,20 @@ class Qwen35Attention(Attention):
         # The output gating reads the inner_attention and wq gate outputs with bare
         # ops.
         remat.recompute_needs_tensor(out_THV, gate_THV)
-        out_TD = _apply_output_gate(out_THV, gate_THV)
+        out_TD = self._apply_output_gate(out_THV, gate_THV)
         return self.wo(out_TD)
+
+    @staticmethod
+    @local_compile("attn_output_gate", batch_invariant=True)
+    def _apply_output_gate(
+        out_THV: torch.Tensor, gate_THV: torch.Tensor
+    ) -> torch.Tensor:
+        """Gate the attention output and flatten heads into the feature dim.
+
+        ``reshape`` replaces the explicit ``contiguous()`` that ``view`` needed:
+        the inner attention output is not always contiguous.
+        """
+        return (out_THV * torch.sigmoid(gate_THV)).reshape(out_THV.shape[0], -1)
 
     # TODO: consider moving this to rope directly.
     @local_compile("partial_rope", batch_invariant=True)
