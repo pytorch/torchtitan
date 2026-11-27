@@ -97,6 +97,40 @@ def test_vllm_replacement_preserves_full_attention_selection(build_config) -> No
         assert inner_attention.build_attention_metadata(torch.arange(8)) is None
 
 
+@pytest.mark.parametrize(
+    "build_config, flavor, batch_invariant, fused",
+    [
+        (build_qwen3_config, "debugmodel_moe", False, True),
+        (build_qwen3_config, "debugmodel_moe", True, False),
+        (build_deepseek_config, "debugmodel", False, False),
+    ],
+    ids=["softmax_router", "batch_invariant", "router_subclass"],
+)
+def test_vllm_replacement_fuses_only_stock_softmax_routers(
+    monkeypatch, build_config, flavor, batch_invariant, fused
+):
+    """Router subclasses select experts their own way, and batch-invariant mode
+    reduces the routing scores with its own sum, so both keep the stock router."""
+    from torchtitan.models.common.moe import MoE
+    from torchtitan.rl.generator.moe_router import FusedSoftmaxTopKRouter
+    from torchtitan.rl.generator.vllm import model_wrapper
+
+    monkeypatch.setattr(
+        model_wrapper, "is_in_batch_invariant_mode", lambda: batch_invariant
+    )
+    model_config = build_config(flavor, parallelism=ParallelismConfig())
+    vllm_config = _replace_vllm_layer_configs(model_config)
+
+    moes = list(model_config.traverse(MoE.Config))
+    vllm_moes = list(vllm_config.traverse(MoE.Config))
+    assert moes and len(moes) == len(vllm_moes)
+    for (_, moe, _, _), (_, vllm_moe, _, _) in zip(moes, vllm_moes, strict=True):
+        if fused:
+            assert type(vllm_moe.router) is FusedSoftmaxTopKRouter.Config
+        else:
+            assert vllm_moe.router is moe.router
+
+
 @pytest.mark.parametrize("sliding_window_size", [None, 128])
 def test_vllm_attention_classifies_sliding_window(sliding_window_size) -> None:
     config = VLLMInnerAttention.Config(
