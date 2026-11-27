@@ -17,17 +17,18 @@ the template:
    GPUs), and an integration entry in ``tests/integration_tests/h100.py`` runs a
    real training step end to end; see ``dist_gemm`` there.
 
-Both classes here run in CI. Note there is no GPU unit-test job, so anything
-CUDA-guarded is developer-run only.
+The CUDA-guarded numerics classes need 2 GPUs, so they carry the ``multi_gpu`` marker.
 """
 
 import unittest
 from unittest.mock import patch
 
+import pytest
 import spmd_types as spmd
 import torch
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.common_utils import requires_cuda_p2p_access
 
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -163,9 +164,12 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         self.assertEqual(output.shape, x_local.shape)
 
 
+@pytest.mark.multi_gpu
 @unittest.skipUnless(
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
 )
+# Symmetric memory maps the peer GPU's memory, so it needs CUDA P2P access.
+@requires_cuda_p2p_access()
 class TestAsyncQKVNumerics(DTensorTestBase):
     """The async inner projection must preserve fused QKV behavior."""
 
@@ -175,8 +179,6 @@ class TestAsyncQKVNumerics(DTensorTestBase):
 
     @with_comms
     def test_matches_standard_qkv_linear(self):
-        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-
         R = self.world_size
         device = self.device_type
         dim, head_dim, num_heads, num_kv_heads = 64, 16, 8, 4
@@ -235,8 +237,7 @@ class TestAsyncQKVNumerics(DTensorTestBase):
         torch.stack([output.sum() for output in expected]).sum().backward()
 
         x_local_TD = x_TD.detach().chunk(R, 0)[self.rank].contiguous().requires_grad_()
-        mesh = parallelism_context.spmd_dense_mesh()
-        with set_current_spmd_mesh(mesh), typecheck(local=False):
+        with parallelism_context.activate_spmd(typechecking=True):
             spmd.assert_type(x_local_TD, input_layout)
             actual = async_qkv(x_local_TD)
             torch.stack([output.sum() for output in actual]).sum().backward()
@@ -262,9 +263,11 @@ class TestAsyncQKVNumerics(DTensorTestBase):
         )
 
 
+@pytest.mark.multi_gpu
 @unittest.skipUnless(
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
 )
+@requires_cuda_p2p_access()
 class TestAsyncFeedForwardNumerics(DTensorTestBase):
     """The async FFN projections must match the standard FFN under TP+SP.
 
@@ -279,7 +282,6 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
 
     @with_comms
     def test_matches_standard_feed_forward(self):
-        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
         from torchtitan.models.common.config_utils import make_ffn_config
 
         R = self.world_size
@@ -336,9 +338,8 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
             parallelism_context.build_mesh()
         dist_gemm._parallelize(parallelism_context)
 
-        mesh = parallelism_context.spmd_dense_mesh()
         x_shard = x.detach().chunk(R, 0)[self.rank].contiguous().requires_grad_()
-        with set_current_spmd_mesh(mesh), typecheck(local=False):
+        with parallelism_context.activate_spmd(typechecking=True):
             spmd.assert_type(x_shard, input_layout)
             out_shard = dist_gemm(x_shard)
             out_shard.sum().backward()
@@ -364,9 +365,11 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
         )
 
 
+@pytest.mark.multi_gpu
 @unittest.skipUnless(
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
 )
+@requires_cuda_p2p_access()
 class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
     """The Triton-activation FFN with TP overlap must match native SwiGLU.
 
@@ -381,7 +384,10 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
 
     @with_comms
     def test_matches_native_feed_forward(self):
-        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+        from torchtitan.distributed.spmd_types import (
+            set_current_spmd_mesh,
+            set_spmd_meshes,
+        )
         from torchtitan.models.common.config_utils import make_ffn_config
         from torchtitan_recipes.overrides.fused_swiglu import fused_swiglu
 
@@ -429,6 +435,12 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
             )
 
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
+        # The input below is sequence-sharded (x.chunk(R, 0)), so SP is on.
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=None,
+            dense_sp_enabled=True,
+        )
         with set_current_spmd_mesh(mesh):
             out_shard = fused(x.chunk(R, 0)[self.rank].contiguous())
 

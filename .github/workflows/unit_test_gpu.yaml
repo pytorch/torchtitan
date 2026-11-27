@@ -46,7 +46,7 @@ jobs:
       timeout: 30
       hf-cache: false
       script: |
-        set -eux
+        set -euxo pipefail
 
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
         conda activate "${CONDA_ENV}"
@@ -62,7 +62,10 @@ jobs:
 
         # hf-cache is off: a test that reaches the Hugging Face hub fails instead of downloading.
         export HF_HUB_OFFLINE=1
-        pytest tests/unit_tests/gpu -m "not multi_gpu" --strict-markers --durations=20 -vv
+        pytest tests/unit_tests/gpu -m "not multi_gpu" --strict-markers --durations=20 -vv | tee /tmp/pytest.log
+
+        # A test that skips here for lack of GPUs needs the multi_gpu marker, or no CI job runs it.
+        bash .github/scripts/check_gpu_count_skips.sh /tmp/pytest.log
 
   set-matrix-multi-gpu:
     uses: ./.github/workflows/set-matrix.yaml
