@@ -5,13 +5,17 @@ owns the full-sequence forward and backward. It does not call attention-gym
 during training. The middle 12 of the 24 layers run three times with shared
 parameters, for 48 layer visits. Each later pass receives gated messages from
 the previous one. Attention includes sliding/full masks, relative logits,
-sinks, and short convolutions.
+sinks, and short convolutions. CUDA uses FlexAttention with grouped-query heads.
+It applies the learned sink using the softmax log-sum-exp; this preserves its
+gradient but changes BF16 rounding relative to eager attention. A relative-bias
+tensor is still materialized, even though the attention probabilities are not.
 
 The single-device recipe adapts **`layers.*.attn.wq_du`**, the internal query
 projections, not the language head. The optimizer updates FP32 adapter masters;
 the training forward uses BF16 projections with reduced-precision BF16 GEMM
 reductions disabled. The backbone stays in its published
-formats. The MoE path decodes only the experts used by each input and computes
+formats. On CUDA, tokens are grouped by expert; each projection decodes packed
+weight tiles inside the grouped matrix multiply. The backward pass computes
 input gradients through those frozen weights using a straight-through
 estimator for activation quantization. The unchanged vision tower and
 speculative drafter are not training components.

@@ -7,17 +7,20 @@
 """Inkling's text target: full-sequence attention and a recurrent middle stack.
 
 B: batch, T: sequence, D: hidden, H: heads, K: head width, R: relative width,
-Q: residual queries, S: residual source blocks, V: vocabulary.
+O: relative offsets, U/W: query/key blocks, Q: residual queries,
+S: residual source blocks, V: vocabulary.
 """
 
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import cast
 
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.nn.attention.flex_attention import AuxRequest, BlockMask, flex_attention
 
 from torchtitan.experiments.inkling.experts import InklingMoE
 from torchtitan.experiments.inkling.state_dict_adapter import InklingStateDictAdapter
@@ -141,6 +144,149 @@ def _clip(x, threshold):
     ).clamp(max=1)
 
 
+_compiled_flex_attention = torch.compile(flex_attention, fullgraph=True)
+
+
+@lru_cache(maxsize=32)
+@torch.inference_mode(False)  # Backward may reuse a mask first requested by inference.
+def _inkling_block_mask(
+    tokens: int, window: int | None, device: torch.device
+) -> BlockMask:
+    # The mask depends only on sequence length and window, not on the training row.
+    # Classify blocks by their nearest and farthest token pairs, not a T x T mask.
+    block_size = 128
+    starts_U = torch.arange(0, tokens, block_size, device=device)
+    ends_U = (starts_U + block_size - 1).clamp(max=tokens - 1)
+    nearest_UW = starts_U[:, None] - ends_U[None, :]
+    farthest_UW = ends_U[:, None] - starts_U[None, :]
+    visible_UW = farthest_UW >= 0
+    full_UW = nearest_UW >= 0
+    if window is not None:
+        visible_UW = visible_UW & (nearest_UW < window)
+        full_UW = full_UW & (farthest_UW < window)
+
+    def ordered(blocks_UW: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        counts_U = blocks_UW.sum(-1, dtype=torch.int32)
+        indices_UW = blocks_UW.int().argsort(dim=-1, descending=True, stable=True)
+        return counts_U[None, None], indices_UW.int()[None, None]
+
+    def visible(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        distance = q_idx - kv_idx
+        if window is None:
+            return distance >= 0
+        return (distance >= 0) & (distance < window)
+
+    return BlockMask.from_kv_blocks(
+        *ordered(visible_UW & ~full_UW),
+        *ordered(full_UW),
+        BLOCK_SIZE=block_size,
+        mask_mod=visible,
+        seq_lengths=(tokens, tokens),
+    )
+
+
+def _eager_inkling_attention(
+    q_BHTK: torch.Tensor,
+    k_BHTK: torch.Tensor,
+    v_BHTK: torch.Tensor,
+    bias_BHTO: torch.Tensor,
+    sinks_BHT: torch.Tensor,
+    *,
+    window: int | None,
+) -> torch.Tensor:
+    """CPU reference; native FlexAttention backward requires an accelerator."""
+    group = q_BHTK.size(1) // k_BHTK.size(1)
+    keys_BHTK = k_BHTK.repeat_interleave(group, dim=1)
+    values_BHTK = v_BHTK.repeat_interleave(group, dim=1)
+    scores_BHTT = (q_BHTK @ keys_BHTK.transpose(-1, -2)) * q_BHTK.size(-1) ** -0.5
+    pos_T = torch.arange(q_BHTK.size(-2), device=q_BHTK.device)
+    distance_TT = pos_T[:, None] - pos_T[None, :]
+    extent = bias_BHTO.size(-1)
+    bias_BHTT = bias_BHTO.gather(
+        -1, distance_TT.clamp(0, extent - 1).expand_as(scores_BHTT)
+    )
+    causal_TT = distance_TT >= 0
+    in_extent_TT = causal_TT & (distance_TT < extent)
+    scores_BHTT = scores_BHTT + bias_BHTT.masked_fill(~in_extent_TT, 0)
+    visible_TT = causal_TT if window is None else causal_TT & (distance_TT < window)
+    scores_BHTT = scores_BHTT.masked_fill(~visible_TT, -torch.inf)
+    probs_BHTT = (
+        torch.cat((scores_BHTT, sinks_BHT[..., None]), -1)
+        .float()
+        .softmax(-1)[..., :-1]
+        .to(q_BHTK.dtype)
+    )
+    return probs_BHTT @ values_BHTK
+
+
+def _inkling_attention(
+    q_BTHK: torch.Tensor,
+    k_BTHK: torch.Tensor,
+    v_BTHK: torch.Tensor,
+    rel_BTHR: torch.Tensor,
+    rel_logits_RO: torch.Tensor,
+    sinks_BHT: torch.Tensor,
+    *,
+    window: int | None,
+) -> torch.Tensor:
+    """Attend within each contiguous causal row, using BF16 projections."""
+    tokens = q_BTHK.size(1)
+    if window is not None and window >= tokens:
+        window = None
+    # No causal pair needs an offset >= tokens; avoid projecting those columns.
+    bias_BHTO = (rel_BTHR @ rel_logits_RO[:, :tokens]).transpose(1, 2)
+    q_BHTK, k_BHTK, v_BHTK = (x.transpose(1, 2) for x in (q_BTHK, k_BTHK, v_BTHK))
+    if q_BTHK.device.type == "cpu":
+        return _eager_inkling_attention(
+            q_BHTK, k_BHTK, v_BHTK, bias_BHTO, sinks_BHT, window=window
+        )
+    if q_BTHK.device.type != "cuda":
+        raise ValueError(
+            "Inkling attention supports CPU reference and CUDA FlexAttention"
+        )
+
+    extent = bias_BHTO.size(-1)
+
+    def score_mod(
+        score: torch.Tensor,
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        distance = q_idx - kv_idx
+        bias = bias_BHTO[b, h, q_idx, distance.clamp(0, extent - 1)]
+        return score + torch.where((distance >= 0) & (distance < extent), bias, 0)
+
+    # Triton dot requires at least 16 lanes, including for the width-8 debug flavor.
+    width = q_BHTK.size(-1)
+    if width < 16:
+        q_BHTK, k_BHTK, v_BHTK = (
+            F.pad(x, (0, 16 - width)) for x in (q_BHTK, k_BHTK, v_BHTK)
+        )
+    # Triton backward supports gradients to tensors captured by score_mod.
+    context_BHTK, aux = _compiled_flex_attention(
+        q_BHTK,
+        k_BHTK,
+        v_BHTK,
+        score_mod=score_mod,
+        scale=width**-0.5,
+        block_mask=_inkling_block_mask(tokens, window, q_BTHK.device),
+        enable_gqa=True,
+        return_aux=AuxRequest(lse=True),
+        kernel_options={"BACKEND": "TRITON"},
+    )
+    # The learned sink has zero value. Restore the mass of the real keys after
+    # adding the sink to the denominator: exp(lse) / (exp(lse) + exp(sink)).
+    assert aux.lse is not None
+    key_mass_BHT = (aux.lse - sinks_BHT.float()).sigmoid()
+    return (context_BHTK[..., :width].float() * key_mass_BHT[..., None]).to(
+        q_BTHK.dtype
+    )
+
+
 class InklingAttention(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -169,11 +315,18 @@ class InklingAttention(Module):
             shape.head_dim,
             shape.conv_kernel,
         )
+        if kv < 1 or heads < 1 or heads % kv:
+            raise ValueError(
+                "Inkling query heads must be a positive multiple of KV heads"
+            )
+        extent = shape.rel_extent if full else shape.sliding_window
+        if extent < 1:
+            raise ValueError(
+                "Inkling relative bias extent and sliding window must be positive"
+            )
         self.q_l2_clip = _FrozenState(scale=(heads, dim))
         self.rel_l2_clip = _FrozenState(scale=(heads, shape.d_rel))
-        self.rel_logits_proj = _FrozenState(
-            proj=(shape.d_rel, shape.rel_extent if full else shape.sliding_window)
-        )
+        self.rel_logits_proj = _FrozenState(proj=(shape.d_rel, extent))
 
         def kv_conv() -> _FrozenState:
             if full:
@@ -190,7 +343,8 @@ class InklingAttention(Module):
         s = self.shape
         device = q_in_BTD.device
         batch, tokens, _ = q_in_BTD.shape
-        pos_T = torch.arange(tokens, device=device)
+        if tokens < 1:
+            raise ValueError("Inkling attention requires at least one token")
 
         with torch.autocast(device.type, dtype=torch.bfloat16):
             q_BTHK = self.wq_du(q_in_BTD).reshape(
@@ -209,6 +363,7 @@ class InklingAttention(Module):
             rel_BTHR.float() * self.rel_l2_clip.scale.float(), s.rel_clip
         ).bfloat16()
         if self.full:
+            pos_T = torch.arange(tokens, device=device)
             factor_T = (
                 1
                 + s.log_scaling_alpha
@@ -225,31 +380,16 @@ class InklingAttention(Module):
             k_BTD.reshape(batch, tokens, s.num_kv_heads, s.head_dim).float(), s.qk_clip
         ).bfloat16()
         v_BTHK = _rms(v_BTD.reshape_as(k_BTHK), s.rms_eps)
-        group = s.num_q_heads // s.num_kv_heads
-        keys_BHTK = k_BTHK.transpose(1, 2).repeat_interleave(group, dim=1)
-        values_BHTK = v_BTHK.transpose(1, 2).repeat_interleave(group, dim=1)
-        scores_BHTT = (
-            q_BTHK.transpose(1, 2) @ keys_BHTK.transpose(-1, -2)
-        ) * s.head_dim**-0.5
-        distance_TT = pos_T[:, None] - pos_T[None, :]
-        biases = (rel_BTHR @ self.rel_logits_proj.get_parameter("proj")).transpose(1, 2)
-        extent = biases.size(-1)
-        bias_BHTT = biases.gather(
-            -1, distance_TT.clamp(0, extent - 1).expand(batch, s.num_q_heads, -1, -1)
+        context_BHTK = _inkling_attention(
+            q_BTHK,
+            k_BTHK,
+            v_BTHK,
+            rel_BTHR,
+            self.rel_logits_proj.get_parameter("proj"),
+            sinks_BHT,
+            window=None if self.full else s.sliding_window,
         )
-        in_extent_TT = (distance_TT >= 0) & (distance_TT < extent)
-        scores_BHTT = scores_BHTT + bias_BHTT.masked_fill(~in_extent_TT, 0)
-        visible_TT = distance_TT >= 0 if self.full else in_extent_TT
-        scores_BHTT = scores_BHTT.masked_fill(~visible_TT, -torch.inf)
-        probs_BHTT = (
-            torch.cat((scores_BHTT, sinks_BHT[..., None]), -1)
-            .float()
-            .softmax(-1)[..., :-1]
-            .bfloat16()
-        )
-        context_BTD = (
-            (probs_BHTT @ values_BHTK).transpose(1, 2).reshape(batch, tokens, -1)
-        )
+        context_BTD = context_BHTK.transpose(1, 2).reshape(batch, tokens, -1)
         with torch.autocast(device.type, dtype=torch.bfloat16):
             return self.wo_ud((context_BTD.float() * gate_BTD).bfloat16())
 
@@ -419,7 +559,10 @@ class InklingModel(BaseModel):
                 flops_per_token += num_visits * (
                     dense_flops
                     + conv_flops
-                    + s.num_q_heads * projection_flops(attn.rel_logits_proj)
+                    + 4
+                    * s.num_q_heads
+                    * s.d_rel
+                    * min(seq_len, s.rel_extent if attn.full else s.sliding_window)
                     + projection_flops(layer.mlp.gate)
                     + 4 * weights_per_expert * moe.experts_per_token
                 )

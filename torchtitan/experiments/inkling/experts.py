@@ -7,7 +7,7 @@
 """Frozen checkpoint-format Inkling experts with input gradients for internal LoRA.
 
 B: batch, T: tokens, D: hidden size, N: flattened tokens, E: experts,
-K: experts per token, R: rows for one expert, I/O: projection input/output.
+K: experts per token, R: expert-sorted assignment rows, I/O: projection input/output.
 """
 
 from dataclasses import dataclass
@@ -90,11 +90,35 @@ def _quantize_input(
     return torch.where(err_four < err_six, four, six).flatten(-2).bfloat16(), amax_R
 
 
-def _mm_fp32(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    # CPU has no BF16 mm with FP32 output. The FP32 product of BF16 values is exact.
-    if x.device.type == "cpu":
-        return x.float() @ w.float()
-    return torch.mm(x, w, out_dtype=torch.float32)
+def _grouped_mm(
+    x_RI: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    edges: torch.Tensor,
+    multiplier_R: torch.Tensor | None,
+    *,
+    dx: bool,
+) -> torch.Tensor:
+    if x_RI.is_cuda:
+        # CPU-only installations don't require Triton.
+        from .grouped_mm import packed_grouped_mm
+
+        return packed_grouped_mm(x_RI, weight, scale, edges, multiplier_R, dx=dx)
+    pieces = []
+    boundaries = edges.tolist()
+    for e, (start, end) in enumerate(zip(boundaries, boundaries[1:])):
+        if start != end:
+            w_OI = _decode(weight[e], scale[e]).float()
+            pieces.append(x_RI[start:end].float() @ (w_OI if dx else w_OI.T))
+    columns = (
+        weight.shape[1]
+        if not dx
+        else weight.shape[2] * (2 if weight.dtype == torch.uint8 else 1)
+    )
+    result = torch.cat(pieces) if pieces else x_RI.new_empty((0, columns))
+    if multiplier_R is not None:
+        result = result * multiplier_R[:, None]
+    return result.bfloat16()
 
 
 class _FrozenProjection(torch.autograd.Function):
@@ -104,33 +128,47 @@ class _FrozenProjection(torch.autograd.Function):
         x_RI: torch.Tensor,
         weight: torch.Tensor,
         scale: torch.Tensor,
-        weight_amax: torch.Tensor | None,
+        edges: torch.Tensor,
+        weight_amax_R: torch.Tensor | None,
         denominator: torch.Tensor | None,
     ) -> torch.Tensor:
-        # Save views of packed storage, not a dense matrix per expert or loop visit.
-        ctx.save_for_backward(weight, scale, weight_amax, denominator)
-        values_RI, amax_R = _quantize_input(x_RI, nvfp4=weight_amax is not None)
-        y_RO = _mm_fp32(values_RI, _decode(weight, scale).T)
+        ctx.save_for_backward(weight, scale, edges, weight_amax_R, denominator)
+        values_RI, amax_R = _quantize_input(x_RI, nvfp4=weight_amax_R is not None)
+        multiplier_R = None
         if amax_R is not None:
-            assert weight_amax is not None and denominator is not None
-            y_RO = (
-                y_RO
-                * ((amax_R * weight_amax) * (1536 * denominator).reciprocal())[:, None]
-            )
-        return y_RO.bfloat16()
+            assert weight_amax_R is not None and denominator is not None
+            multiplier_R = (amax_R * weight_amax_R) * (1536 * denominator).reciprocal()
+        return _grouped_mm(values_RI, weight, scale, edges, multiplier_R, dx=False)
 
     @staticmethod
     def backward(  # pyrefly: ignore [bad-override]
         ctx,
         grad_RO: torch.Tensor,
-    ) -> tuple[torch.Tensor, None, None, None, None]:
-        # Identity STE for activation quantization (including row/block scales).
-        # dX = dY @ decoded_weight; NVFP4's per-expert global factor is part of W.
-        weight, scale, weight_amax, denominator = ctx.saved_tensors
-        grad_RI = _mm_fp32(grad_RO, _decode(weight, scale))
-        if weight_amax is not None:
-            grad_RI = grad_RI * (weight_amax / denominator)
-        return grad_RI.bfloat16(), None, None, None, None
+    ) -> tuple[torch.Tensor, None, None, None, None, None]:
+        # Identity STE: the activation quantizer is absent from dX; the outer
+        # weight scale still belongs to W, applied after the FP32 accumulation.
+        weight, scale, edges, weight_amax_R, denominator = ctx.saved_tensors
+        multiplier_R = None if weight_amax_R is None else weight_amax_R / denominator
+        grad_RI = _grouped_mm(grad_RO, weight, scale, edges, multiplier_R, dx=True)
+        return grad_RI, None, None, None, None, None
+
+
+class _GatherRoutes(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x_ND, order_R, inverse_NK):  # pyrefly: ignore [bad-override]
+        ctx.save_for_backward(inverse_NK)
+        return x_ND[order_R // inverse_NK.size(1)]
+
+    @staticmethod
+    def backward(ctx, grad_RD):  # pyrefly: ignore [bad-override]
+        (inverse_NK,) = ctx.saved_tensors
+        # Match backward through the ascending expert loop: add in descending
+        # expert order, rounding each addition to BF16 (not an atomic scatter).
+        slots = grad_RD[inverse_NK].unbind(1)
+        grad_ND = slots[-1]
+        for slot_ND in reversed(slots[:-1]):
+            grad_ND = grad_ND + slot_ND
+        return grad_ND, None, None
 
 
 def _frozen_parameter(*shape: int, dtype: torch.dtype) -> torch.nn.Parameter:
@@ -209,14 +247,17 @@ class _PackedExperts(Module):
                 bits.random_(24, 56)
                 bits[..., 1::2].bitwise_or_(128)
 
-    def project(self, name: str, expert: int, x_RI: torch.Tensor) -> torch.Tensor:
-        weight = self.get_parameter(name)[expert]
+    def project(
+        self, name: str, x_RI: torch.Tensor, edges: torch.Tensor, ids_R: torch.Tensor
+    ) -> torch.Tensor:
+        weight = self.get_parameter(name)
         nvfp4 = weight.dtype == torch.uint8
         return _FrozenProjection.apply(
             x_RI,
             weight,
-            self.get_parameter(name + "_scale")[expert],
-            self.get_parameter(name + "_amax")[expert] if nvfp4 else None,
+            self.get_parameter(name + "_scale"),
+            edges,
+            self.get_parameter(name + "_amax")[ids_R] if nvfp4 else None,
             self.get_parameter(name + "_outer_scale_denominator") if nvfp4 else None,
         )
 
@@ -264,37 +305,29 @@ class InklingMoE(Module):
                 / (weights_NK.sum(-1, keepdim=True) + 1e-20)
                 * self.config.route_scale
             )
-            out_ND = torch.zeros_like(x_ND, dtype=torch.float32)
-            # One host read for all expert boundaries. Keep the per-expert gathers
-            # and adds: combining them changes BF16 dX accumulation order.
-            sorted_ids, order = ids_NK.flatten().sort(stable=True)
-            boundaries = torch.searchsorted(
-                sorted_ids, torch.arange(1, self.config.num_experts, device=x_ND.device)
-            ).tolist()
-            token_groups = (order // self.config.experts_per_token).tensor_split(
-                boundaries
+            ids_NK, slots_NK = ids_NK.sort(dim=1)
+            ids_R, order_R = ids_NK.flatten().sort(stable=True)
+            inverse_NK = order_R.argsort().view_as(ids_NK)
+            edges = torch.searchsorted(
+                ids_R,
+                torch.arange(self.config.num_experts + 1, device=x_ND.device),
+                out_int32=True,
             )
-            score_groups = weights_NK.flatten()[order].tensor_split(boundaries)
-            for expert, (tokens_R, scores_R) in enumerate(
-                zip(token_groups, score_groups)
-            ):
-                if tokens_R.numel() == 0:
-                    continue
-                gate_up = self.experts.project(
-                    "w13_weight", expert, x_ND[tokens_R]
-                ).float()
-                # The checkpoint interleaves gate/up rows; SwiGLU caps each separately.
-                gate, up = gate_up[..., 0::2], gate_up[..., 1::2]
-                act = (
-                    (gate / self.config.gate_softcap).tanh()
-                    * self.config.gate_softcap
-                    * gate.sigmoid()
-                )
-                act = act * (
-                    (up / self.config.up_softcap).tanh() * self.config.up_softcap
-                )
-                act = (act * scores_R[:, None]).bfloat16()
-                out_ND.index_add_(
-                    0, tokens_R, self.experts.project("w2_weight", expert, act).float()
-                )
+            scores_R = weights_NK.gather(1, slots_NK).flatten()[order_R]
+            x_RD = _GatherRoutes.apply(x_ND, order_R, inverse_NK)
+            gate_up = self.experts.project("w13_weight", x_RD, edges, ids_R).float()
+            # The checkpoint interleaves gate/up rows; SwiGLU caps each separately.
+            gate, up = gate_up[..., 0::2], gate_up[..., 1::2]
+            act = (
+                (gate / self.config.gate_softcap).tanh()
+                * self.config.gate_softcap
+                * gate.sigmoid()
+            )
+            act = act * ((up / self.config.up_softcap).tanh() * self.config.up_softcap)
+            act = (act * scores_R[:, None]).bfloat16()
+            out_RD = self.experts.project("w2_weight", act, edges, ids_R)
+            slots = out_RD[inverse_NK].float().unbind(1)
+            out_ND = slots[0]
+            for slot_ND in slots[1:]:
+                out_ND = out_ND + slot_ND
             return out_ND.bfloat16().reshape_as(x_BTD)
