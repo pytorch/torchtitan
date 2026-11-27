@@ -7,7 +7,8 @@
 """TorchTitan's Gated DeltaNet inside SGLang (see ``linear_attention.py``).
 
 Legend: T = tokens of the step, C = rank-local q|k|v channels, H = value heads,
-V = value head dim, W = conv kernel size (all rank-local under TP).
+V = value head dim, W = conv kernel size (all rank-local under TP); in an MTP verify
+step, B = requests and J = tokens per request (drafts + 1).
 """
 
 from __future__ import annotations
@@ -237,6 +238,9 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
         Each row's conv window goes to the request's scratch row, which the commit
         reads. Attention Gym has no verify kernels, so these are SGLang's.
         """
+        # TODO: run verify rows on Attention Gym's GDN kernels once it has a multi-token
+        # verify kernel, so the trainer and the generator share the GDN decode numerics.
+        # No Attention Gym issue is filed yet.
         conv_weight_CW, A_log_H, dt_bias_H = linear_attention_weights(layer)
         layer_cache = self.state_layer_cache(layer.layer_id)
         state_indices = self.forward_metadata.mamba_cache_indices

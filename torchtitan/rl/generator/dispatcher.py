@@ -414,10 +414,10 @@ def _prepare_generation_request_metrics(inputs: RequestMetricsInputs) -> list[m.
             ] = first_to_last_token_ms / (inputs.num_generation_tokens - 1)
 
         if inputs.num_verify_steps > 0:
-            # Tokens each MTP verify step emits (1 to k + 1); the first token comes
-            # from prefill.
+            # Tokens each MTP verify step emits (1 to k + 1). The first token, and one
+            # more after each preemption, come from prefill.
             metric_values["generator/tokens_per_verify_step"] = (
-                inputs.num_generation_tokens - 1
+                inputs.num_generation_tokens - 1 - inputs.num_preemptions
             ) / inputs.num_verify_steps
 
     # Emit each value with both Mean and Max aggregators.

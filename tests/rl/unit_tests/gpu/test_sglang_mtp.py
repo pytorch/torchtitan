@@ -59,7 +59,7 @@ from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_5_9b_varlen
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
 from tests.rl.unit_tests.gpu.test_bitwise_parity import build_trainer_model
-from tests.rl.unit_tests.gpu.test_sglang_bitwise_parity import _load_trainer_weights
+from tests.rl.unit_tests.gpu.test_sglang_bitwise_parity import load_trainer_weights
 
 MODEL_ENV = "TORCHTITAN_QWEN3_5_0_8B_HF_PATH"
 NUM_SPECULATIVE_TOKENS = 3
@@ -196,7 +196,7 @@ class TestSGLangMTP(unittest.TestCase):
         num_steps = 0
         while self.engine.has_unfinished_requests():
             if num_steps in load_at_steps:
-                _load_trainer_weights(self.engine, self.model, self.precision)
+                load_trainer_weights(self.engine, self.model, self.precision)
             for result in self.engine.step():
                 finished[result.request_id] = result
             num_steps += 1
@@ -319,7 +319,7 @@ class TestSGLangMTP(unittest.TestCase):
         for _ in range(2):
             # A load of the same weights clears SGLang's cache
             # (reset_kv_cache_on_model_state_dict_load), so both runs prefill alike.
-            _load_trainer_weights(self.engine, self.model, self.precision)
+            load_trainer_weights(self.engine, self.model, self.precision)
             runs.append(
                 self._generate(self.prompt_ids[:4], temperature=1.0, max_tokens=128)
             )
@@ -354,7 +354,7 @@ class TestSGLangMTP(unittest.TestCase):
         with torch.no_grad():
             for param in self.model.parameters():
                 param.mul_(1.01)
-        _load_trainer_weights(self.engine, self.model, self.precision)
+        load_trainer_weights(self.engine, self.model, self.precision)
 
         decoder = self.engine._get_model().model.decoder
         draft = self.engine._scheduler.draft_worker.draft_worker.draft_runner.model

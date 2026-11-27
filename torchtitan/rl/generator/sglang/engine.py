@@ -49,7 +49,6 @@ from sglang.srt.utils.common import next_power_of_2
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import DebugConfig, PrecisionConfig
-from torchtitan.models.common.attention import Attention
 from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import LinearAttention
@@ -399,30 +398,6 @@ class SGLangEngine(GenerationEngine):
                     f"but no *.safetensors file in {model_path} has an mtp.* weight"
                 )
 
-            # A verify step runs each request's drafts after its last token, so a request
-            # near max_context_length runs positions past it (SGLang's context is
-            # CONTEXT_LENGTH_MARGIN tokens longer). Their tokens are cut, but their RoPE
-            # lookups must stay inside the caches.
-            layers = []
-            for layer in model.layers:
-                attention = layer.attention
-                # Softmax attention layers with RoPE: GDN layers (LinearAttention) have
-                # none.
-                if (
-                    isinstance(attention, Attention.Config)
-                    and not isinstance(attention, LinearAttention.Config)
-                    and attention.rope is not None
-                ):
-                    rope = dataclasses.replace(
-                        attention.rope,
-                        max_context_length=attention.rope.max_context_length
-                        + CONTEXT_LENGTH_MARGIN,
-                    )
-                    layer = dataclasses.replace(
-                        layer, attention=dataclasses.replace(attention, rope=rope)
-                    )
-                layers.append(layer)
-            model = dataclasses.replace(model, layers=layers)
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
@@ -616,6 +591,9 @@ class SGLangEngine(GenerationEngine):
             # one has no ReplaySSM rings at the pinned SGLang.
             server_kwargs["enable_unified_memory"] = True
         if num_speculative_tokens > 0:
+            # TODO: build the draft from a TorchTitan Qwen3.5 MTP module, which drops the
+            # draft's config parse and GDN backend patches (registry.py). TorchTitan has
+            # no Qwen3.5 MTP module yet.
             server_kwargs.update(
                 # NEXTN builds the checkpoint's MTP head as the draft (an EAGLE chain).
                 speculative_algorithm="NEXTN",
