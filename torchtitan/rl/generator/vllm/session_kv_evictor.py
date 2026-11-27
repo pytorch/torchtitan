@@ -163,9 +163,6 @@ class VLLMSessionKVEvictor:
         if group_id in self._released_group_ids:
             return
 
-        # TODO: counting the whole prompt costs ~0.17 ms per turn at 16-token blocks and
-        #   32K-token histories (CPU bench). The previous request's hashes are a prefix of
-        #   this list (chained hashes), so counting only the new part would cost O(new tokens).
         vllm_request = self._scheduler.requests[internal_request_id]
         request = _TrackedRequest(
             internal_request_id=internal_request_id,
@@ -174,12 +171,31 @@ class VLLMSessionKVEvictor:
             block_hashes=vllm_request.block_hashes,
             gdn_scan_starts=[0] * len(self._gdn_kv_cache_group_ids),
         )
-        self._count_new_block_hashes(request)
         previous = self._sessions.get(session_id)
         self._sessions[session_id] = request
         self._group_sessions.setdefault(group_id, set()).add(session_id)
         self._sessions_to_sweep[session_id] = request
-        if previous is not None:
+        if previous is None:
+            self._count_new_block_hashes(request)
+            return
+
+        # Hashes chain, so a turn that extends the previous request's history starts with all of
+        # its hashes: take over their counts and count only the new ones.
+        self._count_new_block_hashes(previous)
+        last_index = previous.num_counted - 1
+        extends_previous = (
+            previous.internal_request_id not in self._scheduler.requests
+            and (
+                last_index < 0
+                or request.block_hashes[last_index : last_index + 1]
+                == previous.block_hashes[last_index : last_index + 1]
+            )
+        )
+        if extends_previous:
+            request.num_counted = previous.num_counted
+            self._count_new_block_hashes(request)
+        else:
+            self._count_new_block_hashes(request)
             self._forget([previous])
 
     def after_step(self) -> None:
