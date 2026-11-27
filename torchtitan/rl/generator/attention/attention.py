@@ -33,16 +33,14 @@ def paged_varlen_attention_out(
     window_size: tuple[int, int],
     enable_gqa: bool,
     return_lse: bool,
-    descales: (
-        tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None] | None
-    ) = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Causal varlen attention of new query tokens over a paged KV cache, written into ``out``.
 
     Args:
         out: ``(num_tokens, num_heads, value_head_dim)`` output buffer.
-        query: ``(num_tokens, num_heads, head_dim)``.
-        key_cache: ``(num_pages, page_size, num_kv_heads, head_dim)``.
+        query: ``(num_tokens, num_heads, head_dim)``, fp8 e4m3 with an fp8 cache.
+        key_cache: ``(num_pages, page_size, num_kv_heads, head_dim)``. An fp8 e4m3 cache runs
+            FA4's fp8 forward (SM100 family only), with every dequantization scale 1.
         value_cache: ``(num_pages, page_size, num_kv_heads, value_head_dim)``.
         cu_seqlens_q: ``(batch + 1,)`` int32 offsets of each sequence's query tokens.
         max_seqlen_q: Upper bound on any sequence's query tokens.
@@ -53,21 +51,18 @@ def paged_varlen_attention_out(
         window_size: ``(left, right)`` attention window; ``(-1, 0)`` is full causal.
         enable_gqa: Whether ``num_heads`` is a multiple of ``num_kv_heads`` > 1.
         return_lse: Also return the ``(num_heads, num_tokens)`` logsumexp.
-        descales: With fp8 e4m3 ``query`` and caches: their ``(batch, num_kv_heads)`` fp32
-            dequantization scales (q, k, v); a None member is 1. Runs FA4's fp8 forward
-            (SM100 family only).
 
     Returns:
         The written ``out[:num_tokens]``, and the logsumexp with ``return_lse``.
     """
-    if descales is not None:
+    if key_cache.dtype == torch.float8_e4m3fn:
         # TODO: call torch's `varlen_attn_out` with fp8 descales once pytorch/pytorch#206590
         # lands; until then, call FA4's private `_flash_attn_fwd` with the arguments torch's FA4
         # bridge passes (torch/nn/attention/_fa4.py).
         # TODO: raise the FA4 floor to the first release with fp8 SwapAB token mode
         # (Dao-AILab/flash-attention#3217). On 4.0.0b40, fp8 rows run the standard kernel
         # (decode on shared prefix pages: 1.2x slower than bf16 SwapAB).
-        from flash_attn.cute.interface import _flash_attn_fwd, TensorwiseScales
+        from flash_attn.cute.interface import _flash_attn_fwd
 
         window_left, window_right = window_size
         out, lse, *_ = _flash_attn_fwd(
@@ -87,7 +82,6 @@ def paged_varlen_attention_out(
             num_splits=1 if torch.are_deterministic_algorithms_enabled() else 0,
             return_lse=return_lse,
             out=out,
-            scales=TensorwiseScales(*descales),
         )
         return (out, lse) if return_lse else out
 

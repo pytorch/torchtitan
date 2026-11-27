@@ -130,14 +130,12 @@ class TorchTitanVarlenAttnBackend(FlashAttentionBackend):
                 dtype=torch.bfloat16 if is_fp8 else q.dtype,
             )
 
-        descales = None
         if is_fp8:
             # FA4's fp8 forward takes q in the cache's dtype. SGLang casts q for decode
-            # batches only; its FA4 prefill leaves q in bf16.
+            # batches only; its FA4 prefill leaves q in bf16. Scale 1: SGLang stores K
+            # and V unscaled without a quantization config, and TorchTitan's attention
+            # layers have none.
             q = q.to(self.kv_cache_dtype)
-            # Scale 1: SGLang stores K and V unscaled without a quantization config, and
-            # TorchTitan's attention layers have none. FA4 reads a None descale as 1.
-            descales = (None, None, None)
 
         # Causal attention is the window (left, 0) in the varlen API; SGLang passes a
         # right edge of -1 for unbounded, which causal=True caps at the diagonal.
@@ -158,7 +156,6 @@ class TorchTitanVarlenAttnBackend(FlashAttentionBackend):
             window_size=(left, 0),
             enable_gqa=num_heads != k_cache.shape[2],
             return_lse=return_softmax_lse,
-            descales=descales,
         )
 
 
