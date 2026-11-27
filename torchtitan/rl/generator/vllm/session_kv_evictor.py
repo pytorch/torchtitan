@@ -21,6 +21,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Released groups `track` remembers. A late request arrives seconds after its group's release;
+# 4,096 groups span far longer.
+_NUM_RELEASED_GROUP_IDS_KEPT = 4096
+
 
 @dataclass(slots=True)
 class _TrackedRequest:
@@ -122,6 +126,8 @@ class VLLMSessionKVEvictor:
         # Each live session's newest request.
         self._sessions: dict[str, _TrackedRequest] = {}
         self._group_sessions: dict[int, set[str]] = {}
+        # Recently released groups, oldest first (dict order).
+        self._released_group_ids: dict[int, None] = {}
         # Replaced or released requests still in vLLM, by internal request id.
         self._ended_requests: dict[str, _TrackedRequest] = {}
         self._num_requests_by_hash: dict[BlockHash, int] = {}
@@ -152,10 +158,11 @@ class VLLMSessionKVEvictor:
     def track(self, internal_request_id: str, session_id: str, group_id: int) -> None:
         """Make this request its session's history; evict what its prompt dropped from the
         previous request's (e.g. a chat template that strips old reasoning)."""
-        # TODO: a request that reaches the engine after its session's or group's release (an
-        #   abandoned attempt still in transit) re-creates the session, and nothing releases
-        #   it: its hashes stay counted until vLLM's LRU reuses its blocks. Fix: skip tracking
-        #   requests of recently released groups. Rare: only an abandoned attempt in transit.
+        # A late request of a released group (an abandoned attempt still in transit) would
+        # re-create a session that nothing releases. vLLM's LRU reuses its blocks instead.
+        if group_id in self._released_group_ids:
+            return
+
         # TODO: counting the whole prompt costs ~0.17 ms per turn at 16-token blocks and
         #   32K-token histories (CPU bench). The previous request's hashes are a prefix of
         #   this list (chained hashes), so counting only the new part would cost O(new tokens).
@@ -243,6 +250,9 @@ class VLLMSessionKVEvictor:
         released = set(session_ids)
         for group_id in group_ids:
             released |= self._group_sessions.pop(group_id, set())
+            self._released_group_ids[group_id] = None
+        while len(self._released_group_ids) > _NUM_RELEASED_GROUP_IDS_KEPT:
+            del self._released_group_ids[next(iter(self._released_group_ids))]
         # Sorted, not set order: string hashes differ per process, and every TP rank must
         # evict in the same order.
         released_session_ids = [

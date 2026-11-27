@@ -313,6 +313,20 @@ def test_a_rollout_released_while_its_request_runs_is_evicted_when_it_finishes(
     assert evictor.num_sessions == 0
 
 
+def test_a_late_request_of_a_released_group_starts_no_session(
+    manager, scheduler, evictor
+):
+    # The group ends while an abandoned attempt is still on its way; the attempt arrives after.
+    evictor.release(session_ids=[], group_ids=[0])
+    request = _admit(scheduler, evictor, "s/turn=1", "s", 0, list(range(50)))
+    _prefill(manager, request)
+    _finish(manager, scheduler, evictor, request)
+
+    assert evictor.num_sessions == 0
+    # Left to vLLM's LRU: still cached.
+    assert _cached_indices(manager, request, ATTENTION_KV_CACHE_GROUP_ID) == [0, 1, 2]
+
+
 @pytest.mark.parametrize("manager", [0, 3], ids=["dense", "hybrid"], indirect=True)
 def test_a_preempted_requests_output_stays_cached_when_a_group_sharing_it_ends(
     manager, scheduler, evictor
