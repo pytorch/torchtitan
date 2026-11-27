@@ -26,7 +26,7 @@ from __future__ import annotations
 import itertools
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from torchtitan.config import Configurable
@@ -61,6 +61,12 @@ class RoutingStrategy(Configurable, ABC):
     def release_session(self, session_id: str) -> None:
         """Forget a session that makes no more requests."""
         del session_id
+
+    def set_session_eviction_callback(self, callback: Callable[[str], None]) -> None:
+        """Call ``callback(session_id)`` whenever this strategy forgets a session on
+        its own (e.g. LRU eviction), so the owner can free its per-session state.
+        Strategies that never evict ignore it."""
+        del callback
 
 
 class RoundRobinRoutingStrategy(RoutingStrategy):
@@ -147,7 +153,7 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         """Routing strategy used for new sessions and requests without a session."""
 
         repin_load_ratio: float | None = 1.5
-        """Move a session off its pinned candidate once that candidate's in-flight load is above
+        """Move a session off its pinned candidate once that candidate's load is above
         `repin_load_ratio` x the mean load. The fallback picks the new candidate; the move
         re-prefills the session's context. None never moves it.
 
@@ -173,6 +179,7 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         self._fallback_strategy = config.fallback_strategy.build()
         self._repin_load_ratio = config.repin_load_ratio
         self._sessions: OrderedDict[str, RoutingCandidate] = OrderedDict()
+        self._on_session_evicted: Callable[[str], None] | None = None
 
     def choose(
         self,
@@ -215,8 +222,14 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         # Evict the least-recently-used session past max_sessions. A rollout worker releases
         # each rollout's session when it ends, so its finished sessions rarely get here.
         if len(self._sessions) > self._max_sessions:
-            self._sessions.popitem(last=False)
+            evicted_session_id, _ = self._sessions.popitem(last=False)
+            if self._on_session_evicted is not None:
+                self._on_session_evicted(evicted_session_id)
         return chosen
+
+    def set_session_eviction_callback(self, callback: Callable[[str], None]) -> None:
+        """Call ``callback(session_id)`` for each session evicted past ``max_sessions``."""
+        self._on_session_evicted = callback
 
     def pinned_candidate(self, routing_ctx: RoutingContext) -> RoutingCandidate | None:
         """Return the candidate this request's session is pinned to, if any."""
