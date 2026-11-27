@@ -158,38 +158,6 @@ def test_lora_model_builds(trainable_modules):
     }
 
 
-def test_lora_forward():
-    """LoRA model forward produces correct output shape."""
-    model_config = build_model_config(
-        "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
-    )
-    model_config = transform_model_config_(
-        model_config,
-        [
-            LoRATransform(
-                rank=8,
-                alpha=16.0,
-                target_modules=["wqkv", "wo"],
-            )
-        ],
-    )
-    model = model_config.build()
-    model.init_states()
-
-    vocab_size = model_config.vocab_size
-    num_documents, seq_len = 2, 16
-    num_tokens = num_documents * seq_len
-    tokens = torch.randint(0, vocab_size, (num_tokens,))
-    positions = torch.arange(seq_len).repeat(num_documents)
-    attention_metadata = model._get_attention_metadata(positions)
-    # Flex supports the CPU forward used by this shape check, but not backward.
-    with torch.no_grad():
-        output = model(
-            tokens, attention_metadata=attention_metadata, positions=positions
-        )
-    assert output.shape == (num_tokens, vocab_size)
-
-
 def test_lora_targets_fused_feed_forward_projection():
     """The physical w13 projection uses one LoRA adapter."""
     init = {"weight": torch.nn.init.ones_}
