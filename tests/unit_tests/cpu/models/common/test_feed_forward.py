@@ -228,3 +228,46 @@ def test_limited_swiglu_clamps_gate_above_and_up_on_both_sides():
     actual_TF = LimitedSwiGLU.Config(limit=10.0).build()(gate_up_T2F)
 
     torch.testing.assert_close(actual_TF, expected_TF)
+
+
+def test_token_chunks_match_one_pass():
+    """Chunked forward and backward match one pass over all tokens."""
+
+    def build(num_token_chunks):
+        torch.manual_seed(0)
+        feed_forward = DenseFeedForward.Config(
+            w13=Linear.Config(in_features=16, out_features=32, num_linears=2),
+            w2=Linear.Config(in_features=32, out_features=16),
+            num_token_chunks=num_token_chunks,
+        ).build()
+        feed_forward.init_states()
+        return feed_forward.double()
+
+    torch.manual_seed(1)
+    x = torch.randn(2, 12, 16, dtype=torch.float64)
+    grad_output = torch.randn(2, 12, 16, dtype=torch.float64)
+    results = []
+    for num_token_chunks in (1, 3):
+        feed_forward = build(num_token_chunks)
+        x_leaf = x.clone().requires_grad_()
+        out = feed_forward(x_leaf)
+        out.backward(grad_output)
+        results.append(
+            [
+                out,
+                x_leaf.grad,
+                feed_forward.w13.weight.grad,
+                feed_forward.w2.weight.grad,
+            ]
+        )
+    for chunked, reference in zip(results[1], results[0], strict=True):
+        torch.testing.assert_close(chunked, reference)
+
+
+def test_token_chunks_must_be_positive():
+    with pytest.raises(ValueError, match="num_token_chunks"):
+        DenseFeedForward.Config(
+            w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
+            w2=Linear.Config(in_features=8, out_features=4),
+            num_token_chunks=0,
+        )

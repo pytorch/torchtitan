@@ -57,6 +57,19 @@ class DenseFeedForward(FeedForward):
         w13: Linear.Config
         w2: Linear.Config
         activation_fn: BinaryActivationFn.Config = field(default_factory=SwiGLU.Config)
+        num_token_chunks: int = 1
+        """Above 1, run over this many token chunks and save only the input.
+        Backward recomputes one chunk at a time, so only one chunk's
+        ``[T / num_token_chunks, 2, F]`` intermediates are alive, at the cost of
+        one more forward of this module. For long context, where these
+        intermediates dominate peak memory."""
+
+        def __post_init__(self) -> None:
+            FeedForward.Config.__post_init__(self)
+            if self.num_token_chunks < 1:
+                raise ValueError(
+                    f"num_token_chunks must be positive, got {self.num_token_chunks}"
+                )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -67,9 +80,66 @@ class DenseFeedForward(FeedForward):
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()
+        self.num_token_chunks = config.num_token_chunks
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.num_token_chunks == 1:
+            return self._forward(x)
+        return _TokenChunkedForward.apply(self, x)
+
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:
         # w13 and w2 declare their own remat regions.
         gate_up_T2F = self.w13(x)
         remat.recompute_needs_tensor(gate_up_T2F)
         return self.w2(self.activation_fn(gate_up_T2F))
+
+
+class _TokenChunkedForward(torch.autograd.Function):
+    """``DenseFeedForward`` over token chunks, saving only the input.
+
+    Forward runs each chunk without autograd. Backward reruns one chunk at a
+    time with autograd and backpropagates it, so the parameters' ``.grad``
+    accumulates chunk by chunk (in place, in their grad dtype, when ``Linear``
+    uses in-place WGRAD accumulation).
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, module: DenseFeedForward, x: torch.Tensor
+    ) -> torch.Tensor:
+        ctx.module = module
+        ctx.save_for_backward(x)
+        out_chunks = []
+        for index, x_chunk in enumerate(_token_chunks(module, x)):
+            # Remat region names must be unique within a block's forward.
+            with remat.name_scope(f"token_chunk_{index}"):
+                out_chunks.append(module._forward(x_chunk))
+        return torch.cat(out_chunks, dim=-2)
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(  # pyrefly: ignore[bad-override]
+        ctx, grad_output: torch.Tensor
+    ) -> tuple[None, torch.Tensor]:
+        (x,) = ctx.saved_tensors
+        module = ctx.module
+        grad_input = torch.empty_like(x)
+        for x_chunk, grad_chunk, grad_input_chunk in zip(
+            _token_chunks(module, x),
+            _token_chunks(module, grad_output),
+            _token_chunks(module, grad_input),
+            strict=True,
+        ):
+            x_chunk = x_chunk.detach().requires_grad_()
+            with torch.enable_grad():
+                out_chunk = module._forward(x_chunk)
+            torch.autograd.backward(out_chunk, grad_chunk)
+            assert x_chunk.grad is not None
+            grad_input_chunk.copy_(x_chunk.grad)
+        return None, grad_input
+
+
+def _token_chunks(
+    module: DenseFeedForward, x: torch.Tensor
+) -> tuple[torch.Tensor, ...]:
+    return x.chunk(module.num_token_chunks, dim=-2)
