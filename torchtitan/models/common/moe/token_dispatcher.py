@@ -18,9 +18,9 @@ from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_g
 from torchtitan.models.base.module import Module
 
 
-# Neither function in the moe_weighted_gather_sum region is batch-invariant: the
-# backward reduces each row over D, and Inductor picks that reduction's split from
-# the total element count, which the token count changes.
+# The backward reduces each row over D, and Inductor picks that reduction's split
+# from the total element count, so it is not known to be batch-invariant. A region
+# is enabled as a unit, so the forward carries the same marking.
 @local_compile("moe_weighted_gather_sum", batch_invariant=False)
 def _weighted_gather_sum(
     routed_output_ND: torch.Tensor,
@@ -34,8 +34,8 @@ def _weighted_gather_sum(
         num_tokens, top_k, routed_output_ND.shape[-1]
     )
     scores_TK1 = topk_scores_N[row_of_route_N].view(num_tokens, top_k, 1)
-    # Type promotion sums in float32 without materializing a float32 copy of the
-    # rows, which the multiply would save for backward.
+    # Type promotion multiplies and sums in float32 without materializing a
+    # float32 copy of the rows.
     return (
         (rows_TKD * scores_TK1.to(torch.float32)).sum(dim=1).to(routed_output_ND.dtype)
     )
@@ -70,8 +70,12 @@ class _WeightedGatherSum(torch.autograd.Function):
     is another accumulating ``index_put``. Forward and backward are gathers, so
     the result is deterministic without ``use_deterministic_algorithms``.
 
-    Why not plain ops: the score multiply would save a float32 ``(N, D)`` copy of
-    the expert rows for backward. Backward recomputes it from the rows instead.
+    Why not plain ops:
+    1. Autograd's backward of ``routed_output_ND[row_of_route_N]`` is an
+       accumulating ``index_put``; it cannot know the index is a permutation.
+    2. The score multiply would keep the gathered ``(N, D)`` rows alive for
+       backward. Backward re-gathers them from the expert output instead, which
+       is live anyway.
     """
 
     @staticmethod

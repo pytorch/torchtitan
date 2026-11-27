@@ -4,11 +4,34 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import unittest
+from typing import Any
 
 import torch
 
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.moe.token_dispatcher import LocalTokenDispatcher
+
+
+class _EagerBackendLocalCompileConfig(LocalCompileConfig):
+    """Traces the enabled regions but keeps the eager backend, so tests stay cheap."""
+
+    @staticmethod
+    def _compile(reference: Any, **compile_kwargs: Any) -> Any:
+        return torch.compile(reference, **{**compile_kwargs, "backend": "eager"})
+
+
+@contextlib.contextmanager
+def _compiled_combine():
+    """Turn on moe_weighted_gather_sum by name, the way Qwen3.5's region list does."""
+    torch._dynamo.reset()
+    _EagerBackendLocalCompileConfig(regions=["moe_weighted_gather_sum"]).apply()
+    try:
+        yield
+    finally:
+        LocalCompileConfig().apply()
+        torch._dynamo.reset()
 
 
 def _routing(num_tokens: int, top_k: int, num_experts: int):
@@ -107,6 +130,41 @@ class TestCombine(unittest.TestCase):
 
         for grad, expected in zip(grads, reference, strict=True):
             torch.testing.assert_close(grad.double(), expected, rtol=1e-5, atol=1e-5)
+
+    def test_compiled_region_matches_eager(self):
+        # Qwen3.5 lists moe_weighted_gather_sum, so its combine runs both helpers
+        # under torch.compile(fullgraph=True) -- including the backward one, from
+        # inside autograd. Catches a graph break or an untraceable rewrite there,
+        # which would otherwise only show up on a GPU running Qwen3.5. The eager
+        # backend keeps the ops identical, so the results must match bit for bit.
+        torch.manual_seed(0)
+        num_tokens, top_k, num_experts, dim = 13, 4, 8, 16
+        expert_ids_TK, routing_map_TE = _routing(num_tokens, top_k, num_experts)
+        scale_N = _expert_scale_per_row(expert_ids_TK)
+        grad_out_TD = torch.randn(num_tokens, dim)
+        dispatcher = LocalTokenDispatcher.Config(
+            num_experts=num_experts, top_k=top_k
+        ).build()
+
+        def forward_backward():
+            x_TD = torch.randn(num_tokens, dim, generator=generator).requires_grad_()
+            scores_TK = torch.rand(num_tokens, top_k, generator=generator)
+            scores_TK.requires_grad_()
+            routed_ND, _, metadata = dispatcher.dispatch(
+                x_TD, scores_TK, expert_ids_TK, routing_map_TE
+            )
+            out_TD = dispatcher.combine(routed_ND * scale_N, metadata, x_TD)
+            return out_TD, torch.autograd.grad(out_TD, (x_TD, scores_TK), grad_out_TD)
+
+        generator = torch.Generator().manual_seed(1)
+        eager_out, eager_grads = forward_backward()
+        generator = torch.Generator().manual_seed(1)
+        with _compiled_combine():
+            compiled_out, compiled_grads = forward_backward()
+
+        torch.testing.assert_close(compiled_out, eager_out, rtol=0, atol=0)
+        for compiled, eager in zip(compiled_grads, eager_grads, strict=True):
+            torch.testing.assert_close(compiled, eager, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
