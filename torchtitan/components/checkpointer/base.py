@@ -718,9 +718,14 @@ class BaseCheckpointManager(Configurable, ABC):
         self,
         *,
         saving_step: int,
+        last_step: bool = False,
         staging_dir_prefix: str | None = None,
     ) -> None:
-        """Delete abandoned entries and reserve one retained slot for this save."""
+        """Delete abandoned entries and reserve one retained slot for this save.
+
+        No slot is reserved when this save is a final export outside
+        ``self.folder``, so ``keep_latest_k`` resumable checkpoints remain.
+        """
         if self._should_purge():
             saving_dirnames = {f"step-{saving_step}"}
             if staging_dir_prefix:
@@ -753,7 +758,13 @@ class BaseCheckpointManager(Configurable, ABC):
                     abandoned.append(checkpoint_dir)
 
             checkpoints.sort()
-            num_to_keep = self.keep_latest_k - 1
+            saving_id = (
+                self._create_last_step_id(saving_step)
+                if last_step
+                else self._create_checkpoint_id(saving_step)
+            )
+            saves_into_folder = saving_id == self._create_checkpoint_id(saving_step)
+            num_to_keep = self.keep_latest_k - int(saves_into_folder)
             num_to_purge = max(0, len(checkpoints) - num_to_keep)
             for step, checkpoint_dir in checkpoints[:num_to_purge]:
                 if self._is_purge_exempt(step):

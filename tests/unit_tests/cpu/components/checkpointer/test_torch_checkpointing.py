@@ -677,7 +677,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         with mock.patch.object(
             manager,
             "_purge_stale_checkpoints",
-            side_effect=lambda *, saving_step, staging_dir_prefix=None: calls.append(
+            side_effect=lambda *, saving_step, last_step=False, staging_dir_prefix=None: calls.append(
                 ("purge", saving_step, staging_dir_prefix)
             ),
         ):
