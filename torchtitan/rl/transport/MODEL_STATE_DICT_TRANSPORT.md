@@ -1,6 +1,6 @@
 # Model state dict transport
 
-`ModelStateDictTransport` (`model_state_dict_transport.py`) moves the trainer's
+`ModelStateDictTransport` (`model_state_dict.py`) moves the trainer's
 model state dict into the generators' prefetched model state dicts with
 one-sided RDMA reads over a `torch.distributed._transport` backend
 (`backend="nixl"`, the default, or `"mooncake"`). It is the default

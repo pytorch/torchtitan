@@ -16,12 +16,12 @@ from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.generator.generator import Generator
 
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.model_state_dict_transport import (
+from torchtitan.rl.rollout.types import Completion, Prompt
+from torchtitan.rl.transport.model_state_dict import (
     ModelStateDictTransport,
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.rollout.types import Completion, Prompt
 
 
 class _GeneratorActorEndpoints:

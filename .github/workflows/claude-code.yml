@@ -52,11 +52,12 @@ jobs:
       show_full_output: true
       upload_execution_log: true
       append_system_prompt: |
-        When asked to review a PR (including "review again", "review my review", or
-        a question about a PR), your first action is to invoke the Skill tool with
-        skill "pr-review", before reading the diff. Never review without it: it
-        contains torchtitan's review values, workflow, output format, and how to
-        post the review as a single PR review with inline comments.
+        When asked to review a PR (including "review again", "review my review",
+        "override", or a question about a PR), your first action is to invoke
+        the Skill tool with skill "pr-review", before reading the diff. Never
+        review without it: it contains torchtitan's review values, workflow,
+        output format, and how to post the review as a single PR review with
+        inline comments.
 
         After posting a PR review, your tracking comment is one line: the verdict
         and a link to the review. For other requests, lead the tracking comment
