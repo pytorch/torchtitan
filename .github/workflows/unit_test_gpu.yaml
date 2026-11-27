@@ -44,6 +44,7 @@ jobs:
       docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix-1gpu.outputs.docker-hash }}
       repository: pytorch/torchtitan
       timeout: 30
+      hf-cache: false
       script: |
         set -eux
 
@@ -59,6 +60,8 @@ jobs:
           torch torchvision --index-url ${{ matrix.index-url }}
         USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url ${{ matrix.index-url }}
 
+        # hf-cache is off: a test that reaches the Hugging Face hub fails instead of downloading.
+        export HF_HUB_OFFLINE=1
         pytest tests/unit_tests/gpu -m "not multi_gpu" --strict-markers --durations=20 -vv
 
   set-matrix-multi-gpu:
@@ -81,6 +84,7 @@ jobs:
       docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix-multi-gpu.outputs.docker-hash }}
       repository: pytorch/torchtitan
       timeout: 30
+      hf-cache: false
       script: |
         set -eux
 
@@ -96,4 +100,6 @@ jobs:
           torch torchvision --index-url ${{ matrix.index-url }}
         USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url ${{ matrix.index-url }}
 
+        # hf-cache is off: a test that reaches the Hugging Face hub fails instead of downloading.
+        export HF_HUB_OFFLINE=1
         pytest tests/unit_tests/gpu -m multi_gpu --strict-markers --durations=20 -vv
