@@ -76,6 +76,8 @@ logger = logging.getLogger(__name__)
 
 # SGLang clamps a -inf logprob to its dtype's min (OutputLogprobProcessor.compute_logprobs):
 # -3.4028e38 for float32 logits, -3.3895e38 for bfloat16. Both are at or below this floor.
+# TODO: when the vLLM engine aborts non-finite logprobs too, move this floor and the
+# "abort, no tokens" result into torchtitan/rl/generator/, shared by both engines.
 _LOGPROB_FLOOR = torch.finfo(torch.bfloat16).min
 
 # ServerArgs fields that SGLangEngine sets itself or does not support, so
