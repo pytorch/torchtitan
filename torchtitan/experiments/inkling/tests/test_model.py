@@ -71,3 +71,23 @@ def test_padding_cannot_split_a_training_document():
     }
     with pytest.raises(ValueError, match="contiguous document"):
         model.preprocess_inputs(batch)
+
+
+def test_flops_count_nonpadding_and_visible_keys_per_visit():
+    config = build_model_config("debugmodel")
+    estimate = config.build_flops_estimator(config.build(), seq_len=8)
+
+    def work(positions, padding):
+        return estimate(
+            {
+                "input": torch.ones(len(positions), dtype=torch.long),
+                "positions": torch.tensor(positions),
+                "padding_mask": torch.tensor(padding, dtype=torch.bool),
+            }
+        )
+
+    first = work([0], [False])
+    assert first == work([0, 0], [False, True])
+    # Three full and three local visits. At position 5, full attention sees
+    # five more keys than at position 0; local attention sees three more.
+    assert work([5], [False]) - first == 6 * 4 * (8 + 8) * (3 * 5 + 3 * 3)

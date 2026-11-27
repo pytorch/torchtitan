@@ -138,6 +138,8 @@ def _frozen_parameter(*shape: int, dtype: torch.dtype) -> torch.nn.Parameter:
 
 
 class _Router(Module):
+    _preserve_dtype_params = ("bias",)
+
     def __init__(self, config: "InklingMoE.Config"):
         super().__init__()
         self.weight = _frozen_parameter(
@@ -186,6 +188,8 @@ class _PackedExperts(Module):
                     name + "_outer_scale_denominator",
                     _frozen_parameter(1, dtype=torch.float32),
                 )
+
+        self._preserve_dtype_params = tuple(self._parameters)
 
     def reset_parameters(self) -> None:
         # A bounded, non-degenerate initial state for checkpoint-free debug recipes.
@@ -261,8 +265,21 @@ class InklingMoE(Module):
                 * self.config.route_scale
             )
             out_ND = torch.zeros_like(x_ND, dtype=torch.float32)
-            for expert in ids_NK.unique().tolist():
-                tokens_R, slots_R = (ids_NK == expert).nonzero(as_tuple=True)
+            # One host read for all expert boundaries. Keep the per-expert gathers
+            # and adds: combining them changes BF16 dX accumulation order.
+            sorted_ids, order = ids_NK.flatten().sort(stable=True)
+            boundaries = torch.searchsorted(
+                sorted_ids, torch.arange(1, self.config.num_experts, device=x_ND.device)
+            ).tolist()
+            token_groups = (order // self.config.experts_per_token).tensor_split(
+                boundaries
+            )
+            score_groups = weights_NK.flatten()[order].tensor_split(boundaries)
+            for expert, (tokens_R, scores_R) in enumerate(
+                zip(token_groups, score_groups)
+            ):
+                if tokens_R.numel() == 0:
+                    continue
                 gate_up = self.experts.project(
                     "w13_weight", expert, x_ND[tokens_R]
                 ).float()
@@ -276,7 +293,7 @@ class InklingMoE(Module):
                 act = act * (
                     (up / self.config.up_softcap).tanh() * self.config.up_softcap
                 )
-                act = (act * weights_NK[tokens_R, slots_R, None]).bfloat16()
+                act = (act * scores_R[:, None]).bfloat16()
                 out_ND.index_add_(
                     0, tokens_R, self.experts.project("w2_weight", expert, act).float()
                 )

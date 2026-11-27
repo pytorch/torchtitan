@@ -24,13 +24,28 @@ assets, and the weights). To download the tested snapshot:
 .venv/bin/hf download thinkingmachines/Inkling-2-Mini --revision c9d028302cd0f035fdf8e7e91f089a4ce94d2195
 ```
 
+Create an importable recipe, for example `inkling_run.py` in the checkout:
+
+```python
+from pathlib import Path
+
+from torchtitan_recipes.models.inkling import inkling_2_mini_lora
+
+
+def spark():
+    checkpoint = (
+        Path.home() / ".cache/huggingface/hub/models--thinkingmachines--Inkling-2-Mini"
+        / "snapshots/c9d028302cd0f035fdf8e7e91f089a4ce94d2195"
+    )
+    return inkling_2_mini_lora(
+        checkpoint=checkpoint, text=Path("train.txt"), seq_len=8, steps=10
+    )
+```
+
 ```bash
-checkpoint="$HOME/.cache/huggingface/hub/models--thinkingmachines--Inkling-2-Mini/snapshots/c9d028302cd0f035fdf8e7e91f089a4ce94d2195"
 run="$HOME/checkpoints/inkling-query-lora"
 .venv/bin/torchrun --standalone --nproc-per-node=1 \
-  --module torchtitan_recipes.models.inkling \
-  --checkpoint "$checkpoint" --text train.txt --output-dir "$run" \
-  --seq-len 8 --steps 10
+  --module torchtitan.train --module inkling_run --config spark --output-dir "$run"
 ```
 
 Supply a UTF-8 corpus with one document per line. The example uses short
@@ -39,10 +54,12 @@ or long-context capacity. The recipe uses the standard Trainer, Grain data
 loader, next-token cross entropy, optimizer, and distributed checkpointing.
 The native step checkpoint saves the adapter and training state, not a second
 copy of the frozen model. Keep the source checkpoint for resume and allow about
-19 GiB of disk space per merged HF export. The launcher verifies the contents of the original snapshot when
-resuming and before export. To continue training, use the same output directory,
-snapshot and corpus, and increase the total number of steps. A step-qualified
-export leaves the previous result intact.
+19 GiB of disk space per merged HF export. The trainer records the original
+snapshot and corpus contents and the sequence length in `run-manifest.json`.
+It verifies them before loading a native checkpoint and again before export.
+To continue training, use the same output directory, snapshot, corpus, and
+sequence length, and increase `steps` in the recipe. A step-qualified export
+leaves the previous result intact.
 
 ## Use the trained checkpoint in WarpDrive
 

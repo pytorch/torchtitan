@@ -42,6 +42,19 @@ _MXFP8 = {
     "rounding": "nearest",
     "scale_dtype": "ue8m0",
 }
+# Safetensors dtype names; None denotes a tensor forbidden in this format.
+_NVFP4_STORAGE_DTYPES = {
+    "": "U8",
+    "_scale": "F8_E4M3",
+    "_amax": "F32",
+    "_outer_scale_denominator": "F32",
+}
+_MXFP8_STORAGE_DTYPES = {
+    "": "F8_E4M3",
+    "_scale": "U8",
+    "_amax": None,
+    "_outer_scale_denominator": None,
+}
 
 
 def _validate_checkpoint(source: Path, model: InklingModel.Config) -> None:
@@ -106,13 +119,13 @@ def _validate_checkpoint(source: Path, model: InklingModel.Config) -> None:
     if text.get("model_max_length", 0) < model.max_context_length:
         raise ValueError("Native context length exceeds text_config.model_max_length")
     index = json.loads((source / "model.safetensors.index.json").read_bytes())
-    keys = index["weight_map"]
+    weight_map = index["weight_map"]
     config = json.loads((source / "hf_quant_config.json").read_bytes())
-    declarations = {
-        key: group["required_activation_quantization"]
-        for group in config["model"]["parameter_groups"]
-        for key in group["tensors"]
-    }
+    declarations = defaultdict(list)
+    for group in config["model"]["parameter_groups"]:
+        for key in group["tensors"]:
+            declarations[key].append(group["required_activation_quantization"])
+    packed_dtypes: dict[str, str | None] = {}
     for i, layer in enumerate(model.layers):
         moe = layer.mlp
         require("intermediate_size", moe.intermediate_size)
@@ -124,16 +137,55 @@ def _validate_checkpoint(source: Path, model: InklingModel.Config) -> None:
         require("mlp_gate_softcap", moe.gate_softcap)
         require("mlp_up_softcap", moe.up_softcap)
         nvfp4 = moe.expert_format == "nvfp4"
+        storage_dtypes = _NVFP4_STORAGE_DTYPES if nvfp4 else _MXFP8_STORAGE_DTYPES
         for matrix in ("w13_weight", "w2_weight"):
             key = f"{_PREFIX}layers.{i}.mlp.experts.{matrix}"
-            if (
-                key not in keys
-                or (f"{key}_amax" in keys) != nvfp4
-                or declarations.get(key) != (_NVFP4 if nvfp4 else _MXFP8)
-            ):
+            if declarations[key] != [_NVFP4 if nvfp4 else _MXFP8]:
                 raise ValueError(
                     f"Missing or unsupported expert quantization for {key}"
                 )
+            for suffix, dtype in storage_dtypes.items():
+                packed_dtypes[key + suffix] = dtype
+
+    _validate_packed_storage(source, weight_map, packed_dtypes)
+
+
+def _validate_packed_storage(
+    source: Path, weight_map: dict[str, str], packed_dtypes: dict[str, str | None]
+) -> None:
+    required_keys = {key for key, dtype in packed_dtypes.items() if dtype is not None}
+    for key in packed_dtypes:
+        if (key in weight_map) != (key in required_keys):
+            raise ValueError(
+                f"Missing or unexpected packed expert key in weight map: {key}"
+            )
+
+    # DCP scans all local safetensors files and copy_ can cast the source dtype.
+    # Check actual headers, including unindexed duplicates, without loading tensors.
+    found_keys = set()
+    for shard in source.glob("*.safetensors"):
+        with safe_open(shard, framework="pt", device="cpu") as tensors:
+            for key in packed_dtypes.keys() & tensors.keys():
+                dtype = packed_dtypes[key]
+                if dtype is None:
+                    raise ValueError(
+                        f"Unexpected packed expert key {key} in {shard.name}"
+                    )
+                if weight_map[key] != shard.name:
+                    raise ValueError(
+                        f"Packed expert key {key} found in {shard.name}, "
+                        f"but indexed in {weight_map[key]}"
+                    )
+                actual_dtype = tensors.get_slice(key).get_dtype()
+                if actual_dtype != dtype:
+                    raise ValueError(
+                        f"Packed expert key {key} in {shard.name} has wrong storage dtype: "
+                        f"expected {dtype}, got {actual_dtype}"
+                    )
+                found_keys.add(key)
+    if missing_keys := required_keys - found_keys:
+        key = min(missing_keys)
+        raise ValueError(f"Missing packed expert key {key} in {weight_map[key]}")
 
 
 class InklingStateDictAdapter(StateDictAdapter):

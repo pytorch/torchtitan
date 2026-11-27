@@ -6,6 +6,7 @@
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import cast
 
@@ -138,11 +139,13 @@ def test_internal_lora_checkpoint_roundtrip(tmp_path: Path):
     save_file({"mtp.weight": torch.randn(3)}, source / "mtp.safetensors")
     initial_a = projection.get_parameter("lora_a.weight").detach().clone()
     adapter = InklingStateDictAdapter(cfg, str(source))
-    recipe = inkling_2_mini_lora(checkpoint=source)
-    recipe.checkpointer.keep_latest_k = 0
+    recipe = inkling_2_mini_lora(checkpoint=source, text=tmp_path / "train.txt")
+    checkpointer_config = recipe.checkpointer
+    assert checkpointer_config is not None
+    checkpointer_config.keep_latest_k = 0
     optimizers = recipe.optim.optimizer.build(model_parts=[model])
     manager = CheckpointManager(
-        config=recipe.checkpointer,
+        config=checkpointer_config,
         model_parts=[model],
         optimizers=optimizers,
         lr_schedulers=recipe.optim.lr_scheduler.build(
@@ -195,6 +198,28 @@ def test_internal_lora_checkpoint_roundtrip(tmp_path: Path):
     assert (output / "mtp.safetensors").read_bytes() == (
         source / "mtp.safetensors"
     ).read_bytes()
+
+    # DCP can copy FP32 values into the U8 scale buffer without reporting a mismatch.
+    scale_key = "model.llm.layers.3.mlp.experts.w13_weight_scale"
+    save_file(base | {scale_key: base[scale_key].float() + 0.5}, blob)
+    with pytest.raises(ValueError, match=rf"{re.escape(scale_key)}.*U8.*F32"):
+        adapter.get_hf_storage_reader(str(source))
+    save_file(base, blob)
+
+    # DCP discovers shards by filename, not from the weight map.
+    duplicate_shard = source / "extra.safetensors"
+    save_file({scale_key: base[scale_key].float()}, duplicate_shard)
+    with pytest.raises(ValueError, match=rf"{re.escape(scale_key)}.*extra.safetensors"):
+        adapter.get_hf_storage_reader(str(source))
+    duplicate_shard.unlink()
+
+    denominator_key = (
+        "model.llm.layers.0.mlp.experts.w13_weight_outer_scale_denominator"
+    )
+    save_file({k: v for k, v in base.items() if k != denominator_key}, blob)
+    with pytest.raises(ValueError, match=rf"Missing.*{re.escape(denominator_key)}"):
+        adapter.get_hf_storage_reader(str(source))
+    save_file(base, blob)
 
     # A different visit count has identical tensor shapes but different logits.
     loop["num_passes"] = 3

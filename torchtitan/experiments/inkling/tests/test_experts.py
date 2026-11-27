@@ -8,7 +8,30 @@ import pytest
 import torch
 from torch.nn import functional as F
 
+from torchtitan.config import PrecisionConfig
+from torchtitan.config.transform import LoRATransform
+from torchtitan.distributed.fsdp import maybe_store_frozen_params_in_param_dtype_
+from torchtitan.experiments.inkling import build_model_config
 from torchtitan.experiments.inkling.experts import InklingMoE
+from torchtitan.tools.utils import set_default_dtype
+
+
+def test_mixed_precision_keeps_frozen_checkpoint_dtypes():
+    cfg = LoRATransform(rank=2, alpha=2, target_modules=["attn.wq_du"]).transform(
+        build_model_config("debugmodel")
+    )
+    # In mixed precision only trainable masters differ from the BF16 recipe.
+    with torch.device("meta"), set_default_dtype(torch.bfloat16):
+        expected = {
+            name: torch.float32 if param.requires_grad else param.dtype
+            for name, param in cfg.build().named_parameters()
+        }
+    with torch.device("meta"), set_default_dtype(torch.float32):
+        model = cfg.build()
+    maybe_store_frozen_params_in_param_dtype_(
+        model, PrecisionConfig(dtype="float32", param_dtype="bfloat16")
+    )
+    assert {name: param.dtype for name, param in model.named_parameters()} == expected
 
 
 @pytest.mark.parametrize("fmt", ["nvfp4", "mxfp8"])
@@ -63,8 +86,12 @@ def test_routed_packed_experts_propagate_input_gradient(fmt):
                     # scale=1, codes represent 2*matrix, so W=matrix*factor.
                     model.experts.get_parameter(name + "_scale")[e].fill_(1)
                 else:
-                    data = matrix.to(torch.float8_e4m3fn)
-                    model.experts.get_parameter(name + "_scale")[e].fill_(127)
+                    # Different E8M0 scales per row and expert still decode to matrix.
+                    exponents = (torch.arange(matrix.size(0))[:, None] + e) % 2 * 2 - 1
+                    data = (matrix / 2.0**exponents).to(torch.float8_e4m3fn)
+                    model.experts.get_parameter(name + "_scale")[e].copy_(
+                        exponents + 127
+                    )
                 model.experts.get_parameter(name)[e].copy_(data)
 
     x = (

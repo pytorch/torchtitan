@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.models.common.linear import Linear
 from torchtitan.experiments.inkling.experts import InklingMoE
 from torchtitan.experiments.inkling.model import (
     InklingAttention,
@@ -12,6 +11,7 @@ from torchtitan.experiments.inkling.model import (
     InklingModel,
     InklingShape,
 )
+from torchtitan.models.common.linear import Linear
 
 MODEL_FLAVORS = {
     "2-mini": InklingShape(

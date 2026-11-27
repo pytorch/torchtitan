@@ -17,11 +17,13 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from torchtitan.models.base.model import BaseModel
-from torchtitan.models.base.module import Module
-from torchtitan.models.common.linear import Linear
 from torchtitan.experiments.inkling.experts import InklingMoE
 from torchtitan.experiments.inkling.state_dict_adapter import InklingStateDictAdapter
+
+from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.module import Module
+from torchtitan.models.common.flops import quadratic_attention_flops
+from torchtitan.models.common.linear import Linear
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -381,7 +383,27 @@ class InklingModel(BaseModel):
                     + 3 * s.hidden_size * s.intermediate_size * s.experts_per_token
                 )
             linear_per_token += s.vocab_size * s.hidden_size
-            return lambda batch: 6 * linear_per_token * batch["input"].numel()
+            full_visits = sum(
+                s.num_passes if i in s.loop_layers else 1 for i in s.full_layers
+            )
+            local_visits = (
+                s.num_layers + len(s.loop_layers) * (s.num_passes - 1) - full_visits
+            )
+
+            def estimate(batch):
+                keys_T = batch["positions"][~batch["padding_mask"]] + 1
+                return (
+                    6 * linear_per_token * keys_T.numel()
+                    + quadratic_attention_flops(
+                        num_heads=s.num_q_heads,
+                        qk_head_dim=s.head_dim,
+                        v_head_dim=s.head_dim,
+                        num_keys=full_visits * keys_T
+                        + local_visits * keys_T.clamp(max=s.sliding_window),
+                    )
+                )
+
+            return estimate
 
     def __init__(self, config):
         super().__init__()
