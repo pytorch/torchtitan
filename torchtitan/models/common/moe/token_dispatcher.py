@@ -11,64 +11,67 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.distributed._functional_collectives import all_to_all_single
-from torch.fx.experimental.symbolic_shapes import guard_or_false
 
-from torchtitan.distributed.local_compile import is_local_compile_enabled, local_compile
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_group
 from torchtitan.models.base.module import Module
-from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
-@local_compile("moe_weighted_gather_sum", batch_invariant=True)
-def _weighted_gather_sum_topk(
+# Neither function in the moe_weighted_gather_sum region is batch-invariant: the
+# backward reduces each row over D, and Inductor picks that reduction's split from
+# the total element count, which the token count changes.
+@local_compile("moe_weighted_gather_sum", batch_invariant=False)
+def _weighted_gather_sum(
     routed_output_ND: torch.Tensor,
     topk_scores_N: torch.Tensor,
-    inv_N: torch.Tensor,
+    row_of_route_N: torch.Tensor,
     num_tokens: int,
     top_k: int,
 ) -> torch.Tensor:
-    """Gather each token's ``top_k`` expert outputs, weight by fp32 router scores, and sum."""
-    gathered_TKD = routed_output_ND[inv_N].view(
+    """Sum each token's ``top_k`` expert rows, weighted by its router scores."""
+    rows_TKD = routed_output_ND[row_of_route_N].view(
         num_tokens, top_k, routed_output_ND.shape[-1]
     )
-    scores_TK1 = topk_scores_N[inv_N].view(num_tokens, top_k, 1).to(torch.float32)
+    scores_TK1 = topk_scores_N[row_of_route_N].view(num_tokens, top_k, 1)
+    # Type promotion sums in float32 without materializing a float32 copy of the
+    # rows, which the multiply would save for backward.
     return (
-        (gathered_TKD.to(torch.float32) * scores_TK1)
-        .sum(dim=1)
-        .to(routed_output_ND.dtype)
+        (rows_TKD * scores_TK1.to(torch.float32)).sum(dim=1).to(routed_output_ND.dtype)
     )
 
 
-@local_compile("moe_weighted_gather_sum", batch_invariant=True)
-def _weighted_gather_sum_topk_bwd(
+@local_compile("moe_weighted_gather_sum", batch_invariant=False)
+def _weighted_gather_sum_backward(
     grad_out_TD: torch.Tensor,
     routed_output_ND: torch.Tensor,
     topk_scores_N: torch.Tensor,
     token_indices_N: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute gradients for routed expert outputs and router scores in one fused pass."""
-    grad_gathered_ND = grad_out_TD[token_indices_N].to(torch.float32)
-    grad_routed_ND = (
-        grad_gathered_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
-    ).to(routed_output_ND.dtype)
+    """Gradients of ``_weighted_gather_sum`` for the expert rows and the scores."""
+    grad_rows_ND = grad_out_TD[token_indices_N].to(torch.float32)
+    grad_routed_ND = (grad_rows_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)).to(
+        routed_output_ND.dtype
+    )
     grad_scores_N = (
-        (grad_gathered_ND * routed_output_ND.to(torch.float32))
-        .sum(dim=-1)
-        .to(topk_scores_N.dtype)
+        (grad_rows_ND * routed_output_ND).sum(dim=-1).to(topk_scores_N.dtype)
     )
     return grad_routed_ND, grad_scores_N
 
 
 @spmd.register_local_autograd_function
-class _WeightedGatherSumTopK(torch.autograd.Function):
-    """Fused score-scale and gather-sum combine for expert-sorted ``top_k`` outputs.
+class _WeightedGatherSum(torch.autograd.Function):
+    """Combine: sum each token's ``top_k`` expert rows, weighted by its scores.
 
-    Because ``perm_N`` is a bijection of ``[0, T * top_k)``, every token's ``top_k``
-    expert outputs sit at known positions ``inv_N[t * top_k : (t + 1) * top_k]``.
-    Gathering by ``inv_N`` avoids materializing an intermediate ``(N, D)`` scaled
-    tensor, zero-filling an accumulator, and running ``deterministic_scatter_add``
-    while reducing each token in float32.
+    ``row_of_route_N`` lists every row of the expert-sorted output once, so token
+    ``t`` owns rows ``row_of_route_N[t * top_k : (t + 1) * top_k]``. Gathering
+    them reduces each token in float32 with one rounding, in token order, and
+    needs neither a zero-filled accumulator nor a scatter-add -- whose backward
+    is another accumulating ``index_put``. Forward and backward are gathers, so
+    the result is deterministic without ``use_deterministic_algorithms``.
+
+    Why not plain ops: the score multiply would save a float32 ``(N, D)`` copy of
+    the expert rows for backward. Backward recomputes it from the rows instead.
     """
 
     @staticmethod
@@ -77,42 +80,30 @@ class _WeightedGatherSumTopK(torch.autograd.Function):
         routed_output_ND: torch.Tensor,
         topk_scores_N: torch.Tensor,
         token_indices_N: torch.Tensor,
-        perm_N: torch.Tensor,
+        row_of_route_N: torch.Tensor,
         num_tokens: int,
         top_k: int,
     ) -> torch.Tensor:
-        inv_N = _inverse_permutation(perm_N)
         ctx.save_for_backward(routed_output_ND, topk_scores_N, token_indices_N)
-        return _weighted_gather_sum_topk(
-            routed_output_ND, topk_scores_N, inv_N, num_tokens, top_k
+        return _weighted_gather_sum(
+            routed_output_ND, topk_scores_N, row_of_route_N, num_tokens, top_k
         )
 
     @staticmethod
     def backward(ctx, grad_out_TD: torch.Tensor):  # pyrefly: ignore[bad-override]
         routed_output_ND, topk_scores_N, token_indices_N = ctx.saved_tensors
-        need_routed, need_scores = ctx.needs_input_grad[0], ctx.needs_input_grad[1]
-        if need_routed and need_scores:
-            grad_routed_ND, grad_scores_N = _weighted_gather_sum_topk_bwd(
-                grad_out_TD, routed_output_ND, topk_scores_N, token_indices_N
-            )
-            return grad_routed_ND, grad_scores_N, None, None, None, None
-        grad_routed_ND = None
-        grad_scores_N = None
-        if need_routed:
-            grad_routed_ND = (
-                grad_out_TD[token_indices_N].to(torch.float32)
-                * topk_scores_N.reshape(-1, 1).to(torch.float32)
-            ).to(routed_output_ND.dtype)
-        if need_scores:
-            grad_scores_N = (
-                (
-                    grad_out_TD[token_indices_N].to(torch.float32)
-                    * routed_output_ND.to(torch.float32)
-                )
-                .sum(dim=-1)
-                .to(topk_scores_N.dtype)
-            )
-        return grad_routed_ND, grad_scores_N, None, None, None, None
+        grad_routed_ND, grad_scores_N = _weighted_gather_sum_backward(
+            grad_out_TD, routed_output_ND, topk_scores_N, token_indices_N
+        )
+        need_routed, need_scores = ctx.needs_input_grad[:2]
+        return (
+            grad_routed_ND if need_routed else None,
+            grad_scores_N if need_scores else None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 @spmd.register_local_autograd_function
@@ -166,7 +157,8 @@ class LocalDispatchMetadata:
 
     token_indices_experts_sorted_N: torch.Tensor  # noqa: N815
     topk_scores_experts_sorted_N: torch.Tensor  # noqa: N815
-    perm_N: torch.Tensor | None = None  # noqa: N815
+    # Row each flat route landed on in the expert sort, which combine gathers by.
+    row_of_route_N: torch.Tensor  # noqa: N815
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -208,34 +200,12 @@ class LocalTokenDispatcher(Module):
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
 
-    def _local_reorder_with_perm(
-        self,
-        x_TD: torch.Tensor,
-        topk_scores_TK: torch.Tensor,
-        topk_expert_ids_TK: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Reorder tokens by expert assignment and return the sorting permutation."""
-        # Reorder the token indices to match the order of the experts where N = T*K
-        perm_N = torch.argsort(
-            topk_expert_ids_TK.view(-1).to(self._expert_ids_sort_dtype), stable=True
-        )
-        topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[perm_N]
-        token_indices_experts_sorted_N = perm_N // self.top_k
-        routed_input_ND = x_TD[token_indices_experts_sorted_N]
-
-        return (
-            routed_input_ND,
-            token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N,
-            perm_N,
-        )
-
     def _local_reorder(
         self,
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Reorder tokens by expert assignment for local expert computation.
 
         Groups tokens by expert index via argsort. Routing scores are applied
@@ -251,17 +221,24 @@ class LocalTokenDispatcher(Module):
                 order.
             token_indices_experts_sorted_N: ``(N,)`` token-to-original mapping
             topk_scores_experts_sorted_N: ``(N,)`` scores in expert-sorted order
+            row_of_route_N: ``(N,)`` row each flat route landed on, which
+                ``combine`` gathers a token's ``top_k`` rows by
         """
-        (
-            routed_input_ND,
-            token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N,
-            _,
-        ) = self._local_reorder_with_perm(x_TD, topk_scores_TK, topk_expert_ids_TK)
+        # Reorder the token indices to match the order of the experts where N = T*K
+        route_indices_experts_sorted_N = torch.argsort(
+            topk_expert_ids_TK.view(-1).to(self._expert_ids_sort_dtype), stable=True
+        )
+        topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
+            route_indices_experts_sorted_N
+        ]
+        token_indices_experts_sorted_N = route_indices_experts_sorted_N // self.top_k
+        routed_input_ND = x_TD[token_indices_experts_sorted_N]
+
         return (
             routed_input_ND,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
+            _inverse_permutation(route_indices_experts_sorted_N),
         )
 
     def dispatch(
@@ -291,12 +268,12 @@ class LocalTokenDispatcher(Module):
             routed_input_RD,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
-            perm_N,
-        ) = self._local_reorder_with_perm(x_TD, topk_scores_TK, topk_expert_ids_TK)
+            row_of_route_N,
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
-            perm_N=perm_N,
+            row_of_route_N=row_of_route_N,
         )
         return routed_input_RD, num_local_tokens_per_expert_E, metadata
 
@@ -306,7 +283,7 @@ class LocalTokenDispatcher(Module):
         metadata: LocalDispatchMetadata,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
-        """Score and scatter_add routed expert outputs.
+        """Weight routed expert outputs by their scores and sum each token's rows.
 
         Args:
             routed_output_RD: ``(R, D)`` expert outputs
@@ -315,49 +292,32 @@ class LocalTokenDispatcher(Module):
         Returns:
             out_TD: ``(T, D)`` combined output.
         """
-        # The scatter-add reads the expert outputs with bare ops.
+        # The gather-sum reads the expert outputs with bare ops.
         remat.recompute_needs_tensor(routed_output_RD)
-        return self._score_and_scatter_add(
+        return self._combine_routes(
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
             metadata.token_indices_experts_sorted_N,
-            x_TD,
-            perm_N=metadata.perm_N,
+            metadata.row_of_route_N,
+            x_TD.shape[0],
         )
 
-    def _score_and_scatter_add(
+    def _combine_routes(
         self,
         routed_output_ND: torch.Tensor,
         topk_scores_N: torch.Tensor,
         token_indices_N: torch.Tensor,
-        x_TD: torch.Tensor,
-        *,
-        perm_N: torch.Tensor | None = None,
+        row_of_route_N: torch.Tensor,
+        num_tokens: int,
     ) -> torch.Tensor:
         """Weight expert-sorted outputs by their router scores and sum them per token."""
-        if (
-            perm_N is not None
-            and is_local_compile_enabled("moe_weighted_gather_sum")
-            and guard_or_false(routed_output_ND.shape[0] == x_TD.shape[0] * self.top_k)
-        ):
-            return _WeightedGatherSumTopK.apply(
-                routed_output_ND,
-                topk_scores_N,
-                token_indices_N,
-                perm_N,
-                x_TD.shape[0],
-                self.top_k,
-            )
-        # Type promotion computes the product in float32 without materializing a
-        # float32 copy of the routed output, which the multiply would save for
-        # backward (twice the bytes of the routed output itself).
-        routed_output_ND = (
-            routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
-        ).to(routed_output_ND.dtype)
-        return deterministic_scatter_add(
-            torch.zeros_like(x_TD),
-            token_indices_N.reshape(-1, 1).expand(-1, x_TD.shape[-1]),
+        return _WeightedGatherSum.apply(
             routed_output_ND,
+            topk_scores_N,
+            token_indices_N,
+            row_of_route_N,
+            num_tokens,
+            self.top_k,
         )
 
 
@@ -417,7 +377,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
     With EP, each of dispatch and combine is one remat region,
     ``<fqn>.dispatch`` and ``<fqn>.combine``, covering its local reordering,
-    collectives, and (for combine) the score-weighted scatter-add.
+    collectives, and (for combine) the score-weighted gather-sum.
 
     The EP mesh is resolved from the ambient SPMD runtime.
     """
@@ -585,7 +545,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             num_global_tokens_per_local_expert_e,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
-            perm_N,
+            row_of_route_N,
             permuted_indices,
             input_splits,
             output_splits,
@@ -612,7 +572,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
-            perm_N=perm_N,
+            row_of_route_N=row_of_route_N,
             # Pre-permute shape: the all-to-all output, which padding
             # dispatchers (TorchAO) may grow in _permute.
             input_shape=torch.Size((sum(output_splits_list), x_TD.shape[-1])),
@@ -641,8 +601,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_input_ND,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
-            perm_N,
-        ) = self._local_reorder_with_perm(x_TD, topk_scores_TK, topk_expert_ids_TK)
+            row_of_route_N,
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         with maybe_set_sparse_mesh():
             ep_group = spmd_mesh_group(MeshAxisName.EP)
@@ -700,7 +660,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             num_global_tokens_per_local_expert_e,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
-            perm_N,
+            row_of_route_N,
             permuted_indices,
             input_splits,
             output_splits,
@@ -775,7 +735,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         metadata: AllToAllDispatchMetadata,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
-        """Reverse the dispatch: unpermute + all-to-all + score + scatter_add.
+        """Reverse the dispatch: unpermute + all-to-all + score-weighted gather-sum.
 
         Args:
             routed_output_RD: ``(R, D)`` expert outputs in expert-major order
@@ -802,7 +762,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
             metadata.token_indices_experts_sorted_N,
-            metadata.perm_N,
+            metadata.row_of_route_N,
             metadata.permuted_indices,
             metadata.input_shape,
             metadata.input_splits,
@@ -816,14 +776,14 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         routed_output_RD: torch.Tensor,
         topk_scores_experts_sorted_N: torch.Tensor,
         token_indices_experts_sorted_N: torch.Tensor,
-        perm_N: torch.Tensor | None,
+        row_of_route_N: torch.Tensor,
         permuted_indices: torch.Tensor,
         input_shape: torch.Size,
         input_splits: list[int],
         output_splits: list[int],
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
-        """Unpermute, all-to-all back to token ranks, then score and scatter-add.
+        """Unpermute, all-to-all back to token ranks, then score and gather-sum.
 
         Runs as the single ``<fqn>.combine`` remat region.
         """
@@ -840,12 +800,12 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD = spmd.reinterpret_mesh(
                 routed_output_RD, spmd.current_mesh()
             )
-        return self._score_and_scatter_add(
+        return self._combine_routes(
             routed_output_RD,
             topk_scores_experts_sorted_N,
             token_indices_experts_sorted_N,
-            x_TD,
-            perm_N=perm_N,
+            row_of_route_N,
+            x_TD.shape[0],
         )
 
 
@@ -897,8 +857,8 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             routed_input_ND,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
-            perm_N,
-        ) = self._local_reorder_with_perm(x_TD, topk_scores_TK, topk_expert_ids_TK)
+            row_of_route_N,
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         input_shape = routed_input_ND.shape
         (
@@ -910,7 +870,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
-            perm_N=perm_N,
+            row_of_route_N=row_of_route_N,
             input_shape=input_shape,
             permuted_indices=permuted_indices,
             # Unused in the EP=1 combine path (no all-to-all to reverse).
@@ -933,7 +893,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             )
 
         # EP=1: strip the padding (via _unpermute) to recover expert-sorted
-        # order, then apply the local score + scatter_add used by the EP=1
+        # order, then apply the local score-weighted gather-sum used by the EP=1
         # path. Mirrors LocalTokenDispatcher.combine, plus the unpad.
         assert isinstance(metadata, AllToAllDispatchMetadata)
         # The unpermute reads the expert outputs with bare ops.
@@ -942,12 +902,12 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             routed_output_RD, metadata.input_shape, metadata.permuted_indices
         )
 
-        return self._score_and_scatter_add(
+        return self._combine_routes(
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
             metadata.token_indices_experts_sorted_N,
-            x_TD,
-            perm_N=metadata.perm_N,
+            metadata.row_of_route_N,
+            x_TD.shape[0],
         )
 
     def _permute(

@@ -27,20 +27,17 @@ Titan's MoE output is compared against unmodified HF forward.
 
 ### Dispatcher precision (affects all WARN models)
 
-Three independent differences between Titan's `LocalTokenDispatcher` and HF:
+Titan's `combine()` gathers each token's top-k expert rows, weights them in f32
+and sums them in token order, which is HF's `reshape(N, K, D).sum(dim=1)`, so
+accumulation dtype and order match. One difference is left:
 
-1. **Accumulation dtype** -- Titan's `combine()` casts the score-weighted
-   expert output back to bf16 before `scatter_add`, so accumulation happens in
-   bf16; HF keeps it in f32. Fix: keep f32 through the scatter_add.
-2. **Accumulation order** -- `scatter_add` sums the top-k contributions in
-   expert-sorted order, while HF's `reshape(N, K, D).sum(dim=1)` sums in token
-   order; the different f32 summation order gives a different result. Fix:
-   unsort back to token order and use reshape+sum. (No effect for `top_k=1`.)
-3. **topk sort order** -- Titan uses `topk(sorted=False)`, HF defaults to
-   `sorted=True`, so the routing-score normalization sum is over
-   differently-ordered values. Fix: use `sorted=True`. (No effect for `top_k=1`.)
+- **topk sort order** -- Titan uses `topk(sorted=False)`, HF defaults to
+  `sorted=True`, so the routing-score normalization sum is over
+  differently-ordered values. Fix: use `sorted=True`. (No effect for `top_k=1`.)
 
-With all three fixes applied, all PASS/WARN models produce max_diff=0.00.
+With that fix applied, all PASS/WARN models produce max_diff=0.00. The table
+above was measured before `combine()` moved to the gather-sum and needs
+re-running.
 
 ### Activation function (Gemma4)
 

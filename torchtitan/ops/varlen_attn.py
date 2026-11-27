@@ -87,7 +87,7 @@ def _deterministic_varlen_attn_backward(
     # The deterministic flag is process-wide. Ops that other threads dispatch
     # during this backward also run in deterministic mode, and raise if they
     # have no deterministic kernel.
-    # TODO(fegin): Share this toggle with scatter_add.py if a third op needs it.
+    # TODO(fegin): Factor this toggle out if a second op needs it.
     torch.use_deterministic_algorithms(True, warn_only=False)
     # Deterministic mode also NaN-fills every new tensor. Turn that off, as
     # set_determinism does: the fill kernel races with DeepEP comm streams.
