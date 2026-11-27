@@ -94,36 +94,24 @@ def _normalize_with_norm(
     EPS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    chunk = tl.program_id(0).to(tl.int64)
-    batch = tl.program_id(1).to(tl.int64)
+    # Flatten batch and chunks to avoid CUDA's grid axis 1 limit.
+    program = tl.program_id(0).to(tl.int64)
+    chunks: tl.constexpr = triton.cdiv(N, BLOCK)
+    chunk = program % chunks
+    batch = program // chunks
     norm = tl.load(Norm + batch).to(tl.float32)
     epsilon = tl.full((), EPS, tl.float32).to(Norm.dtype.element_ty).to(tl.float32)
-    norm = tl.maximum(norm, epsilon)
+    norm = tl.maximum(norm, epsilon, propagate_nan=tl.PropagateNan.ALL)
     index = chunk * BLOCK + tl.arange(0, BLOCK)
     pointer = Y + _offset(batch * N + index, SHAPE, YS)
     value = tl.load(pointer, index < N, 0).to(tl.float32)
     tl.store(pointer, tl.div_rn(value, norm), index < N)
 
 
-@triton.jit
-def _copy_scaled(
-    X,
-    Y,
-    N: tl.constexpr,
-    SHAPE: tl.constexpr,
-    XS: tl.constexpr,
-    YS: tl.constexpr,
-    SCALE: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    index = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
-    value = tl.load(X + _offset(index, SHAPE, XS), index < N, 0)
-    rounded = value.to(Y.dtype.element_ty).to(tl.float32)
-    tl.store(Y + _offset(index, SHAPE, YS), rounded * SCALE, index < N)
-
-
 def normalize_(result, norm, eps):
     """Clamp the PyTorch norm and normalize in place without changing its reduction."""
+    if not result.numel():
+        return
     # Traverse the contiguous matrix axis, including transposed NS inputs.
     if result.stride(-2) < result.stride(-1):
         result = result.transpose(-2, -1)
@@ -132,7 +120,7 @@ def normalize_(result, norm, eps):
     batch = math.prod(shape[:-2])
     block = 8192
     chunks = triton.cdiv(numel, block)
-    _normalize_with_norm[(chunks, batch)](
+    _normalize_with_norm[(chunks * batch,)](
         result,
         norm,
         numel,
@@ -141,21 +129,6 @@ def normalize_(result, norm, eps):
         eps,
         block,
         num_warps=8,
-        enable_fp_fusion=False,
-    )
-
-
-def copy_scaled_(result, target, *, scale):
-    """Round to target storage dtype before applying the shape-dependent scale."""
-    _copy_scaled[(triton.cdiv(target.numel(), _BLOCK_SIZE),)](
-        result,
-        target,
-        target.numel(),
-        tuple(target.shape),
-        result.stride(),
-        target.stride(),
-        scale,
-        _BLOCK_SIZE,
         enable_fp_fusion=False,
     )
 

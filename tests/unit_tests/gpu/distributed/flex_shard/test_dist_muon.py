@@ -187,8 +187,14 @@ class TestDistMuon(DTensorTestBase):
                 use_triton=use_triton,
             )
 
+        # Each rank owns 2 * 513 elements, exercising multiple blocks and a tail.
+        num_columns = 513
         redistributed_value = (
-            torch.arange(12, device=device).reshape(4, 3).float().div_(10).add_(1)
+            torch.arange(4 * num_columns, device=device)
+            .reshape(4, num_columns)
+            .float()
+            .div_(10)
+            .add_(1)
         )
         local_blocks_value = (
             torch.arange(12, 12 + num_rows * 3, device=device)
@@ -298,7 +304,10 @@ class TestDistMuon(DTensorTestBase):
             )
 
         first_redistributed_grad = (
-            torch.arange(1, 13, device=device).reshape(4, 3).float().div_(17)
+            torch.arange(1, 4 * num_columns + 1, device=device)
+            .reshape(4, num_columns)
+            .float()
+            .div_(17)
         )
         first_local_blocks_grad = (
             torch.arange(13, 13 + num_rows * 3, device=device)

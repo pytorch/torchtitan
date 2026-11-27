@@ -266,7 +266,6 @@ class DistMuon(Optimizer):
             self._compute_direction = partial(
                 _compute_muon_direction,
                 normalizer=muon.normalize_,
-                copy_scaled=muon.copy_scaled_,
             )
             self._apply_parameter_update = partial(
                 _apply_muon_update, kernel=muon.decay_and_update_
@@ -1878,7 +1877,6 @@ def _compute_muon_direction(
     ns_steps: int,
     eps: float,
     normalizer: Callable[[Tensor, Tensor, float], None] | None = None,
-    copy_scaled: Callable[..., None] | None = None,
 ) -> Tensor:
     """Compute independent matrix directions with relative shape scaling."""
     reference_ratio = (
@@ -1895,16 +1893,6 @@ def _compute_muon_direction(
             eps=eps,
             normalizer=normalizer,
         )
-        if copy_scaled is not None:
-            ratio = (
-                1.0
-                if reference_ratio is None
-                else _adjust_muon_learning_rate(1.0, adjust_lr_fn, matrices.shape[-2:])
-                / reference_ratio
-            )
-            copy_scaled(direction, matrices, scale=ratio)
-            del direction
-            continue
         matrices.copy_(direction)
         del direction
         if reference_ratio is None:
