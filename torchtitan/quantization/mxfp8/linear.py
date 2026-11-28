@@ -38,6 +38,7 @@ from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (
     _LinearShardedTensorWithMXFP8Compute,
     _MXFP8_BLOCK_SIZE,
+    _MXFP8LinearOperands,
     _quantize_mxfp8_weight,
 )
 
@@ -65,6 +66,150 @@ def _pad_rows(x_MK: torch.Tensor) -> tuple[torch.Tensor, int]:
     if num_padded_rows == num_rows:
         return x_MK, num_rows
     return F.pad(x_MK, (0, 0, 0, num_padded_rows - num_rows)), num_rows
+
+
+def _check_mxfp8_linear_inputs(
+    x: torch.Tensor, weight: torch.Tensor, bias_N: torch.Tensor | None
+) -> int:
+    """Validate dtypes and block alignment; returns the local out_features."""
+    if x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+        raise ValueError(
+            "MXFP8Linear requires BF16 activations and weights; "
+            f"got activation dtype {x.dtype} and weight dtype {weight.dtype}."
+        )
+    if bias_N is not None and bias_N.dtype != torch.bfloat16:
+        raise ValueError(
+            f"MXFP8Linear requires a BF16 bias; got bias dtype {bias_N.dtype}."
+        )
+    local_in_features = weight.shape[-1]
+    local_out_features = math.prod(weight.shape[:-1])
+    if x.shape[-1] != local_in_features:
+        raise ValueError(
+            "MXFP8Linear activation and weight contraction dimensions must "
+            f"match; got {x.shape[-1]} and {local_in_features}."
+        )
+    for name, value in (
+        ("local in_features", local_in_features),
+        ("local out_features", local_out_features),
+    ):
+        if value % _MXFP8_BLOCK_SIZE:
+            raise ValueError(
+                f"MXFP8Linear requires {name} divisible by "
+                f"{_MXFP8_BLOCK_SIZE}; got {value}."
+            )
+    return local_out_features
+
+
+def _mxfp8_weight_operands(physical_weight: torch.Tensor) -> _MXFP8LinearOperands:
+    """The quantized FPROP and DGRAD operands of a linear weight.
+
+    __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is not
+    what forward usually sees. Under FSDP the post-all-gather hook has already
+    replaced it for this unshard lifetime with the storage-free
+    _UnshardedFSDPTensor holding the quantized operands, so the weight arrives
+    already quantized and the type identifies which state we are in.
+    """
+    if isinstance(physical_weight, _UnshardedFSDPTensor):
+        # Read operands from the physical wrapper. Dynamo can source the
+        # module parameter, but not a temporary tensor-subclass view of it.
+        return physical_weight.operands
+    # No data parallel implementation owns this weight's lifecycle, so it still
+    # holds high-precision storage and the operands are built per invocation.
+    # Eager FSDP2 always installs an unsharded tensor, but GraphTrainer under
+    # the spmd_types backend does not: its runtime hands forward a plain
+    # annotated local tensor, so the wrapper SimpleFSDP's parametrization built
+    # never reaches here. Quantize the storage rather than the wrapper, which
+    # the kernels cannot consume; the parameter itself stays wrapped so autograd
+    # returns the gradient to it.
+    # Nothing caches this across calls, so a frozen weight is requantized on
+    # every forward. Training pays that anyway, since the weight changes each
+    # optimizer step; inference does not.
+    # TODO(anijain2305): key the operands on the parameter's version counter
+    # so a frozen weight is quantized once.
+    with torch.no_grad():
+        high_precision_weight = (
+            physical_weight._tensor
+            if isinstance(physical_weight, _LinearShardedTensorWithMXFP8Compute)
+            else physical_weight
+        )
+        return _quantize_mxfp8_weight(high_precision_weight.flatten(0, -2))
+
+
+def _save_dgrad_weight_operands(
+    weight: torch.Tensor,
+    weight_qdata_dgrad_NK: torch.Tensor,
+    weight_scale_dgrad_swizzled: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """The tensors to save for DGRAD; see `_restore_dgrad_weight_operands`.
+
+    An unsharded tensor's storage is FSDP's to free at reshard and refill before
+    backward, so save the wrapper and read the operands off it then. Anything
+    else carries no operands to refill, so save them.
+    """
+    if isinstance(weight, _UnshardedFSDPTensor):
+        return (weight,)
+    return (weight_qdata_dgrad_NK, weight_scale_dgrad_swizzled)
+
+
+def _restore_dgrad_weight_operands(
+    saved: tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if len(saved) == 1:
+        (weight,) = saved
+        if not isinstance(weight, _UnshardedFSDPTensor):
+            raise RuntimeError("FSDP restored an incompatible MXFP8 weight")
+        operands = weight.operands
+        return operands.weight_qdata_dgrad_NK, operands.weight_scale_dgrad_swizzled
+    weight_qdata_dgrad_NK, weight_scale_dgrad_swizzled = saved
+    return weight_qdata_dgrad_NK, weight_scale_dgrad_swizzled
+
+
+def _mxfp8_wgrad(
+    ctx,
+    grad_output_col_MN: torch.Tensor,
+    grad_output_col_scales_swizzled: torch.Tensor,
+    x_qdata_col_MK: torch.Tensor,
+    x_scale_col_swizzled: torch.Tensor,
+) -> torch.Tensor:
+    """WGRAD from columnwise operands, accumulated in place when enabled.
+
+    Reads ``weight_param``, ``wgrad_dtype`` and ``weight_shape`` off ``ctx``.
+    """
+    wgrad_scale_kwargs = dict(
+        scale_a=grad_output_col_scales_swizzled,
+        scale_recipe_a=F.ScalingType.BlockWise1x32,
+        scale_b=x_scale_col_swizzled,
+        scale_recipe_b=F.ScalingType.BlockWise1x32,
+        swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
+        swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
+    )
+    weight_param = ctx.weight_param
+    grad = running_grad(weight_param)
+    if weight_param is None or grad is None:
+        # First contribution since the gradient was last consumed, or
+        # inplace_wgrad_accum is off. Nothing to accumulate into.
+        grad_weight_NK = F.scaled_mm(
+            grad_output_col_MN.t(),
+            x_qdata_col_MK,
+            output_dtype=ctx.wgrad_dtype,
+            **wgrad_scale_kwargs,
+        )
+        return grad_weight_NK.view(ctx.weight_shape)
+    # A later microbatch, e.g. under PP with gradient sync disabled. Fold this
+    # contribution into the running gradient, in its grad_dtype, in the GEMM
+    # epilogue instead of a separate AccumulateGrad add. Then hand the same
+    # buffer back and clear the parameter, so AccumulateGrad reattaches it
+    # instead of adding it to itself. While grad_dtype differs from FSDP's
+    # reduce dtype, FSDP moves the gradient into its own accumulator after
+    # every microbatch, so running_grad returns None here.
+    F.scaled_addmm_(
+        grad.view(-1, grad.shape[-1]),
+        grad_output_col_MN.t(),
+        x_qdata_col_MK,
+        **wgrad_scale_kwargs,
+    )
+    weight_param.grad = None
+    return grad
 
 
 # Adapted from torchao.prototype.moe_training.mxfp8_linear.mx_mm. This variant
@@ -99,31 +244,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         # extra cached operands when BF16 x is retained elsewhere. Under
         # full activation checkpointing, the selected state is created by
         # recompute.
-        if x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
-            raise ValueError(
-                "MXFP8Linear requires BF16 activations and weights; "
-                f"got activation dtype {x.dtype} and weight dtype {weight.dtype}."
-            )
-        if bias_N is not None and bias_N.dtype != torch.bfloat16:
-            raise ValueError(
-                f"MXFP8Linear requires a BF16 bias; got bias dtype {bias_N.dtype}."
-            )
-        local_in_features = weight.shape[-1]
-        local_out_features = math.prod(weight.shape[:-1])
-        if x.shape[-1] != local_in_features:
-            raise ValueError(
-                "MXFP8Linear activation and weight contraction dimensions must "
-                f"match; got {x.shape[-1]} and {local_in_features}."
-            )
-        for name, value in (
-            ("local in_features", local_in_features),
-            ("local out_features", local_out_features),
-        ):
-            if value % _MXFP8_BLOCK_SIZE:
-                raise ValueError(
-                    f"MXFP8Linear requires {name} divisible by "
-                    f"{_MXFP8_BLOCK_SIZE}; got {value}."
-                )
+        local_out_features = _check_mxfp8_linear_inputs(x, weight, bias_N)
 
         input_shape = x.shape
         x_MK, num_rows = _pad_rows(x.reshape(-1, input_shape[-1]).contiguous())
@@ -188,20 +309,13 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         # keeps the original tensor and builds the columnwise operand in
         # backward. MXFP8 mode keeps the columnwise qdata and scales produced
         # above. FPROP and DGRAD share the same weight qdata allocation.
-        # An unsharded tensor's storage is FSDP's to free at reshard and refill
-        # before backward, so save the wrapper and read the operands off it
-        # then. Anything else carries no operands to refill, so save them.
-        has_unsharded_tensor = isinstance(weight, _UnshardedFSDPTensor)
-        saved_weight_tensors = (
-            (weight,)
-            if has_unsharded_tensor
-            else (weight_qdata_dgrad_NK, weight_scale_dgrad_swizzled)
+        saved_weight_tensors = _save_dgrad_weight_operands(
+            weight, weight_qdata_dgrad_NK, weight_scale_dgrad_swizzled
         )
         if requires_wgrad and input_activation_format_for_backward == "bf16":
             ctx.save_for_backward(x, *saved_weight_tensors)
         else:
             ctx.save_for_backward(x_qdata_col_MK, x_scale_col, *saved_weight_tensors)
-        ctx.has_unsharded_tensor = has_unsharded_tensor
         ctx.input_shape = input_shape
         ctx.num_rows = num_rows
         ctx.requires_dgrad = ctx.needs_input_grad[0]
@@ -244,15 +358,10 @@ class _MXFP8LinearFunction(torch.autograd.Function):
             x_qdata_col_MK, x_scale_col = saved_tensors[:2]
             saved_weight_tensors = saved_tensors[2:]
 
-        if ctx.has_unsharded_tensor:
-            (weight,) = saved_weight_tensors
-            if not isinstance(weight, _UnshardedFSDPTensor):
-                raise RuntimeError("FSDP restored an incompatible MXFP8 weight")
-            operands = weight.operands
-            weight_qdata_dgrad_NK = operands.weight_qdata_dgrad_NK
-            weight_scale_dgrad_swizzled = operands.weight_scale_dgrad_swizzled
-        else:
-            weight_qdata_dgrad_NK, weight_scale_dgrad_swizzled = saved_weight_tensors
+        (
+            weight_qdata_dgrad_NK,
+            weight_scale_dgrad_swizzled,
+        ) = _restore_dgrad_weight_operands(saved_weight_tensors)
 
         grad_output_MN = grad_output.contiguous().reshape(-1, grad_output.shape[-1])
         grad_bias_N = grad_output_MN.sum(dim=0) if ctx.has_bias else None
@@ -309,44 +418,13 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                 grad_output_col_scales = triton_mx_block_rearrange(
                     grad_output_col_scales
                 )
-                wgrad_scale_kwargs = dict(
-                    scale_a=grad_output_col_scales,
-                    scale_recipe_a=F.ScalingType.BlockWise1x32,
-                    scale_b=x_scale_col,
-                    scale_recipe_b=F.ScalingType.BlockWise1x32,
-                    swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
-                    swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
+                grad_weight = _mxfp8_wgrad(
+                    ctx,
+                    grad_output_col_MN,
+                    grad_output_col_scales,
+                    x_qdata_col_MK,
+                    x_scale_col,
                 )
-                weight_param = ctx.weight_param
-                grad = running_grad(weight_param)
-                if weight_param is None or grad is None:
-                    # First contribution since the gradient was last consumed,
-                    # or inplace_wgrad_accum is off. Nothing to accumulate into.
-                    grad_weight_NK = F.scaled_mm(
-                        grad_output_col_MN.t(),
-                        x_qdata_col_MK,
-                        output_dtype=ctx.wgrad_dtype,
-                        **wgrad_scale_kwargs,
-                    )
-                    grad_weight = grad_weight_NK.view(ctx.weight_shape)
-                else:
-                    # A later microbatch, e.g. under PP with gradient sync
-                    # disabled. Fold this contribution into the running
-                    # gradient, in its grad_dtype, in the GEMM epilogue instead
-                    # of a separate AccumulateGrad add. Then hand the same
-                    # buffer back and clear the parameter, so AccumulateGrad
-                    # reattaches it instead of adding it to itself. While
-                    # grad_dtype differs from FSDP's reduce dtype, FSDP moves
-                    # the gradient into its own accumulator after every
-                    # microbatch, so running_grad returns None here.
-                    F.scaled_addmm_(
-                        grad.view(-1, grad.shape[-1]),
-                        grad_output_col_MN.t(),
-                        x_qdata_col_MK,
-                        **wgrad_scale_kwargs,
-                    )
-                    weight_param.grad = None
-                    grad_weight = grad
 
         return (
             grad_input,
@@ -452,38 +530,7 @@ class MXFP8Linear(Linear):
                 "Linear out_features or TP degree so quantization blocks do "
                 "not span projection boundaries."
             )
-        # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is
-        # not what forward usually sees. Under FSDP the post-all-gather hook has
-        # already replaced it for this unshard lifetime with the storage-free
-        # _UnshardedFSDPTensor holding the quantized operands, so the weight
-        # arrives here already quantized and the type identifies which state we
-        # are in.
-        if isinstance(physical_weight, _UnshardedFSDPTensor):
-            # Read operands from the physical wrapper. Dynamo can source the
-            # module parameter, but not a temporary tensor-subclass view of it.
-            operands = physical_weight.operands
-        else:
-            # No data parallel implementation owns this weight's lifecycle, so
-            # it still holds high-precision storage and the operands are built
-            # per invocation. Eager FSDP2 always installs an unsharded tensor, but
-            # GraphTrainer under the spmd_types backend does not: its runtime
-            # hands forward a plain annotated local tensor, so the wrapper
-            # SimpleFSDP's parametrization built never reaches here. Quantize
-            # the storage rather than the wrapper, which the kernels cannot
-            # consume; the parameter itself stays wrapped so autograd returns
-            # the gradient to it.
-            with torch.no_grad():
-                high_precision_weight = (
-                    physical_weight._tensor
-                    if isinstance(physical_weight, _LinearShardedTensorWithMXFP8Compute)
-                    else physical_weight
-                )
-                operands = _quantize_mxfp8_weight(high_precision_weight.flatten(0, -2))
-            # Nothing caches this across calls, so a frozen weight is
-            # requantized on every forward. Training pays that anyway, since
-            # the weight changes each optimizer step; inference does not.
-            # TODO(anijain2305): key the operands on the parameter's
-            # version counter so a frozen weight is quantized once.
+        operands = _mxfp8_weight_operands(physical_weight)
         # TODO(graph_trainer): add a GraphTrainer graph pass that rewrites the
         # WGRAD scaled_mm plus gradient accumulation into scaled_addmm_.
         output = _MXFP8LinearFunction.apply(

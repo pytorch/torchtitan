@@ -161,6 +161,22 @@ def llama3_debugmodel_mxfp8(
     return apply_transforms(config, [llama3_mxfp8_linear_transform()])
 
 
+def llama3_debugmodel_mxfp8_dist_gemm(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    """Async-TP with MXFP8 linears; see llama3_debugmodel_dist_gemm."""
+    config = llama3_debugmodel_mxfp8(seq_len=seq_len)
+    return apply_transforms(
+        config,
+        [
+            AsyncTensorParallelTransform(
+                enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
+                disable_inplace_wgrad_accum=True,
+            )
+        ],
+    )
+
+
 def llama3_debugmodel_nvfp4(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
