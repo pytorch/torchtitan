@@ -10,6 +10,7 @@ from .linear import (
     Linear,
     maybe_gather_tp_input,
     RowParallelLinear,
+    scale_rows_by_scores,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "Linear",
     "maybe_gather_tp_input",
     "RowParallelLinear",
+    "scale_rows_by_scores",
 ]

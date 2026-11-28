@@ -23,4 +23,5 @@ def test_qwen35_architecture_enables_offset_rmsnorm_local_compile() -> None:
             "fp32_to_bf16_split",
             "attn_output_gate",
             "gdn_gate",
+            "score_scale",
         ]

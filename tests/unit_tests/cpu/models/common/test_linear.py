@@ -21,6 +21,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.spmd_types import (
     disable_dense_sp,
     set_current_spmd_mesh,
@@ -154,6 +155,13 @@ class TestLinear(unittest.TestCase):
 class TestGroupedLinear(unittest.TestCase):
     def test_scores_use_fp32_without_saving_fp32_input(self):
         """Keep score precision without doubling the saved activation storage."""
+        self.addCleanup(LocalCompileConfig().apply)
+        for regions in ([], ["score_scale"]):
+            with self.subTest(regions=regions):
+                LocalCompileConfig(regions=regions).apply()
+                self._check_score_precision_and_storage()
+
+    def _check_score_precision_and_storage(self):
         torch.manual_seed(42)
         grouped = GroupedLinear.Config(
             group_size=1, in_features=4, out_features=4

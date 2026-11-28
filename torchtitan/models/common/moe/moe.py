@@ -39,7 +39,7 @@ from torchtitan.models.common.activation import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
-from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.linear import GroupedLinear, scale_rows_by_scores
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
 from .token_dispatcher import (
@@ -205,11 +205,9 @@ class RoutedExperts(Module):
                 if isinstance(metadata, DeepEPDispatchMetadata):
                     # A nonlinear postprocess must run before score multiplication.
                     remat.recompute_needs_tensor(routed_output_RD, metadata.scores_R)
-                    # Promote the product without saving a float32 output copy.
-                    routed_output_RD = (
-                        routed_output_RD
-                        * metadata.scores_R.reshape(-1, 1).to(torch.float32)
-                    ).to(routed_output_RD.dtype)
+                    routed_output_RD = scale_rows_by_scores(
+                        routed_output_RD, metadata.scores_R
+                    )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,

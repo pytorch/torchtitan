@@ -22,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.base.module import Module
@@ -32,6 +33,19 @@ from torchtitan.models.common.linear.inplace_wgrad_accum import (
 
 # Shape suffix legend for grouped projections: R = routed rows, E = experts,
 # I = input features, O = flattened output features, including stacked projections.
+
+
+@local_compile("score_scale", batch_invariant=True)
+def scale_rows_by_scores(
+    input_RI: torch.Tensor, scores_R: torch.Tensor
+) -> torch.Tensor:
+    """Scale each row in float32 and return the input dtype.
+
+    Promoting via the scores avoids saving a float32 copy of the input for
+    backward. Compilation can also fuse the multiply and cast to avoid
+    materializing the float32 product.
+    """
+    return (input_RI * scores_R.reshape(-1, 1).to(torch.float32)).to(input_RI.dtype)
 
 
 class Linear(nn.Linear, Module):
@@ -448,12 +462,7 @@ class GroupedLinear(Module):
         if scores_R is not None:
             # The bare multiply reads scores produced by the dispatch region.
             remat.recompute_needs_tensor(scores_R)
-            # Type promotion computes the product in float32 without materializing
-            # a float32 copy of the input, which the multiply would save for
-            # backward (twice the bytes of the input itself).
-            input_RI = (input_RI * scores_R.reshape(-1, 1).to(torch.float32)).to(
-                input_RI.dtype
-            )
+            input_RI = scale_rows_by_scores(input_RI, scores_R)
         output_shape = self.weight.shape[1:-1]
         weight_EOI = self.weight.flatten(1, -2)
         output_RO = remat.region(
@@ -484,4 +493,5 @@ __all__ = [
     "Linear",
     "RowParallelLinear",
     "maybe_gather_tp_input",
+    "scale_rows_by_scores",
 ]

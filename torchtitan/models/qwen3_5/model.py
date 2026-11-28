@@ -326,6 +326,7 @@ class Qwen35Model(Decoder):
                     "fp32_to_bf16_split",
                     "attn_output_gate",
                     "gdn_gate",
+                    "score_scale",
                 ]
             )
         )

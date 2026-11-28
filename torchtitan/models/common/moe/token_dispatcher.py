@@ -15,6 +15,7 @@ from torch.distributed._functional_collectives import all_to_all_single
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_group
 from torchtitan.models.base.module import Module
+from torchtitan.models.common.linear import scale_rows_by_scores
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
@@ -214,12 +215,7 @@ class LocalTokenDispatcher(Module):
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
         """Weight expert-sorted outputs by their router scores and sum them per token."""
-        # Type promotion computes the product in float32 without materializing a
-        # float32 copy of the routed output, which the multiply would save for
-        # backward (twice the bytes of the routed output itself).
-        routed_output_ND = (
-            routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
-        ).to(routed_output_ND.dtype)
+        routed_output_ND = scale_rows_by_scores(routed_output_ND, topk_scores_N)
         return deterministic_scatter_add(
             torch.zeros_like(x_TD),
             token_indices_N.reshape(-1, 1).expand(-1, x_TD.shape[-1]),
