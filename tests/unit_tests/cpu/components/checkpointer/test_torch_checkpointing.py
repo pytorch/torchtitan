@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import unittest
 import uuid
+import warnings
 from concurrent.futures import Future
 from contextlib import nullcontext
 from pathlib import Path
@@ -539,10 +540,15 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             load_only=True,
         )
 
-        manager, _ = self._build_manager(config)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            manager, _ = self._build_manager(config)
 
         self.assertIsInstance(manager._manager_config.save, SyncCheckpointSaverConfig)
         self.assertIsNone(manager._manager_config.save.writer_config.barrier_config)
+        self.assertEqual(
+            [], [w for w in caught if "write_to_temp_dir" in str(w.message)]
+        )
         manager.close()
 
     def test_async_mode_selects_the_backend_saver(self) -> None:

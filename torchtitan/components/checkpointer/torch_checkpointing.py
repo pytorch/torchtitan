@@ -167,6 +167,10 @@ def _writer_config(*, use_barrier: bool) -> CheckpointWriterConfig:
             if use_barrier
             else None
         ),
+        # Load-only managers have no barrier to commit a staging directory
+        # behind. Left at its default, write_to_temp_dir makes torch_checkpointing
+        # warn that barrier_config=None requires write_to_temp_dir=False.
+        write_to_temp_dir=use_barrier,
     )
 
 
