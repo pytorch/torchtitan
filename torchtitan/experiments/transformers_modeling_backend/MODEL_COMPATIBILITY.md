@@ -27,17 +27,13 @@ Titan's MoE output is compared against unmodified HF forward.
 
 ### Dispatcher precision (affects all WARN models)
 
-Titan's `combine()` gathers each token's top-k expert rows, weights them in f32
-and sums them in token order, which is HF's `reshape(N, K, D).sum(dim=1)`, so
-accumulation dtype and order match. One difference is left:
+The table above uses the previous bf16 scatter-add and needs to be rerun.
+`LocalTokenDispatcher.combine()` gathers each token's rows in router order,
+multiplies by the scores and sums in float32, then casts to the output dtype.
 
-- **topk sort order** -- Titan uses `topk(sorted=False)`, HF defaults to
-  `sorted=True`, so the routing-score normalization sum is over
-  differently-ordered values. Fix: use `sorted=True`. (No effect for `top_k=1`.)
-
-With that fix applied, all PASS/WARN models produce max_diff=0.00. The table
-above was measured before `combine()` moved to the gather-sum and needs
-re-running.
+`TokenChoiceTopKRouter` uses `topk(sorted=False)`. When HF sorts the same
+experts by score, both score normalization and the weighted sum can round
+differently. Compare with `sorted=True` to isolate this effect for `top_k > 1`.
 
 ### Activation function (Gemma4)
 
