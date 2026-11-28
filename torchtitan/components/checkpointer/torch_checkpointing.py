@@ -459,7 +459,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         # metric reports step=None.
         checkpoint_logging_context.update(step=curr_step)
         self.maybe_wait_for_saving()
-        # Always preserve the current step's published and staging directories.
+        # Preserve the published and staging directories of this and later steps.
         self._purge_stale_checkpoints(
             saving_step=curr_step,
             staging_dir_prefix=(

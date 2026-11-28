@@ -768,6 +768,21 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         manager._storage.remove.assert_not_called()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_purge_leaves_directories_a_later_save_rewrites(self, _rank) -> None:
+        # Directories past saving_step -- a valid step-4, an incomplete step-5
+        # (no metadata), and a staging tmp_step-6 -- belong to steps this run
+        # may save again. A background delete queued now could still be running
+        # then and remove the new checkpoint, and step-4 must not take a
+        # keep_latest_k slot from step-2.
+        manager = self._purge_manager(
+            2, ["step-1", "step-2", "step-4", "step-5", "tmp_step-6"]
+        )
+        manager._storage.isfile.side_effect = lambda path: "step-5" not in path
+
+        self.assertEqual({"/checkpoint/step-1"}, self._purge(manager, saving_step=3))
+        manager._storage.remove.assert_not_called()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
     def test_purge_ignores_directories_the_backend_did_not_write(self, _rank) -> None:
         manager = self._purge_manager(
             2, ["step-1", "step-2", "step-3.partial", "step-4-notes", "notes-step-5"]

@@ -722,10 +722,6 @@ class BaseCheckpointManager(Configurable, ABC):
     ) -> None:
         """Delete abandoned entries and reserve one retained slot for this save."""
         if self._should_purge():
-            saving_dirnames = {f"step-{saving_step}"}
-            if staging_dir_prefix:
-                saving_dirnames.add(f"{staging_dir_prefix}step-{saving_step}")
-
             staging_pattern = (
                 re.compile(rf"{re.escape(staging_dir_prefix)}step-(0|[1-9]\d*)")
                 if staging_dir_prefix
@@ -735,19 +731,22 @@ class BaseCheckpointManager(Configurable, ABC):
             abandoned: list[str] = []
 
             for dirname in self._storage.listdir(self.folder):
-                if dirname in saving_dirnames:
+                # torch_checkpointing uses this pattern for staging directories.
+                staging = (
+                    staging_pattern.fullmatch(dirname) if staging_pattern else None
+                )
+                step = int(staging.group(1)) if staging else self._parse_step(dirname)
+                # Directories at or past saving_step (e.g. left by a run resumed
+                # from an earlier step) may be rewritten by this or a later save,
+                # and deletes run in the background, so a queued delete could
+                # remove the new checkpoint. Leave them until saving_step passes.
+                if step is None or step >= saving_step:
                     continue
 
                 checkpoint_dir = filesystem.join(self.folder, dirname)
-                # torch_checkpointing uses this pattern for staging directories.
-                if staging_pattern and staging_pattern.fullmatch(dirname):
+                if staging:
                     abandoned.append(checkpoint_dir)
-                    continue
-
-                step = self._parse_step(dirname)
-                if step is None:
-                    continue
-                if self._is_valid_checkpoint(checkpoint_dir):
+                elif self._is_valid_checkpoint(checkpoint_dir):
                     checkpoints.append((step, checkpoint_dir))
                 else:
                     abandoned.append(checkpoint_dir)
