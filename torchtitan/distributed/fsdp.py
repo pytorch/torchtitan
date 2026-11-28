@@ -352,6 +352,7 @@ def apply_fsdp_to_decoder(
     symm_mem_scope: FSDPSymmMemScope = None,
     *,
     unshard_in_current_stream: bool = False,
+    separate_chunked_lm_head: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to a decoder-style transformer model.
@@ -396,6 +397,8 @@ def apply_fsdp_to_decoder(
         unshard_in_current_stream: Whether to issue pre-forward/pre-backward
             all-gathers on the current (compute) stream via
             ``FSDPModule.set_unshard_in_current_stream``.
+        separate_chunked_lm_head: Separate the final norm and untied head for
+            eager chunked loss outside pipeline parallelism.
     """
     mp_policy = mixed_precision_policy(
         model,
@@ -411,6 +414,9 @@ def apply_fsdp_to_decoder(
 
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled
+    )
+    separate_chunked_lm_head = (
+        separate_chunked_lm_head and not pp_enabled and not model.enable_weight_tying
     )
     if model.enable_weight_tying:
         # When weights are tied, tok_embeddings and output share the same parameter.
@@ -444,11 +450,20 @@ def apply_fsdp_to_decoder(
         # As an optimization, do not reshard_after_forward the last layers
         # by default since FSDP would prefetch them immediately.
         if model.norm is not None and model.lm_head is not None:
-            fully_shard(
-                [model.norm, model.lm_head],
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward_policy == "always",
-            )
+            reshard_final = reshard_after_forward_policy == "always"
+            if separate_chunked_lm_head:
+                # The loss runs the head's forward and backward before the
+                # decoder backward. Give the final norm its own FSDP lifetime.
+                for module in (model.norm, model.lm_head):
+                    fully_shard(
+                        module, **fsdp_config, reshard_after_forward=reshard_final
+                    )
+            else:
+                fully_shard(
+                    [model.norm, model.lm_head],
+                    **fsdp_config,
+                    reshard_after_forward=reshard_final,
+                )
 
     for layer_id, transformer_block in model.layers.items():
         # A stacked Linear keeps W1/W3 separate from the matrix-row dimension.
@@ -605,7 +620,12 @@ def apply_fsdp_to_decoder(
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
     if model.norm is not None and model.lm_head is not None and len(model.layers) > 0:
-        model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
+        backward_prefetch_from = (
+            model.norm if separate_chunked_lm_head else model.lm_head
+        )
+        cast(FSDPModule, backward_prefetch_from).set_modules_to_backward_prefetch(
+            [reversed_transformer_blocks[0]]
+        )
 
     for transformer_block, prev_transformer_block in zip(
         reversed_transformer_blocks, prev_transformer_blocks

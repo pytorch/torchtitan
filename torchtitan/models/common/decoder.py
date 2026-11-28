@@ -222,6 +222,7 @@ class Decoder(BaseModel):
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
     # inputs (bool kwargs cause 'has no attribute requires_grad' errors).
     _skip_lm_head: bool = False
+    _separate_chunked_lm_head_fsdp: bool = False
 
     def _apply_fsdp(
         self,
@@ -252,6 +253,7 @@ class Decoder(BaseModel):
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
             unshard_in_current_stream=parallelism.fsdp_unshard_in_current_stream,
+            separate_chunked_lm_head=self._separate_chunked_lm_head_fsdp,
         )
 
     def __init__(self, config: Config):

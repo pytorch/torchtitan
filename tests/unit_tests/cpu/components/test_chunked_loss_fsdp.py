@@ -12,7 +12,7 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.pipelining import PipelineStage
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -20,7 +20,9 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.pipeline_parallel import _build_pipeline_schedule
+from torchtitan.models.base.module import Module
 
 
 class _Decoder(torch.nn.Module):
@@ -303,6 +305,86 @@ class TestChunkedLossFSDP(DTensorTestBase):
     @property
     def world_size(self):
         return 4
+
+    @with_comms
+    def test_separate_chunked_head_reuses_forward_prefetch(self):
+        torch.set_num_threads(1)
+        device = torch.device(self.device_type, self.rank)
+        mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
+        )
+
+        class Decoder(Module):
+            def __init__(self):
+                super().__init__()
+                self.enable_weight_tying = False
+                self.tok_embeddings = None
+                self.layers = torch.nn.ModuleDict(
+                    {"0": torch.nn.Linear(8, 8, bias=False)}
+                )
+                self.norm = torch.nn.LayerNorm(8)
+                self.lm_head = torch.nn.Linear(8, 16, bias=False)
+
+            def forward(self, inputs):
+                return self.norm(self.layers["0"](inputs))
+
+        torch.manual_seed(42)
+        original = Decoder().to(device)
+        changed = copy.deepcopy(original)
+        num_head_elements = original.lm_head.weight.numel()
+        num_norm_elements = sum(p.numel() for p in original.norm.parameters())
+        torch.manual_seed(43 + self.rank)
+        inputs = torch.randn(8, 8, device=device)
+        labels = torch.randint(16, (8,), device=device)
+        count = torch.tensor(8 * self.world_size, device=device)
+        scores = []
+        for model, split in ((original, False), (changed, True)):
+            apply_fsdp_to_decoder(
+                model,
+                mesh,
+                param_dtype=torch.float32,
+                reduce_dtype=torch.float32,
+                pp_enabled=False,
+                ep_degree=2,  # Enable explicit prefetch with dense stand-ins.
+                reshard_after_forward_policy="always",
+                separate_chunked_lm_head=split,
+            )
+            for module in model.modules():
+                if isinstance(module, FSDPModule):
+                    # Gloo does not accept PREMUL_SUM, even with factor one.
+                    module.set_force_sum_reduction_for_comms(True)
+            loss_fn = ChunkedLossWrapper.Config(num_chunks=4).build()
+            loss_fn.set_lm_head(model.lm_head)
+            real_all_gather = dist.all_gather_single
+            gathers = []
+
+            def record_all_gather(output, input, *args, **kwargs):
+                gathers.append(input.numel())
+                return real_all_gather(output, input, *args, **kwargs)
+
+            with patch.object(dist, "all_gather_single", record_all_gather):
+                hidden = model(inputs)
+                loss, _ = loss_fn(hidden, labels, count)
+                loss.backward()
+            num_elements = (
+                num_head_elements if split else num_head_elements + num_norm_elements
+            )
+            num_shard_elements = num_elements // self.world_size
+            # When the modules share a unit, its weights are needed for both
+            # the deferred head and the decoder's norm backward. With two
+            # units the head consumes its prefetch once and stays sharded
+            # throughout the norm backward.
+            if split:
+                self.assertEqual(gathers.count(num_shard_elements), 1)
+            else:
+                self.assertGreater(gathers.count(num_shard_elements), 1)
+            scores.append(
+                (loss.detach(), [p.grad.to_local() for p in model.parameters()])
+            )
+
+        self.assertTrue(torch.equal(scores[0][0], scores[1][0]))
+        for original_grad, changed_grad in zip(scores[0][1], scores[1][1], strict=True):
+            self.assertTrue(torch.equal(original_grad, changed_grad))
 
     @with_comms
     def test_accumulation_and_recovery(self):

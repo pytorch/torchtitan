@@ -464,6 +464,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             del model
         else:
             if not create_seed_checkpoint:
+                if isinstance(self.loss_fn, ChunkedLossWrapper) and (
+                    config.training.disable_accelerator_graphs
+                    or not accelerator_graphs_supported()
+                ):
+                    cast(Any, model)._separate_chunked_lm_head_fsdp = True
                 model = model.parallelize(
                     parallelism_context=self.parallelism_context,
                     precision=self.precision,
