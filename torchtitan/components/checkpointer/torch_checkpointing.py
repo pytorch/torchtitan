@@ -63,7 +63,6 @@ from .base import (
     FilesystemCheckpointStorage,
     LR_SCHEDULER,
     MODEL,
-    ModelWrapper,
     OPTIMIZER,
     purge_thread,
 )
@@ -279,10 +278,15 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self._storage = FilesystemCheckpointStorage()
         self.interval = config.interval
         self._validate_extra_state_keys(extra_states)
+        (
+            model,
+            self._resume_base_model_view,
+            self._fresh_start_model_view,
+        ) = self._build_model_views(model_parts, config)
         self.states = dict(extra_states)
         self.states.update(
             {
-                MODEL: ModelWrapper(model_parts),
+                MODEL: model,
                 OPTIMIZER: optimizers,
                 LR_SCHEDULER: lr_schedulers,
             }
@@ -415,9 +419,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                 hf_manager.close()
             states[MODEL].load_state_dict(self.sd_adapter.from_hf(hf_state))
         else:
-            # TODO: Initializing a LoRA model from a native base checkpoint fails
-            # here: the checkpoint lacks the new adapter parameters. Exempt them
-            # on an initial load, as the HF path above already does.
             # An initial_load_path may be on other storage than the folder,
             # which the folder's manager cannot read.
             manager = self._manager
@@ -556,7 +557,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
     def _save_last_step(self, curr_step: int) -> None:
         checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
-            model = self.states[MODEL]
+            model = self._full_model()
             model_state = export_state_dict(
                 model.state_dict(), dtype=self.export_dtype, model_parts=model.model
             )

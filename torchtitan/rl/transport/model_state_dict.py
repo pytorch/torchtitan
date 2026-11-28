@@ -35,6 +35,9 @@ from torchtitan.config import Configurable
 # Byte alignment of each staged piece, so it can be viewed as any dtype.
 _ALIGNMENT = 16
 
+# Allowance on top of a rank's transfer time, for connection setup and scheduling.
+_READ_TIMEOUT_BASE_S = 60.0
+
 
 class TensorShard(NamedTuple):
     """A generator rank's box of one tensor and the dtype it receives it in."""
@@ -326,14 +329,13 @@ class ModelStateDictTransport(Configurable):
         backend: Literal["mooncake", "nixl"] = "nixl"
         """The ``torch.distributed._transport`` backend."""
 
-        read_timeout_s: float = 600.0
-        """Seconds to wait for a generator rank's reads before raising. A pull
-        moves tens of GB per generator rank at most, well under a minute at line
-        rate; this fails a stuck transfer instead of hanging the controller."""
+        min_read_bytes_per_s: float = 100e6
+        """Slowest per-rank read speed that counts as progress: a rank's reads raise after 60s plus
+        the time its bytes take at this speed. 100MB/s lets hundreds of ranks share one RDMA NIC."""
 
     def __init__(self, config: Config):
         self._transport = new_transport(config.backend)
-        self._read_timeout_s = config.read_timeout_s
+        self._min_read_bytes_per_s = config.min_read_bytes_per_s
         # Trainer: the staging buffer and, per key with pieces on this rank, the
         # dtype it is staged in and a (local index, staging view) per piece.
         self._staging: torch.Tensor | None = None
@@ -346,6 +348,8 @@ class ModelStateDictTransport(Configurable):
         self._reads: list[tuple[Any, Any]] | None = None
         self._prefetched: dict[str, torch.Tensor] = {}
         self._packed: dict[str, list[tuple[tuple[slice, ...], torch.Tensor]]] = {}
+        # Seconds to wait for the reads, which connect_generator sets from their bytes.
+        self._read_timeout_s = _READ_TIMEOUT_BASE_S
 
     def register_trainer_source(
         self,
@@ -479,6 +483,10 @@ class ModelStateDictTransport(Configurable):
             ]
             for key, pieces in packed.items()
         }
+        self._read_timeout_s = (
+            _READ_TIMEOUT_BASE_S
+            + sum(r.nbytes for r in reads) / self._min_read_bytes_per_s
+        )
 
     async def read(self) -> None:
         """Fill the prefetch buffers from the trainer's staging buffers.

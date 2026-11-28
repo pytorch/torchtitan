@@ -23,6 +23,7 @@ from unittest.mock import patch
 
 import torch
 from torch import nn
+from torch.nn.attention.flex_attention import flex_attention
 
 
 def _build_config_modules():
@@ -115,7 +116,12 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
                 parallelism_context=parallelism_context,
                 parallelism=parallelism,
             )
-        with torch.no_grad():
+        # The vision encoder always uses flex attention, which Inductor compiles on CPU only
+        # with AVX2 (x86, not macOS); these tests don't depend on the attention kernel.
+        with torch.no_grad(), patch(
+            "torchtitan.models.common.attention.FlexInnerAttention._compiled_flex_attn",
+            flex_attention,
+        ):
             model(inputs, **batch)
         return batch
 

@@ -7,7 +7,7 @@
 """Default RDMA path for trainer microbatches (`Batcher.Config.rdma_min_tensor_bytes=None` turns it off): the
 process that registers them keeps the large tensors, and each trainer rank reads its own column.
 
-The actor system implements `RDMAMicrobatch` (e.g. `actors/monarch/rdma_microbatch.py`); the batcher and
+The actor system implements `RDMAMicrobatch` (e.g. `rl/actors/monarch/rdma_microbatch.py`); the batcher and
 the trainer use only this interface.
 """
 

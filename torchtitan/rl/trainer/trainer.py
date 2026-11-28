@@ -28,13 +28,13 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.rl.controller.metrics import combine_microbatch_metrics
-from torchtitan.rl.model_state_dict_transport import (
+from torchtitan.rl.trainer.batcher import TrainingMicrobatch
+from torchtitan.rl.transport.model_state_dict import (
     ModelStateDictTransport,
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.trainer.batcher import TrainingMicrobatch
-from torchtitan.rl.trainer.rdma_microbatch import (
+from torchtitan.rl.transport.rdma_microbatch import (
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )

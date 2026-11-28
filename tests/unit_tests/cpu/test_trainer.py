@@ -25,6 +25,7 @@ from torchtitan.components.optim import GradientClipper, Optim
 from torchtitan.distributed.accelerator_graph import wrap_with_accelerator_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.aux_loss import AuxLoss
+from torchtitan.observability.kernel_spans import KernelSpanRecorder
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.profiler import CuspyTraceProfiler, Profiler
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
@@ -629,14 +630,15 @@ def test_accelerator_graph_wrapper_preserves_structured_args_and_kwargs():
             {"backend": "cupti", "key_by": "auto"},
         ),
         (
-            Profiler.Config(
-                trace=CuspyTraceProfiler.Config(enable_event_node_ids=True)
-            ),
-            {"backend": "cupti", "key_by": "exec"},
-        ),
-        (
             Profiler.Config(trace=CuspyTraceProfiler.Config(record_py_stacks=True)),
             {"backend": "cupti", "key_by": "auto", "record_py_stacks": True},
+        ),
+        (
+            Profiler.Config(
+                trace=CuspyTraceProfiler.Config(record_py_stacks=True),
+                kernel_spans=KernelSpanRecorder.Config(),
+            ),
+            {"backend": "cupti", "key_by": "exec", "record_py_stacks": True},
         ),
     ],
 )

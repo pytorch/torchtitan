@@ -8,6 +8,7 @@ import logging
 from dataclasses import dataclass, field, fields
 from typing import Any, cast, Literal
 
+from torchtitan.components.checkpointer import ParamCheckpointType
 from torchtitan.models.base.module import Module
 
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
@@ -334,6 +335,24 @@ class LoRATransform(ModelConfigTransform):
                 f"LoRA training active with rank={self.rank}, alpha={self.alpha}, "
                 f"target_modules={sorted(self.target_modules)}"
             )
+
+    # TODO: Let config transforms change the whole trainer config, not only the
+    # model config, so this transform can set
+    # checkpointer.model_param_checkpoint_type_map itself. Until then, recipes
+    # that apply LoRA set it from this method.
+    def param_checkpoint_type(self, key: str) -> ParamCheckpointType:
+        """For ``checkpointer.model_param_checkpoint_type_map``: adapters are NEW,
+        ``trainable_modules`` are CHECKPOINT, and the rest is BASE.
+
+        A ``trainable_modules`` path that differs from the module FQN puts its
+        parameters in BASE; the checkpointer then raises.
+        """
+        parts = key.split(".")
+        if "lora_a" in parts or "lora_b" in parts:
+            return ParamCheckpointType.NEW
+        if any(_in_subtree(key, root) for root in self.trainable_modules):
+            return ParamCheckpointType.CHECKPOINT
+        return ParamCheckpointType.BASE
 
     def transform(self, model: Module.Config) -> Module.Config:
         """Apply LoRA while walking the config tree from leaves to root.
