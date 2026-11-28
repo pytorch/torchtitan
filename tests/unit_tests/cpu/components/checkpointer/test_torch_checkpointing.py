@@ -728,7 +728,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     def test_purge_treats_metadata_less_directories_as_abandoned(self, _rank) -> None:
-        # A step-N other than the current save with no metadata is the residue
+        # A step-N before saving_step with no metadata is the residue
         # of a save that died. It is removed instead of occupying a retained slot.
         manager = self._purge_manager(2, ["step-1", "step-2", "step-3"])
         manager._storage.isfile.return_value = False
@@ -759,8 +759,14 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         manager._storage.remove.assert_not_called()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    def test_purge_preserves_the_current_staging_directory(self, _rank) -> None:
-        manager = self._purge_manager(2, ["tmp_step-2", "tmp_step-3"])
+    def test_purge_preserves_staging_directories_at_or_past_saving_step(
+        self, _rank
+    ) -> None:
+        # Staging directories at or past saving_step may be rewritten by this
+        # save or a later one; non-canonical names like tmp_step-02 are ignored.
+        manager = self._purge_manager(
+            2, ["tmp_step-02", "tmp_step-2", "tmp_step-3", "tmp_step-6"]
+        )
 
         self.assertEqual(
             {"/checkpoint/tmp_step-2"}, self._purge(manager, saving_step=3)
