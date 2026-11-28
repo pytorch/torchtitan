@@ -173,22 +173,24 @@ class RoutedExperts(Module):
                 isinstance(metadata, DeepEPDispatchMetadata)
                 and self.output_postprocess is None
             ):
+                # W2 inputs are rebuilt during replay; its output cast is saved with W2.
+                # TODO(@anijain2305): Let remat skip unused W2: https://github.com/meta-pytorch/remat/issues/6
+                recompute = False if self.w2.uses_native_grouped_mm else None
                 routed_output_RD = self.w2(
-                    hidden_RF, offsets_E, scores_R=metadata.scores_R
+                    hidden_RF,
+                    offsets_E,
+                    scores_R=metadata.scores_R,
+                    output_dtype=routed_input_RD.dtype,
+                    recompute=recompute,
                 )
             else:
                 routed_output_RD = self.w2(hidden_RF, offsets_E)
-            # A real dtype cast and the output postprocess read the w2 output with
-            # bare ops, so pin it only then. In the common bf16 case without a
-            # postprocess, type_as is a no-op and the w2 output goes straight to
-            # the combine region, so an unconditional pin would keep it alive
-            # even when w2 and the combine are both saved.
-            if (
-                routed_output_RD.dtype != routed_input_RD.dtype
-                or self.output_postprocess is not None
-            ):
-                remat.recompute_needs_tensor(routed_output_RD)
-            routed_output_RD = routed_output_RD.type_as(routed_input_RD)
+                if (
+                    routed_output_RD.dtype != routed_input_RD.dtype
+                    or self.output_postprocess is not None
+                ):
+                    remat.recompute_needs_tensor(routed_output_RD)
+                routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
                 # Non-blocking HybridEP leaves rows past offsets_E[-1] unwritten.
                 # DeepEP needs no mask: training uses its compact layout, which
