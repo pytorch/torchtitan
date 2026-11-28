@@ -98,12 +98,12 @@ def _row(
     }
 
 
-def _dataset(rows, *, repeat=False):
+def _dataset(rows, *, repeat=False, context=CONTEXT):
     return MMSamplePackingConfig(
         dataset=SingleDatasetConfig(source=_RowsSourceConfig(rows=tuple(rows))),
         num_packing_bins=2,
     ).build(
-        context=CONTEXT,
+        context=context,
         dataset_iteration_policy=DatasetIterationPolicy(
             seed=0,
             shuffle=False,
@@ -330,6 +330,24 @@ def test_packing_preserves_ordered_media_when_merging_rows():
     assert len(row["waveforms"]) == 2
     assert torch.equal(row["waveforms"][0], first_waveform)
     assert torch.equal(row["waveforms"][1], second_waveform)
+
+
+def test_packing_caps_documents_per_microbatch():
+    """Four two-token rows fit in one nine-token microbatch, but max_num_documents = 2 must
+    split them: the varlen attention metadata has room for only that many documents."""
+    rows = list(
+        _dataset(
+            [_row(value) for value in (1, 3, 5, 7)],
+            context=replace(CONTEXT, max_num_documents=2),
+        )
+    )
+
+    real_input_ids = []
+    for row in rows:
+        is_real = ~row["padding_mask"]
+        assert int(((row["positions"] == 0) & is_real).sum()) <= 2
+        real_input_ids.extend(row["input_ids"][is_real].tolist())
+    assert sorted(real_input_ids) == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_buffered_packing_is_checkpointed_exactly():
