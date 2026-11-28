@@ -383,6 +383,7 @@ class Qwen35MultimodalModel(Qwen35Model, MultimodalModel):
 
     multimodal_encoder_fqns = ("vision_encoder",)
     pipeline_first_stage_module_fqns = ("vision_encoder",)
+    uses_mrope_positions = True
 
     @dataclass(kw_only=True, slots=True)
     class Config(Qwen35Model.Config, MultimodalModel.Config):

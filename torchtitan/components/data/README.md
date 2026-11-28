@@ -422,10 +422,14 @@ packed_mm_ds = MMSamplePackingConfig(
 config.vision_processor = VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)
 config.dataloader = GrainDataLoader.Config(
     dataset=packed_mm_ds,
-    collator=MultiModalCollator.Config(build_mrope_positions=True),
+    collator=MultiModalCollator.Config(),
     streaming_shuffle_buffer_size=128,
 )
 ```
+
+The collator builds 3D M-RoPE positions (`mrope_positions`) when the model's image tokens take
+them, as Qwen3.5's do (`MultimodalModel.Config.uses_mrope_positions`); the trainer passes that
+to the dataloader.
 
 `num_packing_bins` is the number of candidate packed rows kept open, not an input sample buffer.
 

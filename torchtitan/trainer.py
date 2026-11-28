@@ -34,6 +34,7 @@ from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
+from torchtitan.models.common.multimodal import MultimodalModel
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.training_engine import TrainingEngine
@@ -217,6 +218,10 @@ class Trainer(Configurable):
             if config.vision_processor is not None
             else None
         )
+        self.build_mrope_positions = (
+            isinstance(config.model, MultimodalModel.Config)
+            and config.model.uses_mrope_positions
+        )
         num_tokens_per_microbatch = (
             config.training.num_tokens_per_microbatch_per_dp_rank
         )
@@ -227,6 +232,7 @@ class Trainer(Configurable):
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
             vision_processor=self.vision_processor,
+            build_mrope_positions=self.build_mrope_positions,
             dp_ranks=dp_ranks,
         )
 
@@ -282,6 +288,7 @@ class Trainer(Configurable):
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
                 vision_processor=self.vision_processor,
+                build_mrope_positions=self.build_mrope_positions,
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,

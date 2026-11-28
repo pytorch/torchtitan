@@ -138,6 +138,7 @@ class Validator(BaseValidator):
         seq_len: int,
         num_tokens_per_microbatch: int,
         vision_processor: VisionProcessor | None = None,
+        build_mrope_positions: bool = False,
         accelerator_graph_enabled: bool = False,
         cuda_graph_annotation_config: dict[str, Any] | None = None,
         pp_schedule: _PipelineSchedule | None = None,
@@ -149,6 +150,7 @@ class Validator(BaseValidator):
         self.parallelism = parallelism
         self.tokenizer = tokenizer
         self.vision_processor = vision_processor
+        self.build_mrope_positions = build_mrope_positions
         self.parallelism_context = parallelism_context
         self.loss_fn = loss_fn
         # A bounded validation run repeats data; steps=-1 consumes one finite pass.
@@ -316,6 +318,7 @@ class Validator(BaseValidator):
                 max_context_length=self.seq_len,
                 num_tokens_per_microbatch=self.num_tokens_per_microbatch,
                 vision_processor=self.vision_processor,
+                build_mrope_positions=self.build_mrope_positions,
             )
 
             validation_iterator = iter(

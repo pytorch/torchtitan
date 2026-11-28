@@ -47,15 +47,11 @@ def _muse_glimmer_mm_dataloader(dataset_name: str) -> GrainDataLoader.Config:
     """Build the shared multimodal dataloader config. The trainer config also
     needs a ``vision_processor``, e.g. built from
     ``MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS``.
-
-    ``build_mrope_positions=False`` since Muse Glimmer uses 1D ComplexRoPE on
-    the LLM side, not MRoPE.
     """
     return GrainDataLoader.Config(
         dataset=MM_DATASETS[dataset_name],
         collator=MultiModalCollator.Config(
             max_images_per_microbatch=8,
-            build_mrope_positions=False,
         ),
     )
 

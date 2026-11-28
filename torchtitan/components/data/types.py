@@ -99,6 +99,9 @@ class DatasetBuildContext:
     vision_processor: VisionProcessor | None = None
     """The model's image and video preprocessing. None: no image or video
     inputs."""
+    build_mrope_positions: bool = False
+    """Whether to build 3D M-RoPE positions for image and video tokens: the model's
+    `MultimodalModel.Config.uses_mrope_positions`."""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

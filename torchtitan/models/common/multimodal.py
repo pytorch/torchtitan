@@ -38,6 +38,9 @@ class MultimodalModel(Decoder):
     """
 
     multimodal_encoder_fqns: tuple[str, ...] = ()
+    # Whether the model's image tokens take 3D (temporal, height, width) M-RoPE positions:
+    # its ``preprocess_inputs`` reads ``mrope_positions``, which the data side builds.
+    uses_mrope_positions: bool = False
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
@@ -53,6 +56,12 @@ class MultimodalModel(Decoder):
                     f"{owner.multimodal_encoder_fqns}; use the model family's "
                     "text-only Decoder for a model without encoders."
                 )
+
+        @property
+        def uses_mrope_positions(self) -> bool:
+            """The model's `MultimodalModel.uses_mrope_positions`: whether the data side
+            builds 3D M-RoPE positions (``mrope_positions``) for image tokens."""
+            return cast(type[MultimodalModel], type(self)._owner).uses_mrope_positions
 
         def build_flops_estimator(
             self,

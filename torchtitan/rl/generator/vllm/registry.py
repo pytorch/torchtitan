@@ -43,7 +43,8 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
-from torchtitan.models.qwen3_5.rope import get_mrope_config
+from torchtitan.models.common.multimodal import MultimodalModel
+from torchtitan.models.qwen3_5.rope import MRoPE
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import get_attention_dimensions
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
@@ -201,8 +202,17 @@ def model_config_to_hf_config_dict(
         hf["decoder_sparse_step"] = 1
         hf.setdefault("norm_topk_prob", True)
 
-    mrope = get_mrope_config(cfg)
-    if serves_images and mrope is not None:
+    # The trainer side reads the same declaration (MultimodalModel.uses_mrope_positions).
+    if (
+        serves_images
+        and isinstance(cfg, MultimodalModel.Config)
+        and cfg.uses_mrope_positions
+    ):
+        mrope = cfg.first_full_attention.rope
+        assert isinstance(mrope, MRoPE.Config), (
+            f"{type(cfg).__qualname__} declares M-RoPE image positions, but its "
+            f"full-attention RoPE is {type(mrope).__qualname__}"
+        )
         # Presence required: an mrope_section switches vLLM to 3D M-RoPE positions, which it
         # gets from the model's get_mrope_input_positions. Text-only generators keep 1D
         # positions, even for M-RoPE models: text tokens have equal positions on all 3 axes.

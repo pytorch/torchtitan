@@ -29,6 +29,7 @@ from torchtitan.experiments.torchft.optimizer import (
 )
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
+from torchtitan.models.common.multimodal import MultimodalModel
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
     ensure_pp_loss_visible,
@@ -206,6 +207,10 @@ class FaultTolerantTrainer(Configurable):
             if config.vision_processor is not None
             else None
         )
+        self.build_mrope_positions = (
+            isinstance(config.model, MultimodalModel.Config)
+            and config.model.uses_mrope_positions
+        )
 
         num_pp_microbatches = (
             config.parallelism.num_pp_microbatches
@@ -223,6 +228,7 @@ class FaultTolerantTrainer(Configurable):
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
             vision_processor=self.vision_processor,
+            build_mrope_positions=self.build_mrope_positions,
         )
 
         # metrics logging (FT addition: ft_enable, ft_replica_id)
@@ -316,6 +322,7 @@ class FaultTolerantTrainer(Configurable):
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
                 vision_processor=self.vision_processor,
+                build_mrope_positions=self.build_mrope_positions,
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,

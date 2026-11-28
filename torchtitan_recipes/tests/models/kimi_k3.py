@@ -68,9 +68,7 @@ def _kimi_k3_multimodal_dataloader(
 ) -> GrainDataLoader.Config:
     return GrainDataLoader.Config(
         dataset=dataset,
-        collator=MultiModalCollator.Config(
-            build_mrope_positions=False,
-        ),
+        collator=MultiModalCollator.Config(),
     )
 
 

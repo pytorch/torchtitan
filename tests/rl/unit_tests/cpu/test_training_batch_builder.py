@@ -407,9 +407,8 @@ def _image_sample(
 
 
 def test_microbatch_encodes_each_distinct_image_once(image_paths) -> None:
-    training_batch_builder = TrainingBatchBuilder.Config(
-        build_mrope_positions=True, rdma_min_tensor_bytes=None
-    ).build(
+    training_batch_builder = TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
+        build_mrope_positions=True,
         num_tokens_per_microbatch_per_dp_rank=64,
         max_context_length=32,
         num_prompts_per_train_step=1,
@@ -484,9 +483,8 @@ def test_microbatch_encodes_each_distinct_image_once(image_paths) -> None:
 def _image_training_batch_builder(
     num_tokens: int = 16, *, build_mrope_positions: bool = True
 ) -> TrainingBatchBuilder:
-    return TrainingBatchBuilder.Config(
-        build_mrope_positions=build_mrope_positions, rdma_min_tensor_bytes=None
-    ).build(
+    return TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
+        build_mrope_positions=build_mrope_positions,
         num_tokens_per_microbatch_per_dp_rank=num_tokens,
         max_context_length=num_tokens,
         num_prompts_per_train_step=1,
