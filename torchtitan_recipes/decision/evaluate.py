@@ -18,14 +18,13 @@ Usage:
 
 import argparse
 import json
-import math
 from pathlib import Path
 
 import torch
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+from .prepare_data import LETTERS
 
 
 @torch.no_grad()
@@ -50,20 +49,58 @@ def letter_logits(model, tokenizer, rows: list[dict], batch_size: int = 16):
     return out
 
 
-def nll(logits, rows, temperature: float) -> float:
-    return sum(
-        -torch.log_softmax(lg / temperature, -1)[r["gold"]].item()
-        for lg, r in zip(logits, rows)
-    ) / len(rows)
+def target_probs(row, like):
+    target = like.new_tensor(row["target_probs"])
+    return target / target.sum()
+
+
+def fit_inverse_temperature(logits, rows) -> float:
+    """Minimize calibration NLL over nonnegative inverse temperatures."""
+    centered = [scores.double() - scores.max() for scores in logits]
+    scores = torch.nn.utils.rnn.pad_sequence(centered, batch_first=True)
+    targets = torch.nn.utils.rnn.pad_sequence(
+        [target_probs(row, lg) for lg, row in zip(centered, rows, strict=True)],
+        batch_first=True,
+    )
+    valid = (
+        torch.arange(scores.size(1))
+        < torch.tensor([len(lg) for lg in centered])[:, None]
+    )
+    target_mean = (scores * targets).sum()
+
+    def derivative(scale: float) -> float:
+        probs = (scores * scale).masked_fill(~valid, -torch.inf).softmax(-1)
+        return ((scores * probs).sum() - target_mean).item()
+
+    # NLL is convex in the inverse temperature. These endpoints give the
+    # uniform distribution and the uniform distribution over maximizers.
+    if derivative(0.0) >= 0:
+        return 0.0
+    if target_mean == 0:
+        return float("inf")
+
+    lower, upper = 0.0, 1.0
+    while derivative(upper) < 0:
+        lower, upper = upper, 2 * upper
+    for _ in range(40):
+        middle = (lower + upper) / 2
+        if derivative(middle) < 0:
+            lower = middle
+        else:
+            upper = middle
+    return (lower + upper) / 2
 
 
 def metrics(probs, rows, num_bins: int = 10) -> dict:
     n = len(rows)
     conf = [p.max().item() for p in probs]
-    correct = [int(p.argmax().item() == r["gold"]) for p, r in zip(probs, rows)]
+    targets = [target_probs(row, p) for p, row in zip(probs, rows, strict=True)]
+    correct = [
+        target[p.argmax()].item() for p, target in zip(probs, targets, strict=True)
+    ]
     brier = sum(
-        ((p - torch.eye(len(p))[r["gold"]]) ** 2).sum().item()
-        for p, r in zip(probs, rows)
+        ((p - target).square().sum() + 1 - target.square().sum()).item()
+        for p, target in zip(probs, targets, strict=True)
     )
     ece = 0.0
     for b in range(num_bins):
@@ -72,7 +109,7 @@ def metrics(probs, rows, num_bins: int = 10) -> dict:
             gap = sum(correct[i] - conf[i] for i in idx)
             ece += abs(gap) / n
     # Largest k such that the k most confident answers have at most 5% errors.
-    answered, errors = 0, 0
+    answered, errors = 0, 0.0
     order = sorted(range(n), key=lambda j: -conf[j])
     for k, i in enumerate(order, 1):
         errors += 1 - correct[i]
@@ -115,9 +152,19 @@ def main() -> None:
         state_dict = {}
         for path in Path(args.checkpoint).glob("*.safetensors"):
             state_dict.update(load_file(path))
-        # Qwen3-1.7B ties lm_head to embed_tokens, so lm_head is not saved.
+        if "model.language_model.embed_tokens.weight" in state_dict:
+            # TorchTitan exports text weights under the multimodal checkpoint prefix.
+            state_dict = {
+                "model." + key.removeprefix("model.language_model."): value
+                for key, value in state_dict.items()
+                if key.startswith("model.language_model.")
+            } | {
+                key: state_dict[key] for key in ("lm_head.weight",) if key in state_dict
+            }
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
-        if unexpected or set(missing) - {"lm_head.weight"}:
+        if model.config.tie_word_embeddings:
+            missing = [key for key in missing if key != "lm_head.weight"]
+        if missing or unexpected:
             raise ValueError(f"missing={missing} unexpected={unexpected}")
     model = model.cuda().eval()
 
@@ -128,21 +175,23 @@ def main() -> None:
 
     calib, rows = load("calib.jsonl"), load("eval.jsonl")
     calib_logits = letter_logits(model, tokenizer, calib)
-    grid = [math.exp(x / 20) for x in range(-40, 61)]
-    temperature = min(grid, key=lambda t: nll(calib_logits, calib, t))
-    probs = [
-        torch.softmax(lg / temperature, -1)
-        for lg in letter_logits(model, tokenizer, rows)
-    ]
+    scale = fit_inverse_temperature(calib_logits, calib)
+    logits = letter_logits(model, tokenizer, rows)
+    if scale == float("inf"):
+        probs = [lg.eq(lg.max()).float() for lg in logits]
+        probs = [p / p.sum() for p in probs]
+    else:
+        probs = [torch.softmax(lg * scale, -1) for lg in logits]
 
-    report: dict[str, object] = {"temperature": round(temperature, 3)}
+    report: dict[str, object] = {"temperature": 1 / scale if scale else "infinity"}
     for kind in ("all", "choice", "noul", "score"):
         idx = [i for i, r in enumerate(rows) if kind in ("all", r["type"])]
-        report[kind] = metrics([probs[i] for i in idx], [rows[i] for i in idx])
+        if idx:
+            report[kind] = metrics([probs[i] for i in idx], [rows[i] for i in idx])
     print(json.dumps(report, indent=1))
     for p, row in zip(probs[: args.num_examples], rows):
         print(f"\nstate: {row['state'][:200]!r}\nquestion: {row['instructions']}")
-        print(f"gold: {row['keys'][row['gold']]}")
+        print(f"target: {system_one_answer(target_probs(row, p), row)}")
         print(f"answer: {json.dumps(system_one_answer(p, row))}")
 
 
