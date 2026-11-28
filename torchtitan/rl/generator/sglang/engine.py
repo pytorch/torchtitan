@@ -74,6 +74,12 @@ from torchtitan.rl.generator.types import (
 
 logger = logging.getLogger(__name__)
 
+# SGLang clamps a -inf logprob to its dtype's min (OutputLogprobProcessor.compute_logprobs):
+# -3.4028e38 for float32 logits, -3.3895e38 for bfloat16. Both are at or below this floor.
+# TODO: when the vLLM engine aborts non-finite logprobs too, move this floor and the
+# "abort, no tokens" result into torchtitan/rl/generator/, shared by both engines.
+_LOGPROB_FLOOR = torch.finfo(torch.bfloat16).min
+
 # ServerArgs fields that SGLangEngine sets itself or does not support, so
 # extra_server_args cannot set them. Every key that names CUDA graphs is also
 # reserved for the engine (see Config.__post_init__).
@@ -229,7 +235,7 @@ class SGLangEngine(GenerationEngine):
         generator_name: str,
         output_dir: str,
     ):
-        del generator_name, output_dir
+        del output_dir
         if vision_processor is not None:
             raise ValueError(
                 "SGLangEngine serves text prompts only; image prompts "
@@ -363,7 +369,10 @@ class SGLangEngine(GenerationEngine):
         # TODO(https://github.com/sgl-project/sglang/issues/48473): SGLang has no
         # in-process output sink; stand in for the sockets to its detokenizer and
         # tokenizer processes, so results and aborts come here.
-        self._output_collector = _OutputCollector()
+        self._output_collector = _OutputCollector(
+            generator_name=generator_name,
+            logs_aborts=get_parallel().attn_tp_rank == 0,
+        )
         self._scheduler.output_streamer.send_to_detokenizer = self._output_collector
         self._scheduler.ipc_channels = dataclasses.replace(
             self._scheduler.ipc_channels, send_to_tokenizer=self._output_collector
@@ -711,7 +720,11 @@ class SGLangEngine(GenerationEngine):
 
     def step(self) -> list[FinishedRequest]:
         """Run one iteration of SGLang's event loop, a collective over all DP and TP
-        ranks, and return the requests whose results it processed."""
+        ranks, and return the requests whose results it processed.
+
+        A request whose generated tokens include a NaN or -inf logprob is aborted and
+        returned with finish reason "abort" and no tokens (see ``_OutputCollector``).
+        """
         scheduler = self._scheduler
         # As SGLang's own event loops; the model's TP all-reduces take their fast
         # path only with grad mode off.
@@ -719,6 +732,10 @@ class SGLangEngine(GenerationEngine):
             scheduler.schedule_stream
         ):
             _overlap_event_loop_iteration(scheduler)
+            # SGLang runs one more decode step for an aborted request, then finishes it.
+            # abort_request also drops a retracted request from SGLang's waiting queues.
+            for request_id in self._output_collector.take_requests_to_abort():
+                scheduler.abort_request(AbortReq(rid=request_id))
             # When SGLang processes a prefill's results, it appends the request's
             # first output token and inserts the prompt's KV into its radix cache.
             # So once a leader has an output token (or has finished), queue its
@@ -804,12 +821,27 @@ class _OutputCollector:
     finishes. The collector concatenates them and keeps each finished request with its
     abort message (None unless SGLang aborted it), and its metrics inputs from the
     timestamps of SGLang's request object.
+
+    A request whose increment holds a NaN or -inf logprob is returned with finish reason
+    "abort" and no tokens, so no such logprob reaches the trainer. If it is still
+    running, ``take_requests_to_abort`` lists it for the engine to abort; SGLang sends an
+    increment at least every ``SGLANG_FORCE_STREAM_INTERVAL`` tokens:
+
+        increment for "g3/r1":  logprobs [-0.4, nan, -0.9], not finished
+        -> take_requests_to_abort() == ["g3/r1"]; once SGLang finishes it:
+           FinishedRequest(request_id="g3/r1", token_ids=[], finish_reason="abort")
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, generator_name: str, logs_aborts: bool) -> None:
+        self._generator_name = generator_name
+        # Whether this rank logs each abort (attention TP rank 0; TP ranks abort alike).
+        self._logs_aborts = logs_aborts
         # Tokens and logprobs received so far, per unfinished request.
         self._partial: dict[str, tuple[list[int], list[float]]] = {}
         self._finished: list[tuple[FinishedRequest, str | None]] = []
+        # Requests with a NaN or -inf logprob, and those of them still to abort.
+        self._non_finite: set[str] = set()
+        self._requests_to_abort: list[str] = []
         # SGLang's request object, the arrival time and the first wait queue entry
         # time of each admitted request. SGLang restamps its wait queue entry time
         # when it retracts the request.
@@ -829,6 +861,9 @@ class _OutputCollector:
             self._receive_tokens(output)
         elif isinstance(output, AbortReq):
             token_ids, token_logprobs = self._partial.pop(output.rid, ([], []))
+            if output.rid in self._non_finite:
+                self._non_finite.remove(output.rid)
+                token_ids, token_logprobs = [], []
             self._admitted.pop(output.rid, None)
             reason = output.finished_reason or {}
             self._finished.append(
@@ -852,6 +887,31 @@ class _OutputCollector:
         finished, self._finished = self._finished, []
         return finished
 
+    def take_requests_to_abort(self) -> list[str]:
+        """Return the running requests that got a NaN or -inf logprob since the last call.
+
+        SGLang's abort matches every request id that starts with the given one. So a request
+        waits while another admitted request's id extends it:
+
+            flagged "s7/request=1", admitted "s7/request=1" and "s7/request=10"
+            -> take_requests_to_abort() == []; after "s7/request=10" finishes: ["s7/request=1"]
+
+        A request that finishes first is dropped from the list; it still returns no tokens.
+        """
+        to_abort, waiting = [], []
+        for request_id in self._requests_to_abort:
+            # Finished meanwhile: the collector already returned it.
+            if request_id not in self._non_finite:
+                continue
+
+            extended = any(
+                other != request_id and other.startswith(request_id)
+                for other in self._admitted
+            )
+            (waiting if extended else to_abort).append(request_id)
+        self._requests_to_abort = waiting
+        return to_abort
+
     def _receive_tokens(self, output: BatchTokenIDOutput) -> None:
         """Append each request's token and logprob increment, and finish the requests
         whose increment is their last."""
@@ -861,10 +921,42 @@ class _OutputCollector:
         ):
             token_ids, token_logprobs = self._partial.setdefault(request_id, ([], []))
             token_ids.extend(output.output_ids_flat[offsets[i] : offsets[i + 1]])
-            token_logprobs.extend(output.output_token_logprobs_val[i])
+            increment = output.output_token_logprobs_val[i]
+            token_logprobs.extend(increment)
+            # NaN fails every comparison, so this catches NaN as well as -inf.
+            if request_id not in self._non_finite and not all(
+                logprob > _LOGPROB_FLOOR for logprob in increment
+            ):
+                self._non_finite.add(request_id)
+                if self._logs_aborts:
+                    logger.warning(
+                        f"{self._generator_name}: aborting request {request_id} after "
+                        f"{len(token_ids)} generated tokens: a logprob is not finite "
+                        "(NaN or -inf)"
+                    )
+                if reason is None:
+                    self._requests_to_abort.append(request_id)
             if reason is None:
                 continue
             del self._partial[request_id]
+            if request_id in self._non_finite:
+                self._non_finite.remove(request_id)
+                self._admitted.pop(request_id, None)
+                self._finished.append(
+                    (
+                        FinishedRequest(
+                            request_id=request_id,
+                            token_ids=[],
+                            token_logprobs=[],
+                            finish_reason="abort",
+                            metrics_inputs=RequestMetricsInputs(
+                                num_cached_tokens=None, has_stats=False
+                            ),
+                        ),
+                        "a generated token's logprob is not finite (NaN or -inf)",
+                    )
+                )
+                continue
             if len(token_logprobs) != len(token_ids):
                 raise ValueError(
                     f"{request_id}: {len(token_ids)} tokens but "
