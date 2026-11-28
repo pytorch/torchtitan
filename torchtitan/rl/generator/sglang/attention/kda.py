@@ -112,7 +112,7 @@ def _flat_shape_in_dtype(
     num_bytes = (
         -(-num_bytes // _STATE_ENTRY_ALIGNMENT_BYTES) * _STATE_ENTRY_ALIGNMENT_BYTES
     )
-    return (num_bytes // storage_dtype.itemsize,)
+    return (1, num_bytes // storage_dtype.itemsize)
 
 
 def _unflatten_state_entry(
@@ -121,7 +121,7 @@ def _unflatten_state_entry(
     """View a ``_flat_shape_in_dtype`` pool entry, one row per slot, as the ``dtype``
     tensor of ``shape`` per slot, with dense per-slot rows."""
     num_elements = math.prod(shape) * dtype.itemsize // storage.element_size()
-    return storage[:, :num_elements].view(dtype).unflatten(-1, shape)
+    return storage.flatten(1)[:, :num_elements].view(dtype).unflatten(-1, shape)
 
 
 class TorchTitanKDAAttnBackend(TorchTitanLinearAttnBackend):
