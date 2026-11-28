@@ -77,8 +77,24 @@ search the added lines for every one of them on every review.
   rule in two packages) gets one source of truth.
 - [ ] Shared wrappers stay general: no per-model subclass of a shared wrapper,
   no `isinstance(cfg, SomeModel.Config)` branches in shared code (diff check).
-  An adapter is thin only if it forwards; if it sequences setup, metrics, or
-  shutdown, that logic belongs in the core.
+  An `isinstance` against a family base (`MultimodalModel.Config`) at the call
+  site is fine; the ban is on branching per specific model. An adapter is thin
+  only if it forwards; if it sequences setup, metrics, or shutdown, that logic
+  belongs in the core.
+- [ ] New member on a base class or shared component (`BaseModel`, `Module`,
+  `Decoder`, `RoPE`, a base `Config`): "Does every subclass have a meaningful
+  answer?" A property that only means something for a subset (e.g. an expert
+  count, which only MoE models have) goes on that subset's base, not the root,
+  even if a `None` or `False` default makes it type-check everywhere. "Does the
+  component know only about itself?" A flag or `ClassVar` on a component's config
+  (a RoPE, an attention, a kernel) that answers a question about the model or the
+  data side -- e.g. a flag on an attention config saying whether the data side must
+  build document masks -- is in the wrong place, even when only one component class
+  sets it: the model that consumes the result declares it.
+  A check against a model class's `Config` also misses configs that can't inherit
+  it (two slotted bases that add fields can't combine, e.g. Qwen3.8 Flash-Next's
+  config vs Qwen3.5's): prefer the family base or a class-level declaration on
+  the model.
 - [ ] Code the PR makes dead (an unused argument, a check that can no longer
   fire) is deleted in this PR, not deferred.
 - [ ] Hacky integration (monkeypatch, `install_*` / `patch_*` functions, thread
