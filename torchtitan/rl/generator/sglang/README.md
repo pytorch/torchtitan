@@ -102,9 +102,10 @@ attention models (GDN, KDA) raise with `"full"` and need `"breakable"`: SGLang's
 breakable prefill graphs, where the model runs in graph segments, with attention
 eager in between, at a CPU cost per layer in every prefill step. GDN and KDA layers
 run inside the segments, on tables refilled before each replay
-(`PrefillGraphMetadata`), except under attention DP
-(`TorchTitanLinearAttnBackend.supports_prefill_graph_extend`). The tables have a row
-per request, so for these models the engine caps a prefill batch at 256 requests.
+(`PrefillGraphMetadata`). Under attention DP, SGLang replays prefill graphs only on
+steps where no DP rank decodes; a step where one rank prefills and another decodes
+runs eagerly on every rank. The tables have a row per request, so for these models
+the engine caps a prefill batch at 256 requests (per DP rank).
 Capture takes about 37 s (Qwen3.5-0.8B) to 74 s (Qwen3.5-27B) at startup, on one
 GB300; `"decode"` skips it.
 

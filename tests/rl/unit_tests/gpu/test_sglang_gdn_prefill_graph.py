@@ -11,7 +11,9 @@ One bucket is captured once, then replayed for batches of different shapes: many
 requests, cached prefixes, padding rows past the batch, prefix-cache snapshots, and
 batches without them. Each replay must match the eager extend on the output and on the
 whole conv and state pools, the last slot included; only SGLang's dummy slot 0 may
-differ. Runs in the B200 RL CI job, with the SGLang environment (see
+differ. A replay for an idle attention-DP rank (one made-up request, no real row) must
+write nothing, for the GDN and the KDA extend. Runs in the B200 RL CI job, with the
+SGLang environment (see
 torchtitan/rl/generator/sglang/README.md):
     pytest tests/rl/unit_tests/gpu/test_sglang_gdn_prefill_graph.py -v
 """
@@ -28,6 +30,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires 
 
 KEY_HEADS, VALUE_HEADS, HEAD_DIM, CONV_WIDTH = 2, 4, 128, 4
 CHANNELS = (2 * KEY_HEADS + VALUE_HEADS) * HEAD_DIM
+KDA_HEADS = 2
 BUCKET, MAX_SEQS = 512, 160
 # Request i's slot is i + 1 and its track slot NUM_SLOTS // 2 + i, so no request owns
 # the last slot, where a torch index write of -1 would land.
@@ -76,15 +79,25 @@ def _layer():
     )
 
 
-def _backend(conv_pool: torch.Tensor, state_pool: torch.Tensor):
-    """The production backend on test pools, with SGLang's pool and request table
-    replaced by the parts the extend reads."""
+def _backend(
+    conv_pool: torch.Tensor,
+    state_pool: torch.Tensor,
+    kind: str = "gdn",
+    replay_pools: tuple[torch.Tensor, ...] = (),
+):
+    """The production backend (``kind`` "gdn" or "kda") on test pools, with SGLang's
+    pool and request table replaced by the parts the extend reads. ``replay_pools`` are
+    the KDA slots' replay-state entries (batch-invariant mode)."""
     from sglang.srt.mem_cache.kv.alloc.id_space import IdSpace
     from sglang.srt.mem_cache.kv.router import KVLayerRouter, STATE_PART
 
     from torchtitan.rl.generator.sglang.attention.gdn import TorchTitanGDNAttnBackend
+    from torchtitan.rl.generator.sglang.attention.kda import TorchTitanKDAAttnBackend
 
-    backend = TorchTitanGDNAttnBackend.__new__(TorchTitanGDNAttnBackend)
+    backend_class = {"gdn": TorchTitanGDNAttnBackend, "kda": TorchTitanKDAAttnBackend}[
+        kind
+    ]
+    backend = backend_class.__new__(backend_class)
     backend.state_pool = None
     backend.req_to_token_pool = SimpleNamespace(
         get_mamba_indices=lambda req_pool_indices: (req_pool_indices + 1).to(
@@ -94,7 +107,7 @@ def _backend(conv_pool: torch.Tensor, state_pool: torch.Tensor):
     backend._state_ids = IdSpace(key=("state", None))
     pool = SimpleNamespace(layer_transfer_counter=None, start_layer=0)
     pool.layer_router = KVLayerRouter.from_layer_maps(pool, ())
-    layer_cache = SimpleNamespace(conv=[conv_pool], temporal=state_pool)
+    layer_cache = SimpleNamespace(conv=[conv_pool, *replay_pools], temporal=state_pool)
     pool.layer_router.bind_part(
         sub_pool="state",
         part=STATE_PART,
@@ -121,6 +134,8 @@ def _batch(extend_lens, prefix_lens, track=None):
         forward_mode=ForwardMode.EXTEND,
         logical_forward_mode=ForwardMode.EXTEND,
         batch_size=batch_size,
+        # Set by SGLang's attention-DP padding only.
+        _original_batch_size=None,
         req_pool_indices=torch.arange(batch_size, device="cuda"),
         out_cache_loc=torch.zeros(sum(extend_lens), dtype=torch.int64, device="cuda"),
         extend_seq_lens=torch.tensor(extend_lens, device="cuda"),
@@ -157,6 +172,41 @@ def _batch(extend_lens, prefix_lens, track=None):
 
     batch.mamba_track_aligned_lens = mamba_track_aligned_lens
     return batch
+
+
+def _capture_batch():
+    """SGLang's capture batch: one request of the bucket's size, with the track slots on
+    the device and no CPU track lists (``PrefillCudaGraphRunner.capture_prepare``)."""
+    batch = _batch([BUCKET], [0], track={})
+    batch.mamba_prefill_track_mask_cpu = None
+    batch.mamba_track_seqlens_cpu = None
+    return batch
+
+
+def _idle_rank_batch():
+    """SGLang's made-up request for an idle attention-DP rank: one bucket-long request
+    on request row 0, and no real row (``_original_batch_size`` 0)."""
+    batch = _batch([BUCKET], [0])
+    batch._original_batch_size = 0
+    return batch
+
+
+def _capture(extend, pools: list[torch.Tensor]):
+    """Capture ``extend`` in a CUDA graph after one warm-up call; ``pools`` end as they
+    began. Returns the graph and its output."""
+    pools_before_capture = [pool.clone() for pool in pools]
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        # Compiles and autotunes the kernels outside the capture.
+        extend()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = extend()
+    for pool, pool_before_capture in zip(pools, pools_before_capture, strict=True):
+        pool.copy_(pool_before_capture)
+    return graph, output
 
 
 def _rel_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
@@ -205,25 +255,13 @@ def test_prefill_graph_replays_match_eager_extend(
     a = torch.zeros(BUCKET, VALUE_HEADS, dtype=torch.bfloat16, device="cuda")
     b = torch.zeros(BUCKET, VALUE_HEADS, dtype=torch.bfloat16, device="cuda")
 
-    # ======== Capture one bucket, as SGLang does: one request of the bucket's size ========
-    capture_batch = _batch([BUCKET], [0])
+    # ======== Capture one bucket, as SGLang does ========
+    capture_batch = _capture_batch()
     metadata = backend.init_prefill_graph_metadata(capture_batch)
-    pools_before_capture = (conv_pool.clone(), state_pool.clone())
-
-    def extend():
-        return backend.forward_extend(layer, capture_batch, mixed_qkv, a, b)
-
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        # Compiles and autotunes the kernels outside the capture.
-        extend()
-    torch.cuda.current_stream().wait_stream(stream)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        output = extend()
-    conv_pool.copy_(pools_before_capture[0])
-    state_pool.copy_(pools_before_capture[1])
+    graph, output = _capture(
+        lambda: backend.forward_extend(layer, capture_batch, mixed_qkv, a, b),
+        [conv_pool, state_pool],
+    )
 
     # ======== Replay other batches against the eager extend ========
     for case, (extend_lens, prefix_lens, track) in enumerate(CASES):
@@ -277,3 +315,137 @@ def test_prefill_graph_replays_match_eager_extend(
         # The next case starts from the same pools on both sides.
         conv_pool.copy_(expected_conv_pool)
         state_pool.copy_(expected_state_pool)
+
+    # ======== An idle attention-DP rank, after a real batch ========
+    # A real batch first, so the idle replay's zero check reads an output with values.
+    backend.refresh_prefill_graph_metadata(metadata, _batch([200, 11], [0, 0]))
+    graph.replay()
+    torch.cuda.synchronize()
+    assert bool(output[:, : 200 + 11].any())
+
+    # The stand-in maps request row 0 to slot 1, a real slot: only the tables keep the
+    # made-up request off it.
+    mixed_qkv.copy_(torch.randn(BUCKET, CHANNELS, generator=generator, device="cuda"))
+    pools_before = (conv_pool.clone(), state_pool.clone())
+    backend.refresh_prefill_graph_metadata(metadata, _idle_rank_batch())
+    graph.replay()
+    torch.cuda.synchronize()
+    assert bool((output == 0).all())
+    assert torch.equal(conv_pool[1:], pools_before[0][1:])
+    assert torch.equal(state_pool[1:], pools_before[1][1:])
+
+    # Decode rows run as 1-token extends: the capture batch's track fields, at a replay.
+    decode_batch = _batch([1, 1], [40, 70], track={})
+    decode_batch.mamba_track_seqlens_cpu = None
+    with pytest.raises(RuntimeError, match="no prefill track lengths"):
+        backend.refresh_prefill_graph_metadata(metadata, decode_batch)
+
+
+def _kda_layer():
+    generator = torch.Generator(device="cuda").manual_seed(13)
+
+    def randn(*shape, dtype=torch.bfloat16, scale=0.2):
+        return (torch.randn(*shape, generator=generator, device="cuda") * scale).to(
+            dtype
+        )
+
+    channels = KDA_HEADS * HEAD_DIM
+    return SimpleNamespace(
+        layer_id=0,
+        head_k_dim=HEAD_DIM,
+        conv_weights=tuple(randn(channels, 1, CONV_WIDTH) for _ in range(3)),
+        A_log=randn(KDA_HEADS, dtype=torch.float32),
+        dt_bias=randn(KDA_HEADS, HEAD_DIM, dtype=torch.float32),
+        lower_bound=-5.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "batch_invariant", [False, True], ids=["default", "batch-invariant"]
+)
+def test_kda_idle_rank_replay_writes_nothing(
+    batch_invariant: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replay of the captured KDA extend for an idle attention-DP rank gives zero
+    output and writes no slot but SGLang's dummy slot 0, replay state included."""
+    from torchtitan.rl.generator.attention.kda import (
+        REPLAY_STATE_DTYPES,
+        replay_state_shapes,
+    )
+    from torchtitan.rl.generator.sglang.attention.kda import _flat_shape_in_dtype
+
+    monkeypatch.setattr(
+        "torchtitan.rl.generator.sglang.attention.kda.is_in_batch_invariant_mode",
+        lambda: batch_invariant,
+    )
+
+    layer = _kda_layer()
+    generator = torch.Generator(device="cuda").manual_seed(17)
+    channels = KDA_HEADS * HEAD_DIM
+    conv_pool = (
+        torch.randn(
+            NUM_SLOTS, CONV_WIDTH - 1, 3 * channels, generator=generator, device="cuda"
+        )
+        * 0.3
+    ).to(torch.bfloat16)
+    state_pool = (
+        torch.randn(
+            NUM_SLOTS, KDA_HEADS, HEAD_DIM, HEAD_DIM, generator=generator, device="cuda"
+        )
+        * 0.05
+    )
+    # Batch-invariant mode keeps Attention Gym's replay state in extra conv entries.
+    replay_pools = ()
+    if batch_invariant:
+        replay_pools = tuple(
+            torch.zeros(
+                NUM_SLOTS,
+                *_flat_shape_in_dtype(shape, dtype, torch.bfloat16),
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+            for shape, dtype in zip(
+                replay_state_shapes(KDA_HEADS, HEAD_DIM),
+                REPLAY_STATE_DTYPES,
+                strict=True,
+            )
+        )
+    backend = _backend(conv_pool, state_pool, "kda", replay_pools)
+    pools = [conv_pool, state_pool, *replay_pools]
+
+    # The static inputs the graph reads.
+    mixed_qkv = torch.zeros(BUCKET, 3 * channels, dtype=torch.bfloat16, device="cuda")
+    a = torch.zeros(BUCKET, channels, dtype=torch.bfloat16, device="cuda")
+    b = torch.zeros(BUCKET, KDA_HEADS, dtype=torch.bfloat16, device="cuda")
+
+    capture_batch = _capture_batch()
+    metadata = backend.init_prefill_graph_metadata(capture_batch)
+    graph, output = _capture(
+        lambda: backend.forward_extend(layer, capture_batch, mixed_qkv, a, b), pools
+    )
+
+    def replay(batch) -> list[torch.Tensor]:
+        """Replay ``batch`` on random inputs; returns the pools as they were before."""
+        mixed_qkv.copy_(
+            torch.randn(BUCKET, 3 * channels, generator=generator, device="cuda")
+        )
+        a.copy_(torch.randn(BUCKET, channels, generator=generator, device="cuda"))
+        b.copy_(torch.randn(BUCKET, KDA_HEADS, generator=generator, device="cuda"))
+        pools_before = [pool.clone() for pool in pools]
+        backend.refresh_prefill_graph_metadata(metadata, batch)
+        graph.replay()
+        torch.cuda.synchronize()
+        return pools_before
+
+    # A real batch first, so the idle replay's zero check reads an output with values.
+    replay(_batch([37, 100], [0, 64]))
+    assert bool(output[:, : 37 + 100].any())
+
+    pools_before = replay(_idle_rank_batch())
+    assert bool((output == 0).all())
+    for pool, pool_before in zip(pools, pools_before, strict=True):
+        # The replay entries keep float32 and int32 bytes in bfloat16 storage, where
+        # some bit patterns read as NaN: compare the bits.
+        assert torch.equal(
+            pool[1:].view(torch.uint8), pool_before[1:].view(torch.uint8)
+        )

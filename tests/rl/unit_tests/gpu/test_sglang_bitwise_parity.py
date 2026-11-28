@@ -44,12 +44,13 @@ Run each class in its own launch, with as many processes as its DP x TP degree (
 for TestSGLangBitwiseParityKDA, four for TestSGLangBitwiseParityMoEDPEP,
 TestSGLangBitwiseParityKDADPEP and TestSGLangBitwiseParityDistMoEDPEP, else two),
 with the SGLang environment (see
-torchtitan/rl/generator/sglang/README.md; the Dist-MoE classes also need the dist_moe
-package):
+torchtitan/rl/generator/sglang/README.md; the Dist-MoE classes and
+TestSGLangBitwiseParityGDNDPEP also need the dist_moe package):
     torchrun --nproc_per_node=2 -m pytest \
         tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParityVarlen -v
 """
 
+import contextlib
 import dataclasses
 import functools
 import importlib.util
@@ -91,6 +92,7 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_kimi_k3_debug_varlen_batch_invariant,
     rl_grpo_qwen3_5_debug_varlen,
+    rl_grpo_qwen3_5_debug_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 
@@ -354,6 +356,45 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             backend.replay = replay
         self.assertGreater(num_replays, 0)
 
+    @contextlib.contextmanager
+    def _count_prefill_replays(self):
+        """Count this rank's prefill graph replays, and the linear attention extends
+        that break a replay to run eagerly.
+
+        Example:
+
+            with self._count_prefill_replays() as counts:
+                self._generate(prompt_ids)
+            # counts -> {"replays": 2, "eager_extends_in_replays": 0}
+        """
+        model_runner = self.engine._scheduler.tp_worker.model_runner
+        graph_backend = model_runner.prefill_cuda_graph_runner.backend
+        linear_backend = model_runner.attn_backend.linear_attn_backend
+        replay, forward_extend = graph_backend.replay, linear_backend.forward_extend
+        counts = {"replays": 0, "eager_extends_in_replays": 0}
+        in_replay = False
+
+        def counting_replay(*args, **kwargs):
+            nonlocal in_replay
+            counts["replays"] += 1
+            in_replay = True
+            try:
+                return replay(*args, **kwargs)
+            finally:
+                in_replay = False
+
+        def counting_forward_extend(*args, **kwargs):
+            counts["eager_extends_in_replays"] += in_replay
+            return forward_extend(*args, **kwargs)
+
+        graph_backend.replay = counting_replay
+        linear_backend.forward_extend = counting_forward_extend
+        try:
+            yield counts
+        finally:
+            graph_backend.replay = replay
+            linear_backend.forward_extend = forward_extend
+
     def test_prefill_graphs_capture_linear_extend(self):
         """Prefill graph replays run the GDN or KDA extend inside the graph: no linear
         attention layer breaks the graph to run it eagerly."""
@@ -366,35 +407,12 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             or not linear_backend.supports_prefill_graph_extend()
         ):
             self.skipTest("no linear attention extend in breakable prefill graphs")
-        graph_backend = model_runner.prefill_cuda_graph_runner.backend
-        replay, forward_extend = graph_backend.replay, linear_backend.forward_extend
-        num_replays = num_eager_extends_in_replays = 0
-        in_replay = False
 
-        def counting_replay(*args, **kwargs):
-            nonlocal num_replays, in_replay
-            num_replays += 1
-            in_replay = True
-            try:
-                return replay(*args, **kwargs)
-            finally:
-                in_replay = False
-
-        def counting_forward_extend(*args, **kwargs):
-            nonlocal num_eager_extends_in_replays
-            num_eager_extends_in_replays += in_replay
-            return forward_extend(*args, **kwargs)
-
-        graph_backend.replay = counting_replay
-        linear_backend.forward_extend = counting_forward_extend
-        try:
+        with self._count_prefill_replays() as counts:
             # Prompts no other test caches, so prefill runs over all of them.
             self._generate([prompt[::2] for prompt in self.prompt_ids])
-        finally:
-            graph_backend.replay = replay
-            linear_backend.forward_extend = forward_extend
-        self.assertGreater(num_replays, 0)
-        self.assertEqual(num_eager_extends_in_replays, 0)
+        self.assertGreater(counts["replays"], 0)
+        self.assertEqual(counts["eager_extends_in_replays"], 0)
 
     def test_trainer_vs_sglang_decode_after_model_state_dict_load(self):
         # Runs last (unittest orders tests by name): it changes both models' weights.
@@ -516,13 +534,10 @@ class TestSGLangBitwiseParityMoEDPEP(SGLangBitwiseParityTestBase):
     # The all-to-all token dispatcher syncs the host for its split sizes.
     cuda_graph = "none"
 
-    def test_dp_ranks_with_different_requests(self):
-        # DP rank 1 finishes first and runs idle steps while DP rank 0 decodes; each
-        # DP rank's results still match the trainer.
+    def _assert_dp_rank_matches_trainer(self, prompt_ids, results) -> None:
+        """Check this DP rank's own completions against the trainer's prefill of prompt
+        and completion. A collective: every rank calls it, each with its requests."""
         dp_rank = self.engine.data_parallel_rank
-        self.assertEqual(self.engine.data_parallel_size, 2)
-        prompt_ids = self.prompt_ids if dp_rank == 0 else self.prompt_ids[:1]
-        results = self._generate(prompt_ids)
         sequences = [
             prompt + result.token_ids
             for prompt, result in zip(prompt_ids, results, strict=True)
@@ -534,6 +549,14 @@ class TestSGLangBitwiseParityMoEDPEP(SGLangBitwiseParityTestBase):
                 trainer_lps[i][len(prompt) - 1 :],
                 result.token_logprobs,
             )
+
+    def test_dp_ranks_with_different_requests(self):
+        # DP rank 1 finishes first and runs idle steps while DP rank 0 decodes; each
+        # DP rank's results still match the trainer.
+        self.assertEqual(self.engine.data_parallel_size, 2)
+        dp_rank = self.engine.data_parallel_rank
+        prompt_ids = self.prompt_ids if dp_rank == 0 else self.prompt_ids[:1]
+        self._assert_dp_rank_matches_trainer(prompt_ids, self._generate(prompt_ids))
 
 
 class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
@@ -889,3 +912,137 @@ class TestSGLangBitwiseParityDistMoEDPEP(
 
     config_fn = staticmethod(_qwen3_moe_debug_dist_moe_dp2_tp2_ep4_config)
     cuda_graph = "full"
+
+
+def _qwen3_5_moe_debug_dist_moe_dp2_ep2_config() -> Controller.Config:
+    """The batch-invariant Qwen3.5 recipe on its MoE debug flavor (GDN, attention and
+    MoE layers) at DP 2 x TP 1, EP 2, with Dist-MoE experts on both sides."""
+    config = rl_grpo_qwen3_5_debug_varlen_batch_invariant()
+    trainer_parallelism = dataclasses.replace(
+        config.trainer.parallelism,
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=1,
+        expert_parallel_degree=2,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=2, expert_parallel_degree=2
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_qwen3_5_model_config,
+        "debugmodel_moe",
+        seq_len=config.trainer.model.max_context_length,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
+    # Local compile regions do not support batch-invariant mode.
+    for model_config in (trainer_model, generator_model):
+        model_config.local_compile.regions = []
+    config.trainer = dataclasses.replace(
+        config.trainer, model=trainer_model, parallelism=trainer_parallelism
+    )
+    config.generator = dataclasses.replace(
+        config.generator, model=generator_model, parallelism=generator_parallelism
+    )
+    return _with_dist_moe(config)
+
+
+class TestSGLangBitwiseParityGDNDPEP(
+    TestSGLangBitwiseParityGDN, TestSGLangBitwiseParityDistMoEDPEP
+):
+    """The Qwen3.5 MoE debug model at DP 2 x TP 1, EP 2 across the DP ranks, on 2 GPUs:
+    the GDN extend in breakable prefill graphs under attention DP, on every rank's
+    prefill and on an idle rank's made-up request."""
+
+    config_fn = staticmethod(_qwen3_5_moe_debug_dist_moe_dp2_ep2_config)
+    # Dist-MoE experts: the default all-to-all dispatcher syncs the host, which CUDA
+    # graphs can't capture.
+    cuda_graph = "breakable"
+    # Prefill in 100-token chunks, so DP rank 1 decodes while DP rank 0 still
+    # prefills (test_dp_ranks_with_different_requests).
+    max_num_batched_tokens = 100
+
+    def test_dp_ranks_with_different_requests(self):
+        # Rank 1 decodes its prompt while rank 0 still prefills its 5: SGLang runs
+        # these steps eagerly. Rank 1's next turn resumes the states its decode saved.
+        dp_rank = self.engine.data_parallel_rank
+        # Rank 0's prompts are rotated by half their length, so none is a prefix of
+        # another and no other test uses them: a cache hit would shorten its prefill.
+        prompt_ids = (
+            [
+                prompt[len(prompt) // 2 :] + prompt[: len(prompt) // 2]
+                for prompt in self.prompt_ids
+            ]
+            if dp_rank == 0
+            else self.prompt_ids[:1]
+        )
+
+        # Count rank 1's decode steps while another DP rank prefills. ModelRunner.forward
+        # sees a step before SGLang's attention-DP padding relabels its rows.
+        model_runner = self.engine._scheduler.tp_worker.model_runner
+        forward = model_runner.forward
+        num_decode_steps_during_prefill = 0
+
+        def counting_forward(forward_batch, *args, **kwargs):
+            nonlocal num_decode_steps_during_prefill
+            num_decode_steps_during_prefill += (
+                forward_batch.forward_mode.is_decode()
+                and forward_batch.is_extend_in_batch
+            )
+            return forward(forward_batch, *args, **kwargs)
+
+        model_runner.forward = counting_forward
+        try:
+            results = self._generate(prompt_ids)
+        finally:
+            model_runner.forward = forward
+        self._assert_dp_rank_matches_trainer(prompt_ids, results)
+
+        next_prompt_ids = [
+            prompt + result.token_ids + prompt[: self.NEXT_TURN_SUFFIX_LENGTH]
+            for prompt, result in zip(prompt_ids, results, strict=True)
+        ]
+        next_results = self._generate(next_prompt_ids)
+        self._assert_dp_rank_matches_trainer(next_prompt_ids, next_results)
+        for prompt, result in zip(prompt_ids, next_results):
+            self.assertGreater(result.metrics_inputs.num_cached_tokens, len(prompt))
+        if dp_rank == 1:
+            self.assertGreater(num_decode_steps_during_prefill, 0)
+
+    def test_idle_dp_rank_replays_prefill_graphs(self):
+        """An idle DP rank replays the prefill graph with one made-up request, which
+        writes no state: the rank's cached sessions then resume bitwise.
+
+            phase 1:  rank 0 idle                rank 1 runs turn 1 of 5 sessions
+            phase 2:  rank 0 prefills 5 prompts  rank 1 idle, replays counted
+            phase 3:  rank 0 idle                rank 1 resumes its 5 sessions
+        """
+        dp_rank = self.engine.data_parallel_rank
+        # Prompts no other test uses, so each prefill runs over the whole prompt.
+        session_prompt_ids = (
+            [prompt[1:] for prompt in self.prompt_ids] if dp_rank == 1 else []
+        )
+        new_prompt_ids = (
+            [prompt[2:] for prompt in self.prompt_ids] if dp_rank == 0 else []
+        )
+
+        results = self._generate(session_prompt_ids)
+
+        with self._count_prefill_replays() as counts:
+            new_results = self._generate(new_prompt_ids)
+
+        next_prompt_ids = [
+            prompt + result.token_ids + prompt[: self.NEXT_TURN_SUFFIX_LENGTH]
+            for prompt, result in zip(session_prompt_ids, results, strict=True)
+        ]
+        next_results = self._generate(next_prompt_ids)
+
+        # Each rank checks what it ran: rank 0 its new prompts, rank 1 its resumed turns.
+        if dp_rank == 0:
+            self._assert_dp_rank_matches_trainer(new_prompt_ids, new_results)
+        else:
+            self._assert_dp_rank_matches_trainer(next_prompt_ids, next_results)
+            self.assertGreater(counts["replays"], 0)
+            for prompt, result in zip(session_prompt_ids, next_results):
+                self.assertGreater(result.metrics_inputs.num_cached_tokens, len(prompt))
+        self.assertEqual(counts["eager_extends_in_replays"], 0)

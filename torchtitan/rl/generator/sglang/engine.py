@@ -556,9 +556,7 @@ class SGLangEngine(GenerationEngine):
             }
         elif self.config.cuda_graph == "breakable":
             server_kwargs["cuda_graph_config"] = {"prefill": {"backend": "breakable"}}
-            # Attention DP keeps the linear attention extend eager, with no tables
-            # (TorchTitanLinearAttnBackend.supports_prefill_graph_extend).
-            if parallelism.data_parallel_degree == 1 and any(
+            if any(
                 isinstance(layer.attention, LinearAttention.Config)
                 for layer in model.layers
             ):
