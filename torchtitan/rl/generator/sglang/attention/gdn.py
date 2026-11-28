@@ -179,7 +179,7 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
         ) = self.convolve_extend(
             forward_batch, mixed_qkv, conv_weight_CW, layer_cache.conv[0]
         )
-        return paged_gdn(
+        output_THV = paged_gdn(
             conv_output_1TC[0],
             a,
             b,
@@ -194,7 +194,13 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
             num_v_heads=layer.num_v_heads,
             head_v_dim=layer.head_v_dim,
             **checkpoints,
-        ).unsqueeze(0)
+        )
+        if self.prefill_graph_metadata is not None:
+            # The kernels leave the tokens past the batch unwritten.
+            output_THV.masked_fill_(
+                self.prefill_graph_metadata.padding_tokens[:, None, None], 0
+            )
+        return output_THV.unsqueeze(0)
 
 
 class SGLangInnerGDN(InnerAttention):

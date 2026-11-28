@@ -354,6 +354,48 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             backend.replay = replay
         self.assertGreater(num_replays, 0)
 
+    def test_prefill_graphs_capture_linear_extend(self):
+        """Prefill graph replays run the GDN or KDA extend inside the graph: no linear
+        attention layer breaks the graph to run it eagerly."""
+        model_runner = self.engine._scheduler.tp_worker.model_runner
+        # Only hybrid models have a linear attention backend.
+        linear_backend = getattr(model_runner.attn_backend, "linear_attn_backend", None)
+        if (
+            self.cuda_graph != "breakable"
+            or linear_backend is None
+            or not linear_backend.supports_prefill_graph_extend()
+        ):
+            self.skipTest("no linear attention extend in breakable prefill graphs")
+        graph_backend = model_runner.prefill_cuda_graph_runner.backend
+        replay, forward_extend = graph_backend.replay, linear_backend.forward_extend
+        num_replays = num_eager_extends_in_replays = 0
+        in_replay = False
+
+        def counting_replay(*args, **kwargs):
+            nonlocal num_replays, in_replay
+            num_replays += 1
+            in_replay = True
+            try:
+                return replay(*args, **kwargs)
+            finally:
+                in_replay = False
+
+        def counting_forward_extend(*args, **kwargs):
+            nonlocal num_eager_extends_in_replays
+            num_eager_extends_in_replays += in_replay
+            return forward_extend(*args, **kwargs)
+
+        graph_backend.replay = counting_replay
+        linear_backend.forward_extend = counting_forward_extend
+        try:
+            # Prompts no other test caches, so prefill runs over all of them.
+            self._generate([prompt[::2] for prompt in self.prompt_ids])
+        finally:
+            graph_backend.replay = replay
+            linear_backend.forward_extend = forward_extend
+        self.assertGreater(num_replays, 0)
+        self.assertEqual(num_eager_extends_in_replays, 0)
+
     def test_trainer_vs_sglang_decode_after_model_state_dict_load(self):
         # Runs last (unittest orders tests by name): it changes both models' weights.
         logprobs_before = self._trainer_logprobs(self.prompt_ids[0])
