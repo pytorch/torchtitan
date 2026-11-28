@@ -293,7 +293,7 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
     assert not microbatch.loss_mask[~valid].any()
     assert not microbatch.generator_logprobs[~valid].any()
     assert not microbatch.advantages[~valid].any()
-    assert microbatch.loss_token_counts.tolist() == [6]
+    assert microbatch.loss_token_counts.tolist() == 6
     assert microbatch.routing_token_counts.tolist() == [8]
     lengths = {1: [5, 3], 4: [8, 4], 8: [8, 8]}[pad_multiple]
     assert [training_batch_builder.num_tokens_to_pack(sample) for sample in samples] == lengths

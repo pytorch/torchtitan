@@ -15,6 +15,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from torchtitan.rl.actors.system import TrainerHandle
 from torchtitan.rl.controller.controller import Controller, ValidationConfig
@@ -142,7 +143,7 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
         queue.put_nowait(
             SimpleNamespace(
                 microbatch_groups=[],
-                global_loss_token_counts=[1],
+                global_loss_token_counts=torch.tensor(1),
                 global_routing_token_counts=None,
                 group_ids=[],
                 min_policy_versions=[0],

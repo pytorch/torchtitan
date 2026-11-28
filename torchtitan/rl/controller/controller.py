@@ -1646,7 +1646,7 @@ class Controller(Configurable):
                         ),
                         *compute_perf_ratio_metrics(
                             num_global_valid_tokens=int(
-                                packed.global_loss_token_counts[0]
+                                packed.global_loss_token_counts.reshape(-1)[0]
                             ),
                             time_metrics=time_metrics,
                         ),

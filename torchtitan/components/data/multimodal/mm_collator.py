@@ -13,13 +13,16 @@ from typing import Any, cast
 import torch
 
 from torchtitan.components.data.collators import Collator
+from torchtitan.components.data.padding import (
+    get_microbatch_token_counts,
+    pack_microbatch_fields,
+)
 from torchtitan.components.data.types import (
     DatasetBuildContext,
     TokenizedTrainingMicrobatch,
 )
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.models.common.mtp import get_mtp_token_counts
 
 from .mrope import get_mrope_positions
 
@@ -111,39 +114,33 @@ class MultiModalCollator(Collator):
         rows: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Concatenate whole samples and pad only the token-microbatch tail."""
-        input_ids = torch.cat([sample["input_ids"] for sample in rows])
-        labels = torch.cat([sample["labels"] for sample in rows])
-        positions = torch.cat([sample["positions"] for sample in rows])
-        padding_mask = torch.cat(
-            [
-                (
-                    sample["padding_mask"]
-                    if "padding_mask" in sample
-                    else torch.zeros(sample["input_ids"].shape[0], dtype=torch.bool)
-                )
-                for sample in rows
-            ]
+        packed = pack_microbatch_fields(
+            {
+                "input_ids": [sample["input_ids"] for sample in rows],
+                "labels": [sample["labels"] for sample in rows],
+                "positions": [sample["positions"] for sample in rows],
+                "padding_mask": [
+                    (
+                        sample["padding_mask"]
+                        if "padding_mask" in sample
+                        else torch.zeros(sample["input_ids"].shape[0], dtype=torch.bool)
+                    )
+                    for sample in rows
+                ],
+            },
+            num_tokens=self._num_tokens_per_microbatch,
+            max_context_length=self._max_context_length,
+            # pyrefly: ignore [missing-attribute]
+            fill_values={"input_ids": self.tokenizer.pad_id, "labels": IGNORE_INDEX},
+            dtypes={"input_ids": torch.int64, "labels": torch.int64},
+            pin_memory=False,
         )
-        pad_len = self._num_tokens_per_microbatch - input_ids.shape[0]
-        if pad_len < 0:
-            raise ValueError("multimodal rows exceed the configured token microbatch")
-        if pad_len:
-            input_ids = torch.nn.functional.pad(
-                input_ids,
-                (0, pad_len),
-                # pyrefly: ignore [missing-attribute]
-                value=self.tokenizer.pad_id,
-            )
-            labels = torch.nn.functional.pad(labels, (0, pad_len), value=IGNORE_INDEX)
-            padding_positions = (
-                torch.arange(pad_len, dtype=positions.dtype) % self._max_context_length
-            )
-            positions = torch.cat([positions, padding_positions])
-            padding_mask = torch.nn.functional.pad(
-                padding_mask, (0, pad_len), value=True
-            )
-
-        return input_ids, labels, positions, padding_mask
+        return (
+            packed["input_ids"],
+            packed["labels"],
+            packed["positions"],
+            packed["padding_mask"],
+        )
 
     def collate_audio(
         self, all_waveforms: list[torch.Tensor]
@@ -343,15 +340,12 @@ class MultiModalCollator(Collator):
                 video_token_id=special_tokens["video_id"],
             )
 
-        target_mask = labels != IGNORE_INDEX
-        loss_token_counts, routing_token_counts = get_mtp_token_counts(
-            target_mask=target_mask,
+        loss_token_counts, routing_token_counts = get_microbatch_token_counts(
+            target_mask=labels != IGNORE_INDEX,
             positions=positions,
             padding_mask=padding_mask,
             num_mtp_layers=self._num_mtp_layers,
         )
-        if self._num_mtp_layers == 0:
-            loss_token_counts = loss_token_counts[0]
         return TokenizedTrainingMicrobatch(
             input=input_ids,
             labels=labels,

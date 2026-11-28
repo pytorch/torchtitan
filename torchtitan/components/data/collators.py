@@ -11,9 +11,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 
 from torchtitan.components.data.dataset import TextSequence
+from torchtitan.components.data.padding import (
+    get_microbatch_token_counts,
+    pack_microbatch_fields,
+)
 from torchtitan.components.data.types import (
     DatasetBuildContext,
     TokenizedTrainingMicrobatch,
@@ -21,7 +26,6 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import Configurable
-from torchtitan.models.common.mtp import get_mtp_token_counts
 
 
 # Page-locked microbatches let the trainer issue an async host-to-device copy; a copy
@@ -61,68 +65,44 @@ class TextCollator(Collator):
         self._num_mtp_layers = context.num_mtp_layers
 
     def __call__(self, rows: Sequence[TextSequence]) -> TokenizedTrainingMicrobatch:
-        num_tokens = sum(len(row.input_ids) for row in rows)
-        if num_tokens > self._num_tokens_per_microbatch:
-            raise ValueError("text rows exceed the configured token microbatch")
-
-        size = self._num_tokens_per_microbatch
-        input_ids = torch.zeros(size, dtype=torch.int64, pin_memory=HAS_PIN_MEMORY)
-        positions = torch.zeros(size, dtype=torch.int64, pin_memory=HAS_PIN_MEMORY)
-        labels = torch.full(
-            (size,), IGNORE_INDEX, dtype=torch.int64, pin_memory=HAS_PIN_MEMORY
+        packed = pack_microbatch_fields(
+            {
+                "input_ids": [row.input_ids for row in rows],
+                "labels": [row.labels for row in rows],
+                "positions": [
+                    (
+                        np.arange(len(row.input_ids))
+                        if row.positions is None
+                        else row.positions
+                    )
+                    for row in rows
+                ],
+                "padding_mask": [
+                    (
+                        np.zeros(len(row.input_ids), dtype=np.bool_)
+                        if row.padding_mask is None
+                        else row.padding_mask
+                    )
+                    for row in rows
+                ],
+            },
+            num_tokens=self._num_tokens_per_microbatch,
+            max_context_length=self._max_context_length,
+            fill_values={"input_ids": 0, "labels": IGNORE_INDEX},
+            dtypes={"input_ids": torch.int64, "labels": torch.int64},
+            pin_memory=HAS_PIN_MEMORY,
         )
-        padding_mask = torch.ones(size, dtype=torch.bool, pin_memory=HAS_PIN_MEMORY)
-
-        torch.cat(
-            [torch.as_tensor(row.input_ids) for row in rows],
-            out=input_ids[:num_tokens],
-        )
-        torch.cat(
-            [torch.as_tensor(row.labels) for row in rows],
-            out=labels[:num_tokens],
-        )
-        torch.cat(
-            [
-                (
-                    torch.arange(len(row.input_ids))
-                    if row.positions is None
-                    else torch.as_tensor(row.positions)
-                )
-                for row in rows
-            ],
-            out=positions[:num_tokens],
-        )
-        torch.cat(
-            [
-                (
-                    torch.zeros(len(row.input_ids), dtype=torch.bool)
-                    if row.padding_mask is None
-                    else torch.as_tensor(row.padding_mask, dtype=torch.bool)
-                )
-                for row in rows
-            ],
-            out=padding_mask[:num_tokens],
-        )
-
-        pad_len = self._num_tokens_per_microbatch - num_tokens
-        if pad_len:
-            torch.arange(pad_len, out=positions[num_tokens:])
-            positions[num_tokens:].remainder_(self._max_context_length)
-
-        target_mask = labels != IGNORE_INDEX
-        loss_token_counts, routing_token_counts = get_mtp_token_counts(
-            target_mask=target_mask,
-            positions=positions,
-            padding_mask=padding_mask,
+        loss_token_counts, routing_token_counts = get_microbatch_token_counts(
+            target_mask=packed["labels"] != IGNORE_INDEX,
+            positions=packed["positions"],
+            padding_mask=packed["padding_mask"],
             num_mtp_layers=self._num_mtp_layers,
         )
-        if self._num_mtp_layers == 0:
-            loss_token_counts = loss_token_counts[0]
         return TokenizedTrainingMicrobatch(
-            input=input_ids,
-            labels=labels,
-            positions=positions,
-            padding_mask=padding_mask,
+            input=packed["input_ids"],
+            labels=packed["labels"],
+            positions=packed["positions"],
+            padding_mask=packed["padding_mask"],
             loss_token_counts=loss_token_counts,
             routing_token_counts=routing_token_counts,
         )
