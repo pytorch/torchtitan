@@ -116,25 +116,40 @@ def _hash_tensor(tensor: torch.Tensor) -> torch.Tensor:
         return torch.zeros((), dtype=torch.int64, device=local.device)
     if local.layout == torch.sparse_coo:
         coalesced = local.coalesce()
-        # XOR of the indices and values separately misses swaps between rows.
-        # Read the stored bits in words of up to 32 bits, including for complex
-        # values. Packing smaller dtypes in their own word handles odd lengths.
-        word_dtype = {1: torch.uint8, 2: torch.int16}.get(
-            coalesced.values().element_size(), torch.int32
+        indices, values = coalesced.indices(), coalesced.values()
+        digest = torch.zeros((), dtype=torch.int64, device=local.device)
+        if values.numel() == 0:
+            return digest
+        word_size = min(values.element_size(), 4)
+        word_dtype = {1: torch.uint8, 2: torch.int16, 4: torch.int32}[word_size]
+        num_words = sum(
+            part.numel() * (part.element_size() // word_size)
+            for part in (indices, values)
         )
-        words = torch.cat(
-            [
-                part.clone(memory_format=torch.contiguous_format)
-                .view(-1)
-                .view(word_dtype)
-                for part in (coalesced.indices(), coalesced.values())
-            ]
-        )
-        # Powers of the 64-bit FNV prime weight each position modulo 2**64.
-        weights = torch.full_like(words, 0x100000001B3, dtype=torch.int64).cumprod(0)
+        # Weight stored bits by position. Row-wise XOR loses column order and
+        # can give two different rows the same digest before mixing their indices.
+        prime = 0x100000001B3
+        block_words = min(num_words, 256 * 1024)
+        weights = torch.full(
+            (block_words,), prime, dtype=torch.int64, device=local.device
+        ).cumprod_(0)
+        offset = 0
+        for part in (indices, values):
+            flat = part.resolve_conj().resolve_neg().reshape(-1)
+            if flat.stride(0) != 1:
+                flat = flat.clone(memory_format=torch.contiguous_format)
+            words = flat.view(word_dtype)
+            for start in range(0, words.numel(), block_words):
+                block = words[start : start + block_words]
+                # Reuse the weights and advance their exponent modulo 2**64.
+                scale = pow(prime, offset, 1 << 64)
+                if scale >= 1 << 63:
+                    scale -= 1 << 64
+                digest.add_((block * weights[: block.numel()]).sum() * scale)
+                offset += block.numel()
         # Include the index count to distinguish identical words split at a
         # different boundary between coordinates and values.
-        return weights.mul_(words).sum() + words.numel() + coalesced.indices().numel()
+        return digest + num_words + indices.numel()
     if local.is_complex():
         # for RoPE caches
         local = torch.view_as_real(local)

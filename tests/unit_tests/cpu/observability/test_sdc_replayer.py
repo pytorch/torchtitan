@@ -313,6 +313,17 @@ def test_sparse_hash_distinguishes_coordinates_from_values():
     assert _hash_tensor(row).item() != _hash_tensor(scalar).item()
 
 
+def test_sparse_hash_detects_a_swap_at_the_same_offset_in_two_blocks():
+    values = torch.zeros((1, 256 * 1024 + 1))
+    values[0, 0], values[0, -1] = 1.0, 2.0
+    indices = torch.tensor([[1]])
+    shape = (2, values.shape[1])
+    original = torch.sparse_coo_tensor(indices, values, shape)
+    swapped = torch.sparse_coo_tensor(indices, values.flip(dims=(1,)), shape)
+
+    assert _hash_tensor(original).item() != _hash_tensor(swapped).item()
+
+
 def test_complex_tensor_hash_uses_real_view():
     value = torch.tensor([1 + 2j, 3 + 4j], dtype=torch.complex64)
 
