@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Debug-model and CI recipes for the alphabet-sort example.
+"""Debug-model, CI and unverified recipes for the alphabet-sort example.
 
 These configurations exercise RL code paths in CI with small debug models or
-test-only overrides. They are not recommendations for production training;
-verified recipes live in ``torchtitan_recipes.rl.alphabet_sort``.
+test-only overrides, or wait for convergence runs before they move to the verified
+recipes. They are not recommendations for production training; verified recipes live
+in ``torchtitan_recipes.rl.alphabet_sort``.
 """
 
 import dataclasses
@@ -56,7 +57,7 @@ from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.trainer.batcher import Batcher
-from torchtitan.rl.trainer.losses import GRPOLoss
+from torchtitan.rl.trainer.losses import CISPOLoss, DPPOLoss, GRPOLoss, IcePopLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
@@ -79,6 +80,35 @@ def rl_grpo_qwen3_0_6b_varlen_checkpoint_test(
     assert config.trainer.checkpointer is not None
     config.trainer.checkpointer.interval = 2
     config.trainer.optim.lr_scheduler.total_steps = 4
+    return config
+
+
+def rl_dppo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_varlen`` with ``DPPOLoss`` (6 GPUs: 4 gen + 2 train)."""
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.trainer.loss.loss_fn = DPPOLoss.Config(
+        global_vocab_size=config.trainer.loss.loss_fn.global_vocab_size
+    )
+    return config
+
+
+def rl_cispo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_varlen`` with truncated-IS REINFORCE (``CISPOLoss``) (6 GPUs:
+    4 gen + 2 train)."""
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.trainer.loss.loss_fn = CISPOLoss.Config(
+        global_vocab_size=config.trainer.loss.loss_fn.global_vocab_size
+    )
+    return config
+
+
+def rl_icepop_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_varlen`` with masked-IS REINFORCE (``IcePopLoss``) (6 GPUs:
+    4 gen + 2 train)."""
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.trainer.loss.loss_fn = IcePopLoss.Config(
+        global_vocab_size=config.trainer.loss.loss_fn.global_vocab_size
+    )
     return config
 
 
