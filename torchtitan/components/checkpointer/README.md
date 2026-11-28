@@ -115,6 +115,21 @@ On GCS, use a bucket with hierarchical namespace (HNS). On a flat bucket a check
 committed by copying each object, so a job preempted mid-commit can leave a `step-N` that
 resume selects and fails to load.
 
+## Saving over an existing checkpoint with `TorchCheckpointingManager`
+
+A save to a path that already holds a checkpoint replaces it: a seed checkpoint saved
+again, a final export a relaunch reaches again, or a step past the point a run resumed
+from. The old checkpoint is deleted only after every rank has written the new one, but a
+save interrupted while deleting it leaves that path without a loadable checkpoint until
+it is saved again. If it was the only checkpoint, such as a seed `step-0`, the next run
+starts from scratch.
+
+An HF export rerun replaces `sharded/` and overwrites the consolidated files by name:
+- If the rerun fails, rerun it. Until it completes, the export directory can hold a mix of
+  old and new files.
+- A rerun that writes a different number of shard files leaves the old shard files next
+  to the new ones. The new `model.safetensors.index.json` names only the new files.
+
 ## Leaving base weights out of checkpoints
 `checkpointer.model_param_checkpoint_type_map` is a `CallableFunction.Config` whose function maps a parameter's canonical FQN to a `ParamCheckpointType`: where the parameter is loaded from and saved to. It requires a base: `initial_load_path`, or `hf_assets_path` with `initial_load_in_hf=True`.
 

@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import unittest
 import uuid
+import warnings
 from concurrent.futures import Future
 from contextlib import nullcontext
 from pathlib import Path
@@ -143,7 +144,44 @@ class _StateDictAdapter:
         return {"weight": state_dict["hf_weight"]}
 
 
+class _TwoFileStateDictAdapter:
+    """Exports a two-layer model as two HF tensors in two files."""
+
+    def __init__(self) -> None:
+        self.fqn_to_index_mapping = {"w1": 1, "w2": 2}
+        self.hf_assets_path = None
+
+    def to_hf(self, state_dict):
+        return {"w1": state_dict["0.weight"], "w2": state_dict["1.weight"]}
+
+    def from_hf(self, state_dict):
+        return {"0.weight": state_dict["w1"], "1.weight": state_dict["w2"]}
+
+
+def _two_layer_model(value: float) -> nn.Module:
+    model = nn.Sequential(nn.Linear(2, 2, bias=False), nn.Linear(2, 2, bias=False))
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.fill_(value)
+    return model
+
+
 class TorchCheckpointingManagerTest(unittest.TestCase):
+    def _real_manager(
+        self, base_folder: str, model: nn.Module, sd_adapter=None, **overrides
+    ) -> TorchCheckpointingManager:
+        """A manager on the real torch_checkpointing backend."""
+        overrides.setdefault("keep_latest_k", 0)
+        return TorchCheckpointingManager.Config(**overrides).build(
+            model_parts=[model],
+            optimizers=_Stateful("optimizer"),
+            lr_schedulers=_Stateful("scheduler"),
+            ema=None,
+            extra_states={"train_state": _Stateful("train")},
+            sd_adapter=sd_adapter,
+            base_folder=base_folder,
+        )
+
     def _build_manager(
         self,
         config: TorchCheckpointingManager.Config,
@@ -467,6 +505,85 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             loader.close()
         torch.testing.assert_close(restored.weight, saved.weight)
 
+    def test_final_export_rerun_replaces_the_export(self) -> None:
+        """A relaunch that reaches the final step again replaces its export."""
+        with tempfile.TemporaryDirectory() as base_folder:
+            for value in (1.0, 3.0):
+                manager = self._real_manager(base_folder, _two_layer_model(value))
+                try:
+                    self.assertTrue(manager.save(curr_step=5, last_step=True))
+                finally:
+                    manager.close()
+
+            restored = _two_layer_model(-1.0)
+            with tempfile.TemporaryDirectory() as other_base_folder:
+                loader = self._real_manager(
+                    other_base_folder,
+                    restored,
+                    initial_load_path=os.path.join(
+                        base_folder, "checkpoint", "exports", "step-5"
+                    ),
+                )
+                try:
+                    self.assertTrue(loader.load())
+                finally:
+                    loader.close()
+            for layer in restored:
+                torch.testing.assert_close(layer.weight, torch.full((2, 2), 3.0))
+
+    def _hf_export(
+        self, base_folder: str, value: float, adapter: _TwoFileStateDictAdapter
+    ) -> None:
+        manager = self._real_manager(
+            base_folder,
+            _two_layer_model(value),
+            adapter,
+            initial_load_model_only=False,
+            last_save_in_hf=True,
+        )
+        try:
+            manager.save(curr_step=5, last_step=True)
+        finally:
+            manager.close()
+
+    def _hf_load(
+        self, base_folder: str, export: str, adapter: _TwoFileStateDictAdapter
+    ) -> nn.Module:
+        restored = _two_layer_model(-1.0)
+        loader = self._real_manager(
+            base_folder,
+            restored,
+            adapter,
+            initial_load_in_hf=True,
+            initial_load_path=export,
+        )
+        try:
+            loader.load()
+        finally:
+            loader.close()
+        return restored
+
+    def test_hf_export_rerun_replaces_the_previous_export(self) -> None:
+        """An HF export rerun at the same step replaces the previous export
+        instead of failing on the existing sharded/."""
+        with tempfile.TemporaryDirectory() as base_folder:
+            export = os.path.join(base_folder, "checkpoint", "exports", "step-5")
+            adapter = _TwoFileStateDictAdapter()
+            self._hf_export(base_folder, 1.0, adapter)
+            self._hf_export(base_folder, 3.0, adapter)
+
+            self.assertEqual(
+                [
+                    "model-00001-of-00002.safetensors",
+                    "model-00002-of-00002.safetensors",
+                    "model.safetensors.index.json",
+                    "sharded",
+                ],
+                sorted(os.listdir(export)),
+            )
+            for layer in self._hf_load(base_folder, export, adapter):
+                torch.testing.assert_close(layer.weight, torch.full((2, 2), 3.0))
+
     def test_save_obeys_cadence_and_tracks_backend_future(self) -> None:
         config = TorchCheckpointingManager.Config(
             interval=3,
@@ -539,10 +656,15 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             load_only=True,
         )
 
-        manager, _ = self._build_manager(config)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            manager, _ = self._build_manager(config)
 
         self.assertIsInstance(manager._manager_config.save, SyncCheckpointSaverConfig)
         self.assertIsNone(manager._manager_config.save.writer_config.barrier_config)
+        self.assertEqual(
+            [], [w for w in caught if "write_to_temp_dir" in str(w.message)]
+        )
         manager.close()
 
     def test_async_mode_selects_the_backend_saver(self) -> None:
