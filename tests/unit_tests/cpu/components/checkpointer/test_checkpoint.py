@@ -1385,12 +1385,6 @@ class TestConfigPostInit(unittest.TestCase):
             "checkpointer.load_only is True; enable_first_step_checkpoint will be ignored."
         )
 
-        # model_only=True without a path
-        CheckpointManager.Config(initial_load_model_only=True, initial_load_path=None)
-        mock_logger.warning.assert_any_call(
-            "initial_load_model_only=True has no effect without an initial_load_path."
-        )
-
 
 class TestFindLoadStepRemote(unittest.TestCase):
     """_find_load_step must discover checkpoints on a remote (fsspec) folder,

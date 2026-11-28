@@ -192,7 +192,7 @@ class StateDictAdapter(BaseStateDictAdapter):
                 with open(mapping_path, "r") as f:
                     hf_safetensors_indx = json.load(f)
             except FileNotFoundError:
-                logger.warning(
+                logger.info(
                     f"model.safetensors.index.json not found at hf_assets_path: {mapping_path}. \
                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format"
                 )

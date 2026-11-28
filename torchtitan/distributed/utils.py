@@ -434,8 +434,9 @@ def _init_real_pp_fake_spmd(
 
 
 def _warn_overwrite_env(name: str, value: str) -> None:
-    if name in os.environ:
-        logger.warning("%s=%s will be overridden to %s.", name, os.environ[name], value)
+    old = os.environ.get(name)
+    if old is not None and old != value:
+        logger.warning("%s=%s will be overridden to %s.", name, old, value)
     os.environ[name] = value
 
 
@@ -626,7 +627,12 @@ def init_distributed(
     # to get flight recorder dumps. See https://github.com/pytorch/pytorch/issues/121055
     # This could be done only when flight recorder is enabled, but its nice to be consistent to avoid subtle
     # behavior differences
-    _warn_overwrite_env(ASYNC_ERROR_HANDLING, SKIP_CLEANUP)
+    # torchrun sets TORCH_NCCL_ASYNC_ERROR_HANDLING=1 when it is unset, so "1"
+    # from any source is treated as that default and overridden silently.
+    if os.environ.get(ASYNC_ERROR_HANDLING) == "1":
+        os.environ[ASYNC_ERROR_HANDLING] = SKIP_CLEANUP
+    else:
+        _warn_overwrite_env(ASYNC_ERROR_HANDLING, SKIP_CLEANUP)
 
     # enable torch nccl flight recorder in the mode that would dump files if timeout is detected
     _warn_overwrite_env(TRACE_BUFFER_SIZE, str(comm_config.trace_buf_size))
