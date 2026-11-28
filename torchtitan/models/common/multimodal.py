@@ -27,6 +27,7 @@ from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
 
 from .decoder import Decoder
+from .rope import RoPE
 
 
 class MultimodalModel(Decoder):
@@ -53,6 +54,14 @@ class MultimodalModel(Decoder):
                     f"{owner.multimodal_encoder_fqns}; use the model family's "
                     "text-only Decoder for a model without encoders."
                 )
+
+        @property
+        def uses_mrope_positions(self) -> bool:
+            """True when the full-attention RoPE is M-RoPE (e.g. Qwen3.5's); else image tokens
+            take 1D positions, like text."""
+            # MLA attention configs (e.g. DeepSeek V3, Kimi K3) have no ``rope`` field.
+            rope = getattr(self.first_full_attention, "rope", None)
+            return isinstance(rope, RoPE.Config) and rope.takes_mrope_positions
 
         def build_flops_estimator(
             self,

@@ -155,6 +155,7 @@ class TestPackedVision(unittest.TestCase):
             max_context_length=4,
             num_mtp_layers=0,
             vision_processor=None,
+            build_mrope_positions=False,
         )
         collator = MultiModalCollator.Config().build(context=context)
         batch = [
@@ -185,6 +186,7 @@ class TestPackedVision(unittest.TestCase):
             max_context_length=4,
             num_mtp_layers=0,
             vision_processor=None,
+            build_mrope_positions=False,
         )
         collator = MultiModalCollator.Config().build(context=context)
         batch = [
@@ -223,6 +225,7 @@ class TestPackedVision(unittest.TestCase):
                 max_context_length=0,
                 num_mtp_layers=0,
                 vision_processor=vision_processor,
+                build_mrope_positions=False,
             )
         )
         # Three frames at two frames per temporal patch are two vision entries.

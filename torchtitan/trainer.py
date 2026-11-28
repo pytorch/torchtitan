@@ -227,6 +227,7 @@ class Trainer(Configurable):
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
             vision_processor=self.vision_processor,
+            build_mrope_positions=config.model.uses_mrope_positions,
             dp_ranks=dp_ranks,
         )
 
@@ -282,6 +283,7 @@ class Trainer(Configurable):
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
                 vision_processor=self.vision_processor,
+                build_mrope_positions=config.model.uses_mrope_positions,
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,

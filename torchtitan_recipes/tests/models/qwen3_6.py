@@ -59,7 +59,7 @@ def qwen36_debugmodel(
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=MultiModalCollator.Config(build_mrope_positions=True),
+            collator=MultiModalCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(
@@ -122,7 +122,7 @@ def qwen36_debugmodel_moe(
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=MultiModalCollator.Config(build_mrope_positions=True),
+            collator=MultiModalCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(
@@ -162,7 +162,7 @@ def qwen36_27b(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=MultiModalCollator.Config(build_mrope_positions=True),
+            collator=MultiModalCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(
@@ -202,7 +202,7 @@ def qwen36_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=MultiModalCollator.Config(build_mrope_positions=True),
+            collator=MultiModalCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(

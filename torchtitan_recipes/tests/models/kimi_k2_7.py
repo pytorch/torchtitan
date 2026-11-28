@@ -66,7 +66,6 @@ def _kimi_multimodal_dataloader(
         dataset=dataset,
         collator=MultiModalCollator.Config(
             max_images_per_microbatch=128,
-            build_mrope_positions=False,
         ),
     )
 

@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
-import dataclasses
 import io
 import os
 
@@ -142,21 +141,8 @@ def test_recipe_vision_processor_matches_vision_encoder() -> None:
 
 
 def test_recipe_gives_image_tokens_the_positions_its_model_takes() -> None:
-    """The training batch builder gives the trainer M-RoPE positions exactly when the model takes them, as
-    the generator does; Controller.Config rejects a mismatch."""
+    """The training batch builder gives the trainer M-RoPE positions exactly when the model
+    takes them, as the generator does."""
     from torchtitan_recipes.rl.geometry3k import rl_grpo_qwen3_5_0_8b_geometry3k
 
-    config = rl_grpo_qwen3_5_0_8b_geometry3k()
-    training_batch_builder = config.async_loop.training_batch_builder
-
-    assert training_batch_builder.build_mrope_positions
-    with pytest.raises(ValueError, match="build_mrope_positions=False.*M-RoPE"):
-        dataclasses.replace(
-            config,
-            async_loop=dataclasses.replace(
-                config.async_loop,
-                training_batch_builder=dataclasses.replace(
-                    training_batch_builder, build_mrope_positions=False
-                ),
-            ),
-        )
+    assert rl_grpo_qwen3_5_0_8b_geometry3k().trainer.model.uses_mrope_positions

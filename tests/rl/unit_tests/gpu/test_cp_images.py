@@ -247,9 +247,8 @@ def _global_token_index(trainer: Trainer, layout: str) -> torch.Tensor:
 
 
 def _training_batch_builder() -> TrainingBatchBuilder:
-    return TrainingBatchBuilder.Config(
-        build_mrope_positions=True, rdma_min_tensor_bytes=None
-    ).build(
+    return TrainingBatchBuilder.Config(rdma_min_tensor_bytes=None).build(
+        build_mrope_positions=True,
         num_tokens_per_microbatch_per_dp_rank=SEQ_LEN,
         max_context_length=SEQ_LEN,
         num_prompts_per_train_step=1,

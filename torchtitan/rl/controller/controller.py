@@ -115,7 +115,6 @@ from torchtitan.config import (
 )
 from torchtitan.config.format import format_config
 from torchtitan.models.common.multimodal import MultimodalModel
-from torchtitan.models.qwen3_5.rope import get_mrope_config
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -545,19 +544,6 @@ class Controller(Configurable):
                         f"({type(generator_model).__qualname__}) is not a multimodal "
                         "model with a vision encoder."
                     )
-                # The generator gives image tokens M-RoPE positions exactly when the model
-                # uses M-RoPE; the training batch builder must give the trainer the same.
-                uses_mrope = get_mrope_config(self.trainer.model) is not None
-                if (
-                    self.async_loop.training_batch_builder.build_mrope_positions
-                    != uses_mrope
-                ):
-                    raise ValueError(
-                        "async_loop.training_batch_builder.build_mrope_positions="
-                        f"{self.async_loop.training_batch_builder.build_mrope_positions}, but the trainer "
-                        f"model's image tokens take {'M-RoPE' if uses_mrope else '1D'} "
-                        f"positions; set it to {uses_mrope}."
-                    )
 
             # TODO: add a check so that all seq_len related variables make sense
             # e.g. rollout max length cannot be larger than the model max_seq_len
@@ -918,6 +904,7 @@ class Controller(Configurable):
                 temperature=self._sampling.temperature,
                 num_topk_logprobs=config.num_topk_logprobs,
                 max_kept_set_size=config.max_kept_set_size,
+                build_mrope_positions=config.trainer.model.uses_mrope_positions,
                 output_dir=config.dump_folder,
                 enable_structured_logging=config.trainer.debug.enable_structured_logging,
                 vision_processor=config.vision_processor,

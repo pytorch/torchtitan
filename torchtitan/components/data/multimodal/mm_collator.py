@@ -46,7 +46,6 @@ class MultiModalCollator(Collator):
         """
 
         max_images_per_microbatch: int = 128
-        build_mrope_positions: bool = False
         waveform_pad_multiple: int | None = None
         audio_input_channels: int | None = None
 
@@ -70,7 +69,7 @@ class MultiModalCollator(Collator):
         self.max_images_per_microbatch = config.max_images_per_microbatch
         self.vision_processor = context.vision_processor
         if (
-            config.build_mrope_positions
+            context.build_mrope_positions
             and self.vision_processor is not None
             and self.vision_processor.config.patch_order != "block"
         ):
@@ -81,7 +80,7 @@ class MultiModalCollator(Collator):
                 f"{self.vision_processor.config.patch_order!r}."
             )
         self.tokenizer = cast(MultiModalTokenizer, context.tokenizer)
-        self.build_mrope_positions = config.build_mrope_positions
+        self.build_mrope_positions = context.build_mrope_positions
         self.waveform_pad_multiple = config.waveform_pad_multiple
         self.audio_input_channels = config.audio_input_channels
 

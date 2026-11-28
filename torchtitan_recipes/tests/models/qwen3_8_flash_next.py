@@ -106,7 +106,7 @@ def qwen38_flash_next_debugmodel_mm() -> Trainer.Config:
         vision_processor=VisionProcessor.Config(**QWEN3_8_VISION_PROCESSOR_KWARGS),
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=MultiModalCollator.Config(build_mrope_positions=True),
+            collator=MultiModalCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(

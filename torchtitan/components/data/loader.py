@@ -122,6 +122,7 @@ class GrainDataLoader(BaseDataLoader):
         max_context_length: int,
         num_tokens_per_microbatch: int,
         vision_processor: VisionProcessor | None = None,
+        build_mrope_positions: bool = False,
         dp_ranks: Sequence[int] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -152,6 +153,7 @@ class GrainDataLoader(BaseDataLoader):
             num_mtp_layers=config.num_mtp_layers,
             per_sample_pad_multiple=config.per_sample_pad_multiple,
             vision_processor=vision_processor,
+            build_mrope_positions=build_mrope_positions,
         )
         dataset_iteration_policy = DatasetIterationPolicy(
             seed=config.seed,

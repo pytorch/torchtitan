@@ -230,7 +230,6 @@ def muse_spark_mm_dataloader(
         dataset=dataset,
         collator=MultiModalCollator.Config(
             max_images_per_microbatch=8,
-            build_mrope_positions=False,
             waveform_pad_multiple=(
                 None if audio_encoder is None else audio_encoder.patch_size
             ),

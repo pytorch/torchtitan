@@ -405,7 +405,7 @@ def _muse_glimmer_30b_slake_sft(variant: _SlakeVariant) -> Trainer.Config:
     )
     loader = GrainDataLoader.Config(
         dataset=dataset,
-        collator=MultiModalCollator.Config(build_mrope_positions=False),
+        collator=MultiModalCollator.Config(),
     )
     _use_slake_sft_data(
         config,
