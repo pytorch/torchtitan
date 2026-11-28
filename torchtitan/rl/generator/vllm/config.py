@@ -44,9 +44,11 @@ class VLLMCudaGraphConfig:
 
     - ``"NONE"``: disable compilation and CUDA graph capture.
     - ``"FULL_DECODE_ONLY"``: graph pure-decode batches; prefill / mixed
-      batches run eager. Cheap (no inductor compile).
+      batches run eager. Cheap (no inductor compile). With MTP drafts, the
+      drafter runs eagerly too.
     - ``"FULL"`` (default): graph the whole forward, prefill included, attention
-      captured too.
+      captured too. With MTP drafts, the drafter replays piecewise graphs: its
+      attention runs eagerly between graph pieces (see ``get_vllm_compilation_config``).
     """
 
     capture_sizes: list[int] | None = None
@@ -105,6 +107,13 @@ class VLLMCudaGraphConfig:
 
         All modes capture with ``mode=CompilationMode.NONE`` to avoid nesting
         vLLM's Inductor compile with TorchTitan local compile.
+
+        ``FULL`` with drafts (k > 0) needs vLLM's breakable CUDA graphs for the drafter
+        (``uses_breakable_cuda_graphs``; ``VLLMEngine`` turns them on):
+
+            verify-only step (every row verifies k drafts)   FULL verify graph
+            step with prefill                                FULL mixed graph
+            MTP drafter                                      piecewise graph, attention eager
         """
         if self.mode == "NONE":
             return CompilationConfig(
@@ -176,6 +185,11 @@ class VLLMCudaGraphConfig:
                 sp_min_token_num=1 if enable_sequence_parallel else None,
             ),
         )
+
+    def uses_breakable_cuda_graphs(self, num_speculative_tokens: int) -> bool:
+        """``FULL`` with MTP drafts: the drafter's piecewise graphs run on vLLM's breakable
+        CUDA graphs (see ``get_vllm_compilation_config``)."""
+        return self.mode == "FULL" and num_speculative_tokens > 0
 
 
 def _default_capture_sizes(cap: int, max_decode_tokens: int) -> list[int]:
