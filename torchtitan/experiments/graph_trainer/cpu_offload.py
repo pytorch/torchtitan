@@ -52,6 +52,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _NOT_IN_LAYERS,
 )
+from torchtitan.experiments.graph_trainer.mutation_utils import mutation_deps
 
 logger = logging.getLogger(__name__)
 
@@ -544,6 +545,7 @@ def apply_cpu_offload_pass(
         return gm
 
     # 3. Insert offload/reload/wait_tensor ops.
+    writes_by_base = mutation_deps(gm.graph)
     total_bytes = 0
     wait_offload_map: dict[Node, Node] = {}
 
@@ -560,8 +562,16 @@ def apply_cpu_offload_pass(
         # that tlparse/graph dumps show stacktraces and module_fqn.
         src_meta = {k: v for k, v in node.meta.items() if k not in ("val", "recompute")}
 
-        # --- Forward: async GPU->CPU offload right after production ---
-        with gm.graph.inserting_after(node):
+        # --- Forward: async GPU->CPU offload after the last forward write ---
+        # ao.offload snapshots the tensor when it runs, so it must follow any
+        # in-place write into this storage (e.g. through a view); otherwise
+        # backward reloads the pre-write value. Without writes this is right
+        # after production.
+        forward_writes = [
+            w for w in writes_by_base.get(node, []) if not _is_backward_node(w)
+        ]
+        offload_anchor = forward_writes[-1] if forward_writes else node
+        with gm.graph.inserting_after(offload_anchor):
             offload_node = gm.graph.call_function(
                 torch.ops.ao.offload.default,
                 args=(node,),
