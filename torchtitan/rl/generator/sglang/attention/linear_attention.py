@@ -203,12 +203,9 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
         (a) on SGLang's draft runners (MTP), as with SGLang's own GDN backend;
         (b) under attention DP > 1.
         """
-        # TODO: capture the extend under attention DP too. SGLang replays prefill graphs
-        # there only on steps where no DP rank decodes (a decoding rank votes against
-        # them for SSM models). Mask an idle rank's made-up request (rows past
-        # ForwardBatch._original_batch_size), as SGLang's GDN backend does. Needs a
-        # DP 2 test: no GDN class runs at attention DP, and the KDA DP-EP class runs
-        # no CUDA graphs.
+        # TODO: capture the extend under attention DP too: mask an idle rank's made-up
+        # request (rows past ForwardBatch._original_batch_size) and add a DP 2 test.
+        # SGLang replays prefill graphs there only on steps where no DP rank decodes.
         return not self.is_draft_worker and get_parallel().attn_dp_size == 1
 
     def prefill_graph_extend_active(self) -> bool:
