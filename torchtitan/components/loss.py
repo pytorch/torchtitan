@@ -966,7 +966,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
 
                     if run_backward:
                         with spmd.no_typecheck():
-                            chunk_loss.backward()
+                            self._backward_chunk(chunk_loss)
                             if decoder_requires_grad:
                                 for h_chunk, grad_accumulator in zip(
                                     h_chunks, grad_accumulators, strict=True
@@ -976,9 +976,8 @@ class ChunkedLossWrapper(Loss[LossInput]):
                                     h_chunk.grad = None
 
             metrics = combine_loss_metrics(chunk_metrics_list)
-            if not decoder_requires_grad:
-                # Scaling this leaf cannot rescale already accumulated head gradients.
-                return total_loss.requires_grad_(run_backward), metrics
+            if not run_backward:
+                return total_loss, metrics
 
             accumulated_grads = tuple(
                 grad_accumulator.buffer for grad_accumulator in grad_accumulators
@@ -986,11 +985,15 @@ class ChunkedLossWrapper(Loss[LossInput]):
 
         with spmd.no_typecheck():
             loss = self._gradient_backprop(
-                pred,
+                pred if decoder_requires_grad else (),
                 accumulated_grads,
                 total_loss,
             )
         return loss, metrics
+
+    def _backward_chunk(self, loss: torch.Tensor) -> None:
+        """Backpropagate one chunk before releasing its intermediates."""
+        loss.backward()
 
     def _gradient_backprop(
         self,
@@ -1005,6 +1008,9 @@ class ChunkedLossWrapper(Loss[LossInput]):
         propagating through the decoder. Subclasses override to swap in a
         different autograd Function.
         """
+        if not hidden_states:
+            # Backward already accumulated head gradients for a frozen decoder.
+            return total_loss.requires_grad_()
         return _DecoderOutputGradientBackProp.apply(
             len(hidden_states),
             *hidden_states,

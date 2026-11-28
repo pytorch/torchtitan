@@ -45,6 +45,57 @@ MODULE=torchtitan_recipes.graph_trainer.qwen3 CONFIG=graph_trainer_qwen3_14b ./r
 
 ### Configuring Parallelism
 
+#### Chunked-loss gradient synchronization
+
+`ChunkedLossWrapperWithParamGrads` accumulates SimpleFSDP LM-head gradients
+locally across chunks. Parameters are unsharded once per loss invocation, and
+the outer backward reduces each used parameter's accumulated gradient once.
+This behavior is expressed in the model's autograd graph and needs no RS
+coalescing pass or compiler flag. Existing head forwards, including their
+compute dtype and quantized operands, remain in use.
+
+Accumulation and the SimpleFSDP unshard edge use the configured reduction
+dtype for gradients. The all-gather uses the parameter communication dtype.
+This changes the floating-point reduction order and requires an additional
+full-size gradient buffer. Benchmark both peak memory and step time.
+
+State is scoped to one loss invocation and restored on exceptions. GraphPP's
+already-unsharded tracing path continues to bypass SimpleFSDP parametrization;
+the pipeline schedule retains control of cross-microbatch reductions. This
+change does not modify eager FSDP2's synchronization policy.
+
+From the repository root, with the repository dependencies and a compatible
+PyTorch nightly installed, run:
+
+```bash
+python -m pytest -q \
+  torchtitan/experiments/graph_trainer/tests/test_chunked_loss.py \
+  torchtitan/experiments/graph_trainer/tests/test_chunked_loss_model.py
+
+CHUNKED_LOSS_TEST_DEVICE=cuda torchrun --standalone --nproc-per-node=2 \
+  -m torchtitan.experiments.graph_trainer.tests.test_chunked_loss_model -v
+```
+
+The distributed tests compare loss and gradients against per-chunk
+synchronization, exercise FSDP/DDP/HSDP, FP32/BF16, bias, multiple outputs, loss scaling,
+microbatch accumulation, validation, frozen parameters, and exception/nesting
+cleanup. They trace the raw forward/backward graph without optimization passes:
+for a single weight on multiple DP ranks, 1, 4, and 8 chunks must all produce
+one all-gather and one FP32 reduce-scatter, followed by correct replay after
+parameter updates. The same command can use four ranks. The default device is
+CPU/Gloo, allowing the distributed checks to run without GPUs.
+
+For integration coverage on the GPU environment, also run:
+
+```bash
+python -m pytest -q \
+  torchtitan/experiments/graph_trainer/tests/test_trace_module.py -k chunked_loss
+python -m pytest -q \
+  torchtitan/experiments/graph_trainer/tests/test_graph_pp_runner.py -k chunked_loss
+```
+
+#### Parallelism recipes
+
 Put parallelism choices in a recipe. For example:
 
 ```python

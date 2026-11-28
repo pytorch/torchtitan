@@ -48,11 +48,12 @@ FSDP_MESH_AXIS_NAMES_META = "fsdp_mesh_axis_names"
 @contextmanager
 def disable_active_parametrization() -> Generator[None, None, None]:
     global _active_parametrization
+    previous = _active_parametrization
     try:
         _active_parametrization = False
         yield
     finally:
-        _active_parametrization = True
+        _active_parametrization = previous
 
 
 @dataclass(frozen=True)
@@ -224,8 +225,10 @@ def _register_parametrization(
     if not param_names:
         return
     param_name_to_property = {}
+    parametrizations = {}
     for param_name in param_names:
         parametrization = parametrization_init(param_name)
+        parametrizations[param_name] = parametrization
         param_name_to_property[param_name] = property(
             lambda self, pn=param_name, p=parametrization: p(self._parameters[pn])
         )
@@ -238,6 +241,92 @@ def _register_parametrization(
     # so that pickle/GraphPickler can resolve it during serialization.
     sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
     module.__class__ = module_cls
+    # Keep this out of the module hierarchy/state_dict, like the property
+    # closures above. It gives scoped users access to these parametrizations.
+    module.__dict__["_simple_fsdp_parametrizations"] = parametrizations
+
+
+@dataclass
+class _LocalParameterGradient:
+    unsharded: torch.Tensor
+    local: torch.Tensor
+    gradient_dtype: torch.dtype
+    gradient: torch.Tensor | None = None
+
+
+class LocalGradientAccumulation:
+    """One chunked call's parameters and locally accumulated gradients.
+
+    Each parameter is unsharded once. Chunk backward stops at a detached
+    compute parameter; ``accumulate`` drains its gradient into an owned buffer
+    in the reduction dtype. The caller returns that buffer to ``unsharded``
+    through an autograd bridge, traversing the reduction edge only once.
+    """
+
+    def __init__(self) -> None:
+        self.parameters: dict[ReplicateComputation, _LocalParameterGradient] = {}
+
+    def get_parameter(
+        self, parametrization: "ReplicateComputation", parameter: DTensor
+    ) -> torch.Tensor:
+        if parametrization not in self.parameters:
+            gradient_dtype = parametrization.reduce_dtype or parameter.dtype
+            unsharded = parametrization.replicate_compute(parameter)
+            # Retain the original head's compute dtype and tensor subclass.
+            # No per-chunk backward may enter the unshard graph.
+            with torch.no_grad():
+                compute = unsharded
+                source = parameter._local_tensor
+                if isinstance(source, _ShardedFSDPTensor):
+                    compute = _UnshardedFSDPTensor(
+                        compute, source._build_operands(compute)
+                    )
+                elif isinstance(source, _UnshardedFSDPTensor):
+                    raise RuntimeError("Expected a sharded SimpleFSDP parameter")
+                local = compute.detach().requires_grad_(parameter.requires_grad)
+                if local.requires_grad:
+                    local.grad_dtype = gradient_dtype
+            self.parameters[parametrization] = _LocalParameterGradient(
+                unsharded, local, gradient_dtype
+            )
+        return self.parameters[parametrization].local
+
+    def accumulate(self) -> None:
+        for entry in self.parameters.values():
+            if entry.local.grad is None:
+                continue
+            gradient = entry.local.grad.detach().to(entry.gradient_dtype)
+            if entry.gradient is None:
+                # Own the buffer even when the dtype conversion is a no-op.
+                entry.gradient = gradient.clone()
+            else:
+                entry.gradient.add_(gradient)
+            entry.local.grad = None
+
+
+@contextmanager
+def local_gradient_accumulation(
+    module: nn.Module,
+) -> Generator[LocalGradientAccumulation, None, None]:
+    """Temporarily stop SimpleFSDP backward at local compute parameters.
+
+    State is scoped to this module tree and restored on exit, including nested
+    calls and exceptions. Disabling parametrization (as GraphPP does when
+    tracing already-unsharded stage parameters) takes precedence.
+    """
+    state = LocalGradientAccumulation()
+    previous = []
+    try:
+        for child in module.modules():
+            for parametrization in child.__dict__.get(
+                "_simple_fsdp_parametrizations", {}
+            ).values():
+                previous.append((parametrization, parametrization.local_gradients))
+                parametrization.local_gradients = state
+        yield state
+    finally:
+        for parametrization, old_state in reversed(previous):
+            parametrization.local_gradients = old_state
 
 
 class _BuildUnshardedTensorFunction(torch.autograd.Function):
@@ -417,6 +506,7 @@ class ReplicateComputation(Module):
         self.non_dp_replicate_axes = [
             axis for axis, axis_type in non_dp_mesh_types.items() if axis_type is spmd.R
         ]
+        self.local_gradients: LocalGradientAccumulation | None = None
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
@@ -477,6 +567,9 @@ class ReplicateComputation(Module):
         #     model.init_states()
         if not _active_parametrization:
             return x
+
+        if self.local_gradients is not None:
+            return self.local_gradients.get_parameter(self, x)
 
         unsharded_weight = self.replicate_compute(x)
         # Which operands to build is determined by the tensor subclass on the
