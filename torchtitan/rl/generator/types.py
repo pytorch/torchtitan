@@ -84,6 +84,9 @@ class RequestMetricsInputs:
 
     num_cached_tokens: int | None
     has_stats: bool
+    # Of `num_cached_tokens`, the tokens loaded from outside GPU memory (a KV offload tier:
+    # host memory or storage); None when the engine reports no such split.
+    num_external_cached_tokens: int | None = None
     queued_ts: float = 0.0
     scheduled_ts: float = 0.0
     first_token_ts: float = 0.0
@@ -91,6 +94,11 @@ class RequestMetricsInputs:
     first_token_latency: float = 0.0
     num_generation_tokens: int = 0
     num_preemptions: int = 0
+    # The whole engine's forward tokens since the previous request that carried them, before
+    # and after CUDA graph padding (not this request's own); set on at most one finished
+    # request per step, else 0.
+    num_engine_unpadded_tokens: int = 0
+    num_engine_padded_tokens: int = 0
 
 
 @dataclass(kw_only=True, slots=True)

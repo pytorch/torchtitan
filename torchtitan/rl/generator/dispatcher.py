@@ -367,7 +367,8 @@ class _RejectedRequests:
 def _prepare_generation_request_metrics(inputs: RequestMetricsInputs) -> list[m.Metric]:
     """Prepare per-request generation metrics from the raw inputs.
 
-    Each key describes this request only; validation renames every `generator/*` key it carries.
+    Each key describes this request only, except `generator/cudagraph_padding_frac`, which
+    describes the whole engine. Validation renames every `generator/*` key it carries.
 
     Caveat for vLLM under `SamplingParams.n > 1`: vLLM stores one `RequestStateStats`
     per child request; the parent output exposes the **last-finishing**
@@ -389,6 +390,11 @@ def _prepare_generation_request_metrics(inputs: RequestMetricsInputs) -> list[m.
     metric_values: dict[str, float] = {}
     if inputs.num_cached_tokens is not None:
         metric_values["generator/num_cached_tokens"] = inputs.num_cached_tokens
+
+    if inputs.num_external_cached_tokens is not None:
+        metric_values[
+            "generator/num_external_cached_tokens"
+        ] = inputs.num_external_cached_tokens
 
     if inputs.has_stats:
         metric_values["generator/queue_time_ms"] = (
@@ -414,8 +420,23 @@ def _prepare_generation_request_metrics(inputs: RequestMetricsInputs) -> list[m.
             ] = first_to_last_token_ms / (inputs.num_generation_tokens - 1)
 
     # Emit each value with both Mean and Max aggregators.
-    return [
+    metrics = [
         metric
         for key, value in metric_values.items()
         for metric in (m.Metric(key, m.Mean(value)), m.Metric(key, m.Max(value)))
     ]
+    if inputs.num_engine_padded_tokens > 0:
+        # Covers every forward in the engine since the previous carrier, whichever
+        # requests ran in it. A validation carrier's value is logged under
+        # validation_generator/ (the controller prefixes validation's metrics). Weighted
+        # by forward tokens. Eager steps pad only for sequence parallelism.
+        num_paddings = (
+            inputs.num_engine_padded_tokens - inputs.num_engine_unpadded_tokens
+        )
+        metrics.append(
+            m.Metric(
+                "generator/cudagraph_padding_frac",
+                m.Mean(num_paddings, count=inputs.num_engine_padded_tokens),
+            )
+        )
+    return metrics

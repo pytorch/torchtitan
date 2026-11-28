@@ -41,7 +41,11 @@ from torchtitan.rl.generator.dispatcher import (
 )
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.generator.types import (
+    EngineRequest,
+    RequestMetricsInputs,
+    SamplingConfig,
+)
 from torchtitan.rl.generator.vllm.config import (
     MooncakeStoreKVOffloadConfig,
     SimpleCPUKVOffloadConfig,
@@ -690,6 +694,30 @@ def test_metric_timing_math():
     assert aggregate["generator/prefill_time_ms/mean"] == pytest.approx(12)
     assert aggregate["generator/decode_time_ms/mean"] == pytest.approx(30)
     assert aggregate["generator/inter_token_latency_ms/mean"] == pytest.approx(10)
+
+
+def test_cudagraph_padding_frac_weights_each_engine_step_by_its_tokens():
+    # Two engine steps: 8 real tokens padded to 12, and 4 real tokens with no padding.
+    padded = RequestMetricsInputs(
+        num_cached_tokens=None,
+        has_stats=False,
+        num_engine_unpadded_tokens=8,
+        num_engine_padded_tokens=12,
+    )
+    unpadded = RequestMetricsInputs(
+        num_cached_tokens=None,
+        has_stats=False,
+        num_engine_unpadded_tokens=4,
+        num_engine_padded_tokens=4,
+    )
+    no_step = RequestMetricsInputs(num_cached_tokens=None, has_stats=False)
+    metrics = [
+        metric
+        for inputs in (padded, unpadded, no_step)
+        for metric in _prepare_generation_request_metrics(inputs)
+    ]
+    aggregate = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert aggregate["generator/cudagraph_padding_frac/mean"] == 4 / 16
 
 
 def test_decode_metrics_absent_for_single_generated_token():

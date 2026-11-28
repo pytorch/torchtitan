@@ -26,7 +26,8 @@ Test bitwise parity between the SGLang generator and the TorchTitan trainer.
       logprobs unchanged.
   6. test_prefill_replays_cuda_graphs:
       With prefill CUDA graphs ("breakable" or "full"), a prefill of new prompts
-      replays one, rather than falling back to eager.
+      replays one, rather than falling back to eager, and the finished requests
+      carry the padded and unpadded forward token counts.
   7. test_context_length_limits (TestSGLangBitwiseParityVarlen only):
       As in vLLM, a prompt of max_context_length - 1 tokens runs and stops at
       max_context_length tokens in total, and a prompt of max_context_length
@@ -333,11 +334,26 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
 
         backend.replay = counting_replay
         try:
-            # Prompts no earlier test cached, so prefill runs over all of them.
-            self._generate([prompt[::-1] for prompt in self.prompt_ids])
+            # Prompts no earlier test cached, so prefill runs over all of them. Three
+            # requests: their decode batches of 3 rows replay the 4-row graph (decode
+            # capture sizes at BATCH_SIZE 5: 1, 2, 4, 5).
+            prompt_ids = [prompt[::-1] for prompt in self.prompt_ids[:3]]
+            results = self._generate(prompt_ids)
         finally:
             backend.replay = replay
         self.assertGreater(num_replays, 0)
+
+        # Finished requests carry the forwards' token counts, padding included.
+        num_unpadded_tokens = sum(
+            result.metrics_inputs.num_engine_unpadded_tokens for result in results
+        )
+        num_padded_tokens = sum(
+            result.metrics_inputs.num_engine_padded_tokens for result in results
+        )
+        self.assertGreaterEqual(
+            num_unpadded_tokens, sum(len(prompt) for prompt in prompt_ids)
+        )
+        self.assertGreater(num_padded_tokens, num_unpadded_tokens)
 
     def test_trainer_vs_sglang_decode_after_model_state_dict_load(self):
         # Runs last (unittest orders tests by name): it changes both models' weights.
@@ -524,24 +540,15 @@ class TestSGLangBitwiseParityGDNHiCache(TestSGLangBitwiseParityGDN):
             prompt + result.token_ids + prompt[: self.NEXT_TURN_SUFFIX_LENGTH]
             for prompt, result in zip(self.prompt_ids, results, strict=True)
         ]
-        # SGLang's request objects, for how many cached tokens came from the host.
-        admitted = []
-        admit = self.engine._output_collector.admit
-
-        def record_admit(req, arrival_time):
-            admitted.append(req)
-            admit(req, arrival_time)
-
-        self.engine._output_collector.admit = record_admit
-        try:
-            next_results = self._check_trainer_vs_sglang_decode(next_prompt_ids)
-        finally:
-            self.engine._output_collector.admit = admit
+        next_results = self._check_trainer_vs_sglang_decode(next_prompt_ids)
         if dist.get_rank() == 0:
-            for prompt, req, result in zip(self.prompt_ids, admitted, next_results):
+            for prompt, result in zip(self.prompt_ids, next_results, strict=True):
                 num_cached_tokens = result.metrics_inputs.num_cached_tokens
                 self.assertGreater(num_cached_tokens, len(prompt))
-                self.assertEqual(req.cached_tokens_host, num_cached_tokens)
+                # Every cached token came back from host memory.
+                self.assertEqual(
+                    result.metrics_inputs.num_external_cached_tokens, num_cached_tokens
+                )
 
 
 def _debug_model_config(
