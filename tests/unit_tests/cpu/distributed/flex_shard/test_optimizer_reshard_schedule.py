@@ -23,6 +23,9 @@ from torchtitan.distributed.flex_shard import (
 from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
     _BucketedRedistributionRuntime,
 )
+from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
+    _warn_unmatched_bucket_configs,
+)
 
 
 class TestMuonPlanConstruction(unittest.TestCase):
@@ -160,6 +163,37 @@ class TestMuonPlanConstruction(unittest.TestCase):
                     patterns=(self._FQN,),
                     mesh=reversed_mesh,
                 ),
+            )
+
+
+    def test_unmatched_bucket_pattern_is_reported_once(self):
+        # Checked where every model part is visible; a config that matches no
+        # parameter at all is the typo case, not the pipeline-parallel case.
+        with self.assertLogs(
+            "torchtitan.distributed.flex_shard._optimizer_reshard_schedule",
+            level="WARNING",
+        ) as captured:
+            _warn_unmatched_bucket_configs(
+                (
+                    BucketConfig(patterns=("layers.0.*",), name="matched"),
+                    BucketConfig(patterns=("layers.9.*",), name="typo"),
+                ),
+                ["layers.0.attention.wq.weight", "layers.0.mlp.w1.weight"],
+            )
+
+        self.assertEqual(len(captured.records), 1)
+        message = captured.output[0]
+        self.assertIn("'typo'", message)
+        self.assertIn("layers.9.*", message)
+
+    def test_matched_bucket_patterns_are_not_reported(self):
+        with self.assertNoLogs(
+            "torchtitan.distributed.flex_shard._optimizer_reshard_schedule",
+            level="WARNING",
+        ):
+            _warn_unmatched_bucket_configs(
+                (BucketConfig(patterns=("layers.0.*",), name="matched"),),
+                ["layers.0.attention.wq.weight"],
             )
 
 
