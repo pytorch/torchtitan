@@ -384,12 +384,6 @@ class TrainingBatchBuilder(Configurable):
         Monarch uses ibverbs where the host has it, else TCP. With neither, spawning the training batch builder raises.
         A host that lists ibverbs devices it can't use fails at the first batch: set None, or
         MONARCH_RDMA_DISABLE_IBVERBS=1 (TCP in every process, weight sync included)."""
-        build_mrope_positions: bool = False
-        """Give microbatches with images 3D M-RoPE positions (``mrope_positions``), as SFT's
-        ``MultiModalCollator.Config.build_mrope_positions`` does: True for models whose image
-        tokens take M-RoPE positions (``MRoPE.Config`` attention, e.g. Qwen3.5); other models'
-        image tokens take the 1D ``positions``. `Controller.Config` checks it against the
-        trainer model."""
         training_sample_builder: TrainingSampleBuilder.Config = field(
             default_factory=TrainingSampleBuilder.Config
         )
@@ -425,7 +419,11 @@ class TrainingBatchBuilder(Configurable):
         max_kept_set_size: int | None,
         register_rdma_microbatch: RegisterRDMAMicrobatch | None = None,
         vision_processor: VisionProcessor.Config | None = None,
+        build_mrope_positions: bool = False,
     ) -> None:
+        """``build_mrope_positions``: give microbatches with images 3D M-RoPE positions
+        (``mrope_positions``), for a trainer model whose image tokens take them
+        (`MultimodalModel.Config.uses_mrope_positions`); the controller sets it."""
         if (
             config.rdma_min_tensor_bytes is not None
             and register_rdma_microbatch is None
@@ -451,7 +449,7 @@ class TrainingBatchBuilder(Configurable):
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
         self._max_num_documents = config.max_num_documents
         self._num_mtp_layers = config.num_mtp_layers
-        self._build_mrope_positions = config.build_mrope_positions
+        self._build_mrope_positions = build_mrope_positions
         self._num_prompts_per_train_step = num_prompts_per_train_step
         self._dp_degree = dp_degree
         # Trainer PP runs this many consecutive microbatches per pipeline step.

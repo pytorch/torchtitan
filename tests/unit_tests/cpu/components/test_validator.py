@@ -75,6 +75,7 @@ def _generic_validator(loader):
     validator.dp_rank = 0
     validator.tokenizer = mock.Mock()
     validator.vision_processor = None
+    validator.build_mrope_positions = False
     validator.seq_len = 4
     validator.num_tokens_per_microbatch = 4
     validator.metrics_processor = SimpleNamespace(

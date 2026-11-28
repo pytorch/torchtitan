@@ -66,7 +66,7 @@ def qwen35_debugmodel(
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=MultiModalCollator.Config(build_mrope_positions=True),
+            collator=MultiModalCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(
@@ -97,7 +97,7 @@ def qwen35_debugmodel_video(
     config.dataloader = replace(
         config.dataloader,
         dataset=dataset,
-        collator=MultiModalCollator.Config(build_mrope_positions=True),
+        collator=MultiModalCollator.Config(),
     )
     config.training.disable_accelerator_graphs = True
     return config
@@ -149,7 +149,7 @@ def qwen35_debugmodel_moe(
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=MultiModalCollator.Config(build_mrope_positions=True),
+            collator=MultiModalCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(

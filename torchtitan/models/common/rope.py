@@ -10,7 +10,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 import spmd_types as spmd
 import torch
@@ -175,6 +175,11 @@ class RoPE(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        # Whether this RoPE takes 3D (temporal, height, width) positions for image tokens
+        # (M-RoPE); the data side then builds them. See
+        # `MultimodalModel.Config.uses_mrope_positions`.
+        takes_mrope_positions: ClassVar[bool] = False
+
         dim: int
         max_context_length: int
         theta: float = 10000.0

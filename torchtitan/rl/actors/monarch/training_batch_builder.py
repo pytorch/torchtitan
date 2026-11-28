@@ -36,6 +36,7 @@ class _TrainingBatchBuilderActorEndpoints:
         output_dir: str,
         enable_structured_logging: bool,
         vision_processor: VisionProcessor.Config | None = None,
+        build_mrope_positions: bool = False,
     ) -> None:
         init_logger()
         sl.init_structured_logger(
@@ -57,6 +58,7 @@ class _TrainingBatchBuilderActorEndpoints:
             max_kept_set_size=max_kept_set_size,
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
             vision_processor=vision_processor,
+            build_mrope_positions=build_mrope_positions,
         )
 
     @endpoint

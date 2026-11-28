@@ -218,6 +218,7 @@ def test_kimi_recipe_vision_processor_matches_vision_encoder(
     )
     assert isinstance(vision_processor.resize, NaViTPatchGridResize.Config)
     assert vision_processor.patch_order == "raster"
+    assert not config.model.uses_mrope_positions
 
 
 @pytest.mark.parametrize(
@@ -237,6 +238,7 @@ def test_muse_recipe_processors_match_vision_encoder(recipe_module, recipe_name)
     assert processor.temporal_patch_size == vision_encoder.patch_temporal
     assert processor.spatial_merge_size == vision_encoder.downsample_factor
     assert processor.patch_order == "raster"
+    assert not config.model.uses_mrope_positions
 
 
 def _assert_matches_vision_encoder(processor_config, vision_encoder):
@@ -269,6 +271,9 @@ def test_qwen_recipe_vision_processor_matches_vision_encoder(
     assert isinstance(config.vision_processor, VisionProcessor.Config)
     assert config.vision_processor.patch_order == "block"
     _assert_matches_vision_encoder(config.vision_processor, config.model.vision_encoder)
+    # The trainer builds M-RoPE positions from this; without them Qwen's image tokens would
+    # silently take 1D positions.
+    assert config.model.uses_mrope_positions
 
 
 def test_qwen35_video_recipe_uses_synthetic_video_dataset():
@@ -431,7 +436,9 @@ def test_mrope_collator_rejects_raster_patch_order():
     )
 
     with pytest.raises(ValueError, match="MRoPE requires patch_order='block'"):
-        MultiModalCollator.Config(build_mrope_positions=True).build(context=context)
+        MultiModalCollator.Config().build(
+            context=replace(context, build_mrope_positions=True)
+        )
 
 
 def test_mm_finite_underfilled_tail_flushes():

@@ -110,6 +110,12 @@ class BaseModel(Module, ABC):
         An empty ``regions`` list runs named regions eagerly.
         """
 
+        @property
+        def uses_mrope_positions(self) -> bool:
+            """Whether image tokens take 3D (temporal, height, width) M-RoPE positions, which
+            the data side then builds as ``mrope_positions``; see `MultimodalModel.Config`."""
+            return False
+
         @abstractmethod
         def get_parameter_counts(self, model: Module) -> tuple[int, int]:
             """Return unique total and architecturally active parameter counts."""

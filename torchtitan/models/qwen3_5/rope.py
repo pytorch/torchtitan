@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import ClassVar, TYPE_CHECKING
 
 import torch
 
@@ -28,6 +28,8 @@ class MRoPE(CosSinRoPE):
 
     @dataclass(kw_only=True, slots=True)
     class Config(CosSinRoPE.Config):
+        takes_mrope_positions: ClassVar[bool] = True
+
         mrope_section: list[int] = field(default_factory=lambda: [24, 20, 20])
 
     def __init__(self, config: Config):
