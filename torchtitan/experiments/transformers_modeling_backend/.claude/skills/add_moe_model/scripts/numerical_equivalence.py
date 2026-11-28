@@ -13,21 +13,10 @@ For each supported HF MoE model, this script:
 4. Runs forward on the Titan MoE block with the same input
 5. Compares outputs via KL divergence, cosine similarity, and max abs diff
 
-Note on numerical precision:
-    Results are NOT bit-exact due to three differences in core torchtitan.
-    With all three fixed, all models produce max_diff=0.00 (verified on
-    full pretrained Mixtral-8x7B, Qwen3-30B-A3B, DeepSeek-V2-Lite,
-    OLMoE-1B-7B).
-
-    1. ``LocalTokenDispatcher.combine()`` casts score-weighted output to
-       bf16 before ``scatter_add``, so accumulation happens in bf16. Fix:
-       keep in f32 through accumulation, cast only at the end.
-    2. ``scatter_add`` accumulates in expert-sorted order; HF uses
-       ``reshape(N, K, D).sum(dim=1)`` in token order. Fix: unsort back
-       to token order and use reshape+sum instead of scatter_add.
-    3. ``TokenChoiceTopKRouter`` uses ``topk(sorted=False)``; HF defaults
-       to ``sorted=True``. Different order causes different f32 sum in
-       route_norm. Fix: use ``sorted=True``.
+``LocalTokenDispatcher.combine()`` sums score-weighted rows in float32
+in the router's top-k order. ``TokenChoiceTopKRouter`` uses
+``topk(sorted=False)``. If the HF router sorts the same experts differently,
+both score normalization and the weighted sum can round differently.
 
 Usage:
     Run this script from the repo root (torchtitan must be importable), passing

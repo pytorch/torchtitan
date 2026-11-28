@@ -66,7 +66,11 @@ The combine backend receives weighted outputs in both paths.
 
 ## Precision
 
-Score products compute in FP32 and then convert back to the activation dtype.
+Local, AllToAll, and TorchAO gather each token's expert outputs after W2 and
+any output postprocess. They weight and sum the rows in router order in FP32
+and cast once per token. The score gradient still needs the unscaled outputs.
+
+DeepEP computes score products in FP32 and casts each to the activation dtype.
 For example, [`GroupedLinear`](../linear/linear.py) uses type promotion:
 
 ```python

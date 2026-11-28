@@ -361,11 +361,8 @@ code that proves it.
   (e.g. HF rejects grouped_mm), change the other side (e.g. make titan
   use bmm temporarily, or manually compute the expert forward with the
   same kernel as HF using titan's weights).
-- **Adapt patches to the model's code path.** The known patches target
-  specific code paths (e.g. f32 accumulation in
-  `LocalTokenDispatcher.combine()`). If the model uses a different path,
-  write an equivalent patch for that path. The principle is the same --
-  align titan's operations with HF's.
+- **Adapt patches to the model's code path.** Check which router and
+  expert implementation the model uses before comparing it with HF.
 - **Keep going until max_diff=0.00.** If the known patches don't get
   there, trace the forward step by step to find additional differences.
 
@@ -376,8 +373,7 @@ code that proves it.
 2. **Apply patches incrementally** — apply each applicable patch one at
    a time. After each, re-run the test and record the new max_diff.
    If a patch crashes, fix the crash (extend the patch as needed) and
-   re-run. If a patch has no effect (e.g. top_k=1 makes reshape+sum
-   trivial), record "no effect (top_k=1)" and move on.
+   re-run. If a patch has no effect, record that and move on.
 
 3. **Handle kernel mismatches** — if the model doesn't support
    `grouped_mm` on the HF side, the test can't force the same kernel.
@@ -406,8 +402,7 @@ Numerical gap analysis for <model_name>
 | Patch | max_diff | KL | Description |
 |-------|----------|----|-------------|
 | baseline | X.XXe-XX | X.XXe-XX | no patches |
-| +patch 1 | X.XXe-XX | X.XXe-XX | f32 accumulation in combine |
-| +patch 2 | X.XXe-XX | X.XXe-XX | reshape+sum (no effect, top_k=1) |
+| +patch 1 | X.XXe-XX | X.XXe-XX | topk(sorted=True) in the router |
 | +kernel align | X.XXe-XX | X.XXe-XX | titan experts via bmm |
 | final | 0.00e+00 | X.XXe-XX | all diffs explained |
 ```
@@ -427,44 +422,12 @@ have changed since these were written. Instead, read the current code in
 `torchtitan/models/common/moe/moe.py`, understand the principle behind each
 fix, and write a patch that applies cleanly to the current code.
 
-The three known differences and how to fix them:
-
-**1. bf16 accumulation before scatter_add** —
-`LocalTokenDispatcher.combine()` multiplies expert output by routing
-scores in f32 but casts back to bf16 before `deterministic_scatter_add`,
-so the accumulation happens in bf16. **Fix principle:** remove the cast
-to bf16, keep everything in f32 through the scatter_add, allocate an
-f32 output buffer, cast to the input dtype only at the very end.
-
-Example (illustrative, may not match current code):
-```python
-# principle: remove .to(routed_output.dtype), use f32 buffer
-routed_output = routed_output.to(torch.float32) * scores
-out = scatter_add(f32_buffer, ..., routed_output)
-return out.to(x.dtype)
-```
-
-**2. scatter_add vs reshape+sum accumulation order** —
-`scatter_add` accumulates top_k contributions in expert-sorted order.
-HF uses `reshape(N, K, D).sum(dim=1)` which accumulates in token order
-(consecutive top_k entries per token). Different f32 summation order
-produces different results. **Fix principle:** store the argsort
-permutation from dispatch, in combine unsort back to original token
-order, then reshape and sum over the top_k dimension.
-For `top_k=1` this has no effect (only one element to sum).
-
-**3. topk sorted flag** — titan uses `torch.topk(sorted=False)`, HF
-defaults to `sorted=True`. With `sorted=True` topk values come back in
-descending order; the normalization sum is computed over differently
-ordered values, producing a small f32 rounding difference. **Fix
-principle:** change `sorted=False` to `sorted=True` in the router's
-topk call.
-For `top_k=1` this has no effect (only one element).
-
-With all three fixed, **all existing models produce max_diff=0.00.**
-If the new model still shows non-zero diff after all applicable fixes,
-the remaining difference is model-specific. Investigate as described
-in step 4 above.
+`LocalTokenDispatcher.combine()` uses the router's top-k order and sums
+score-weighted rows in float32 before casting to the output dtype.
+`TokenChoiceTopKRouter` uses `torch.topk(sorted=False)`. If the HF router
+uses `sorted=True`, the order can affect both score normalization and
+the weighted sum. Temporarily match the HF router's sort order and rerun
+the comparison. For `top_k=1` the order has no effect.
 
 
 ## Phase 4: Parallelism Integration Tests
