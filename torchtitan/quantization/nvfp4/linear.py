@@ -17,6 +17,7 @@ parallelism the block boundary keeps its stock bf16 collectives (all-gather /
 reduce-scatter); NVFP4 does not move fp4 codes over the wire.
 """
 
+import threading
 from dataclasses import dataclass, replace
 from typing import Any, cast
 
@@ -26,6 +27,7 @@ import torch.nn.functional as F
 from spmd_types import SpmdType
 from torch import nn
 from torch.autograd.function import once_differentiable
+from torch.multiprocessing.reductions import StorageWeakRef
 
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
@@ -81,6 +83,104 @@ from .tensor import _LinearShardedTensorWithNVFP4Compute, _quantize_nvfp4_weight
 
 
 __all__ = ["NVFP4Linear"]
+
+# Single-entry thread-local cache for quantized activation operands. Sibling
+# projections sharing one input (e.g. wq, wk, wv) hit this cache and skip
+# duplicate RHT/quantization passes; the next distinct input replaces the entry
+# so no activation memory is retained across layers. StorageWeakRef prevents
+# false hits if the CUDA caching allocator reuses a freed address.
+_INPUT_QUANT_CACHE = threading.local()
+
+
+def _activation_cache_key(
+    x: torch.Tensor,
+    sign_vector: tuple[int, ...],
+    use_cutedsl: bool,
+    use_fast_math: bool,
+) -> tuple[torch.UntypedStorage, tuple] | tuple[None, None]:
+    """Return ``(storage, key)`` when ``x`` is safe to reuse across eager siblings."""
+    from torch.fx.experimental.proxy_tensor import get_proxy_mode
+
+    if (
+        torch.compiler.is_compiling()
+        or torch.compiler._is_non_strict_tracing()
+        or get_proxy_mode() is not None
+        or torch.is_inference_mode_enabled()
+        or x.is_inference()
+        or x.device.type == "meta"
+    ):
+        return None, None
+    if x.is_cuda:
+        with torch.cuda.device(x.device):
+            if torch.cuda.is_current_stream_capturing():
+                return None, None
+        stream_id = torch.cuda.current_stream(x.device).cuda_stream
+    else:
+        stream_id = 0
+    storage = x.untyped_storage()
+    data_ptr = storage.data_ptr()
+    if data_ptr == 0:
+        return None, None
+    key = (
+        data_ptr,
+        x.storage_offset(),
+        tuple(x.shape),
+        tuple(x.stride()),
+        x._version,
+        x.device,
+        stream_id,
+        sign_vector,
+        use_cutedsl,
+        use_fast_math,
+    )
+    return storage, key
+
+
+def _quantize_activation_cached(
+    x: torch.Tensor,
+    sign_vector: tuple[int, ...],
+    use_cutedsl: bool,
+    use_fast_math: bool,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Quantize activation ``x`` with 1-entry sibling reuse across shared inputs."""
+    storage, cache_key = _activation_cache_key(
+        x, sign_vector, use_cutedsl, use_fast_math
+    )
+    entry = (
+        getattr(_INPUT_QUANT_CACHE, "entry", None) if cache_key is not None else None
+    )
+    if entry is not None and entry[0] == cache_key and not entry[1].expired():
+        return entry[2]
+
+    x_MK = x.reshape(-1, x.shape[-1]).contiguous()
+    sign_vector_list = list(sign_vector)
+    x_col_amax, x_row_amax = _rht_amax(x_MK, sign_vector_list, use_cutedsl)
+    x_col_codes, x_col_scale, x_row_codes, x_row_scale = _rht_quantize_row_col(
+        x_MK,
+        x_col_amax,
+        x_row_amax,
+        sign_vector_list,
+        use_cutedsl,
+        use_fast_math,
+    )
+    result = (
+        x_row_codes,
+        x_row_scale,
+        x_row_amax,
+        x_col_codes,
+        x_col_scale,
+        x_col_amax,
+    )
+    if storage is not None and cache_key is not None:
+        _INPUT_QUANT_CACHE.entry = (cache_key, StorageWeakRef(storage), result)
+    return result
 
 
 # Factored from
@@ -180,8 +280,8 @@ class _NVFP4LinearFunction(torch.autograd.Function):
             )
 
         input_shape = x.shape
-        x_MK = x.reshape(-1, input_shape[-1]).contiguous()
-        num_rows, in_features = x_MK.shape
+        in_features = input_shape[-1]
+        num_rows = x.numel() // in_features
         out_features = weight_NK.shape[0]
         if any(
             value % _NVFP4_GEMM_ALIGNMENT
@@ -194,17 +294,17 @@ class _NVFP4LinearFunction(torch.autograd.Function):
             )
 
         sign_vector = tuple(sign_vector)
-        sign_vector_list = list(sign_vector)
-        x_col_amax, x_row_amax = _rht_amax(
-            x_MK,
-            sign_vector_list,
-            use_cutedsl,
-        )
-        x_col_codes, x_col_scale, x_row_codes, x_row_scale = _rht_quantize_row_col(
-            x_MK,
-            x_col_amax,
+        requires_wgrad = bool(ctx.needs_input_grad[1])
+        (
+            x_row_codes,
+            x_row_scale,
             x_row_amax,
-            sign_vector_list,
+            x_col_codes,
+            x_col_scale,
+            x_col_amax,
+        ) = _quantize_activation_cached(
+            x,
+            sign_vector,
             use_cutedsl,
             use_fast_math,
         )
@@ -227,13 +327,21 @@ class _NVFP4LinearFunction(torch.autograd.Function):
             if has_unsharded_tensor
             else (weight_qdata_dgrad, weight_scale_dgrad, weight_amax)
         )
-        ctx.save_for_backward(
-            x_col_codes,
-            x_col_scale,
-            x_col_amax,
-            sr_seed,
-            *saved_weight_tensors,
-        )
+        if requires_wgrad:
+            assert x_col_codes is not None
+            assert x_col_scale is not None
+            assert x_col_amax is not None
+            ctx.save_for_backward(
+                x_col_codes,
+                x_col_scale,
+                x_col_amax,
+                sr_seed,
+                *saved_weight_tensors,
+            )
+        else:
+            ctx.save_for_backward(sr_seed, *saved_weight_tensors)
+        ctx.requires_wgrad = requires_wgrad
+        ctx.requires_dgrad = bool(ctx.needs_input_grad[0])
         ctx.has_unsharded_tensor = has_unsharded_tensor
         ctx.input_shape = input_shape
         ctx.has_bias = bias_N is not None
@@ -246,13 +354,17 @@ class _NVFP4LinearFunction(torch.autograd.Function):
     @once_differentiable
     # pyrefly: ignore [bad-override]
     def backward(ctx, grad_output: torch.Tensor):
-        (
-            x_col_codes,
-            x_col_scale,
-            x_col_amax,
-            sr_seed,
-            *saved_weight_tensors,
-        ) = ctx.saved_tensors
+        if ctx.requires_wgrad:
+            (
+                x_col_codes,
+                x_col_scale,
+                x_col_amax,
+                sr_seed,
+                *saved_weight_tensors,
+            ) = ctx.saved_tensors
+        else:
+            x_col_codes = x_col_scale = x_col_amax = None
+            sr_seed, *saved_weight_tensors = ctx.saved_tensors
         if ctx.has_unsharded_tensor:
             (weight_NK,) = saved_weight_tensors
             if not isinstance(weight_NK, _UnshardedFSDPTensor):
@@ -269,44 +381,52 @@ class _NVFP4LinearFunction(torch.autograd.Function):
             ) = saved_weight_tensors
 
         grad_output_MN = grad_output.contiguous().reshape(-1, grad_output.shape[-1])
-        sign_vector = list(ctx.sign_vector)
-        grad_output_col_amax, grad_output_row_amax = _rht_amax(
-            grad_output_MN,
-            sign_vector,
-            ctx.use_cutedsl,
-        )
-        (
-            grad_output_col_codes,
-            grad_output_col_scale,
-            grad_output_row_codes,
-            grad_output_row_scale,
-        ) = _rht_quantize_row_col(
-            grad_output_MN,
-            grad_output_col_amax,
-            grad_output_row_amax,
-            sign_vector,
-            ctx.use_cutedsl,
-            ctx.use_fast_math,
-            sr_seed=sr_seed,
-        )
+        grad_input = None
+        grad_weight_NK = None
+        if ctx.requires_dgrad or ctx.requires_wgrad:
+            sign_vector = list(ctx.sign_vector)
+            grad_output_col_amax, grad_output_row_amax = _rht_amax(
+                grad_output_MN,
+                sign_vector,
+                ctx.use_cutedsl,
+            )
+            (
+                grad_output_col_codes,
+                grad_output_col_scale,
+                grad_output_row_codes,
+                grad_output_row_scale,
+            ) = _rht_quantize_row_col(
+                grad_output_MN,
+                grad_output_col_amax,
+                grad_output_row_amax,
+                sign_vector,
+                ctx.use_cutedsl,
+                ctx.use_fast_math,
+                sr_seed=sr_seed,
+            )
 
-        grad_input_MK = _nvfp4_scaled_mm(
-            grad_output_row_codes.view(torch.float4_e2m1fn_x2),
-            grad_output_row_scale,
-            per_tensor_amax_to_scale(grad_output_row_amax),
-            weight_qdata_dgrad.t(),
-            weight_scale_dgrad,
-            per_tensor_amax_to_scale(weight_amax),
-        )
-        grad_input = grad_input_MK.reshape(ctx.input_shape)
-        grad_weight_NK = _nvfp4_scaled_mm(
-            grad_output_col_codes.view(torch.float4_e2m1fn_x2),
-            grad_output_col_scale,
-            per_tensor_amax_to_scale(grad_output_col_amax),
-            x_col_codes.view(torch.float4_e2m1fn_x2).t(),
-            x_col_scale,
-            per_tensor_amax_to_scale(x_col_amax),
-        )
+            if ctx.requires_dgrad:
+                grad_input_MK = _nvfp4_scaled_mm(
+                    grad_output_row_codes.view(torch.float4_e2m1fn_x2),
+                    grad_output_row_scale,
+                    per_tensor_amax_to_scale(grad_output_row_amax),
+                    weight_qdata_dgrad.t(),
+                    weight_scale_dgrad,
+                    per_tensor_amax_to_scale(weight_amax),
+                )
+                grad_input = grad_input_MK.reshape(ctx.input_shape)
+            if ctx.requires_wgrad:
+                assert x_col_codes is not None
+                assert x_col_scale is not None
+                assert x_col_amax is not None
+                grad_weight_NK = _nvfp4_scaled_mm(
+                    grad_output_col_codes.view(torch.float4_e2m1fn_x2),
+                    grad_output_col_scale,
+                    per_tensor_amax_to_scale(grad_output_col_amax),
+                    x_col_codes.view(torch.float4_e2m1fn_x2).t(),
+                    x_col_scale,
+                    per_tensor_amax_to_scale(x_col_amax),
+                )
         grad_bias_N = grad_output_MN.sum(dim=0) if ctx.has_bias else None
         return (
             grad_input,
