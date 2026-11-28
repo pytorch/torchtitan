@@ -48,9 +48,9 @@ class TorchFTManager(Configurable):
         Note that this is still an experimental feature.
         """
 
-        process_group: Literal["gloo", "nccl", "mccl"] = "gloo"
+        process_group: Literal["gloo", "nccl"] = "gloo"
         """
-        The process group to use for fault tolerance. Currently, only "gloo", "nccl" and "mccl" are supported.
+        The process group to use for fault tolerance. Currently, only "gloo" and "nccl" are supported.
         """
 
         process_group_timeout_ms: int = 10000
@@ -118,18 +118,6 @@ class TorchFTManager(Configurable):
             pg = torchft.ProcessGroupGloo(timeout=process_group_timeout)
         elif config.process_group == "nccl":
             pg = torchft.ProcessGroupNCCL(timeout=process_group_timeout)
-        elif config.process_group == "mccl":
-            import torchcomms
-            from torchft.torchcomms import ProcessGroupTorchComms
-
-            comm = torchcomms.new_comm(
-                "mccl",
-                device=torch.device("cuda"),
-                name="mccl_ft",
-                timeout=process_group_timeout,
-                enable_reconfigure=True,
-            )
-            pg = ProcessGroupTorchComms(comm, timeout=process_group_timeout)
         else:
             raise ValueError(f"Unsupported process group: {config.process_group}")
 
