@@ -90,13 +90,17 @@ config.model.local_compile.regions.append("score_scale")
 ```
 
 With BF16 activations, eager execution writes an FP32 product before the
-downcast. Inductor can fuse those operations and reduce the score gradient
-without storing a full FP32 product per row. The reduction order can change
-the last bits of the score gradient.
+downcast. At 262,144 rows and 2,048 features, that temporary alone is 2 GiB.
+Inductor can fuse the multiply and cast in forward and reduce the score
+gradient without storing an FP32 matrix in backward. The reduction order can
+change the last bits of the score gradient. Step peak memory may stay the
+same if another operation sets the peak.
 
-Compilation leaves the remat policy unchanged. During block replay, local
-combine and DeepEP score multiplication run outside named remat regions.
-All-to-all scoring follows the dispatcher's `combine` policy.
+`score_scale` has no independent [remat policy](../../../distributed/ACTIVATION_REMAT.md).
+Local and DeepEP score multiplication replay with the block even when W2's
+`grouped_mm` is saved. With all-to-all expert parallelism, scoring runs
+inside the dispatcher's `combine` region. The default policy saves that
+region and full remat recomputes it.
 
 ## Checkpoint dependencies
 
