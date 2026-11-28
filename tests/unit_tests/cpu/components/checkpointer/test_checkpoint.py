@@ -1743,11 +1743,21 @@ class TestSharedDiscoveryAndRetention(unittest.TestCase):
                 self.assertIsNone(manager._parse_step(name))
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    def test_purge_preserves_the_checkpoint_currently_being_saved(self, _rank):
-        manager = self._manager(keep_latest_k=2, entries=["step-1", "step-2"])
-        manager._storage.isfile.return_value = False
+    def test_purge_preserves_checkpoints_at_or_past_saving_step(self, _rank):
+        # Directories at or past saving_step -- incomplete step-3 and step-5,
+        # and valid step-4 -- may be rewritten by this save or a later one. A
+        # background delete queued now could still be running then and remove
+        # the new checkpoint, and step-4 must not take a keep_latest_k slot
+        # from step-2.
+        manager = self._manager(
+            keep_latest_k=2,
+            entries=["step-1", "step-2", "step-3", "step-4", "step-5"],
+        )
+        manager._storage.isfile.side_effect = (
+            lambda path: "step-3" not in path and "step-5" not in path
+        )
 
-        manager._purge_stale_checkpoints(saving_step=2)
+        manager._purge_stale_checkpoints(saving_step=3)
 
         self.assertEqual({"/checkpoint/step-1"}, self._purged(manager))
         manager._storage.remove.assert_not_called()

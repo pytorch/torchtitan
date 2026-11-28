@@ -722,20 +722,20 @@ class BaseCheckpointManager(Configurable, ABC):
     ) -> None:
         """Delete abandoned entries and reserve one retained slot for this save."""
         if self._should_purge():
-            staging_pattern = (
-                re.compile(rf"{re.escape(staging_dir_prefix)}step-(0|[1-9]\d*)")
-                if staging_dir_prefix
-                else None
-            )
             checkpoints: list[tuple[int, str]] = []
             abandoned: list[str] = []
 
             for dirname in self._storage.listdir(self.folder):
-                # torch_checkpointing uses this pattern for staging directories.
-                staging = (
-                    staging_pattern.fullmatch(dirname) if staging_pattern else None
-                )
-                step = int(staging.group(1)) if staging else self._parse_step(dirname)
+                step = self._parse_step(dirname)
+                is_staging = False
+                if (
+                    step is None
+                    and staging_dir_prefix
+                    and dirname.startswith(staging_dir_prefix)
+                ):
+                    # torch_checkpointing stages under <staging_dir_prefix>step-N.
+                    step = self._parse_step(dirname.removeprefix(staging_dir_prefix))
+                    is_staging = step is not None
                 # Directories at or past saving_step (e.g. left by a run resumed
                 # from an earlier step) may be rewritten by this or a later save,
                 # and deletes run in the background, so a queued delete could
@@ -744,7 +744,7 @@ class BaseCheckpointManager(Configurable, ABC):
                     continue
 
                 checkpoint_dir = filesystem.join(self.folder, dirname)
-                if staging:
+                if is_staging:
                     abandoned.append(checkpoint_dir)
                 elif self._is_valid_checkpoint(checkpoint_dir):
                     checkpoints.append((step, checkpoint_dir))
