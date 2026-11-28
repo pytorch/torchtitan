@@ -258,6 +258,10 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         Newton-Schulz there and copies the result back. Momentum, parameters,
         gradients and the exchange between ranks stay where they are, so this only
         changes anything when the parameters live on the host."""
+        local_kernels: Literal["triton"] | None = None
+        """Local kernels; ``None`` uses PyTorch. Triton requires CUDA FP32/BF16
+        storage and preserves eager rounding. New shapes/strides incur JIT cost;
+        small models can be slower, so benchmark on the intended workload."""
         max_nccl_ctas_for_comms: int = -1  # Cap NCCL CTAs to save memory; <=0 disables.
         """Limit NCCL CTAs for DistMuon redistribution only; ``<= 0`` disables.
 
@@ -343,6 +347,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
             ns_device=config.ns_device,
+            local_kernels=config.local_kernels,
         )
 
 

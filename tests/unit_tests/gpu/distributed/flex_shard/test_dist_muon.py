@@ -114,9 +114,10 @@ class TestDistMuon(DTensorTestBase):
         torch.testing.assert_close(output_tensor, expected)
 
     @parametrize("block_sizes", [(4,), (4, 2)])
+    @parametrize("local_kernels", [None, "triton"])
     @with_comms(eager_init=True)
     def test_matches_plain_muon_across_flat_checkpoint(
-        self, block_sizes: tuple[int, ...]
+        self, block_sizes: tuple[int, ...], local_kernels: Literal["triton"] | None
     ):
         lr = 0.03
         num_repeats = 3
@@ -183,10 +184,17 @@ class TestDistMuon(DTensorTestBase):
                 momentum=0.8,
                 nesterov=True,
                 ns_steps=ns_steps,
+                local_kernels=local_kernels,
             )
 
+        # Each rank owns 2 * 513 elements, exercising multiple blocks and a tail.
+        num_columns = 513
         redistributed_value = (
-            torch.arange(12, device=device).reshape(4, 3).float().div_(10).add_(1)
+            torch.arange(4 * num_columns, device=device)
+            .reshape(4, num_columns)
+            .float()
+            .div_(10)
+            .add_(1)
         )
         local_blocks_value = (
             torch.arange(12, 12 + num_rows * 3, device=device)
@@ -296,7 +304,10 @@ class TestDistMuon(DTensorTestBase):
             )
 
         first_redistributed_grad = (
-            torch.arange(1, 13, device=device).reshape(4, 3).float().div_(17)
+            torch.arange(1, 4 * num_columns + 1, device=device)
+            .reshape(4, num_columns)
+            .float()
+            .div_(17)
         )
         first_local_blocks_grad = (
             torch.arange(13, 13 + num_rows * 3, device=device)
@@ -322,6 +333,9 @@ class TestDistMuon(DTensorTestBase):
         )
         init_optim_state(resumed_optimizer)
         load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+        lr *= 0.5
+        resumed_optimizer.param_groups[0]["lr"] = lr
+        reference_optimizer.param_groups[0]["lr"] = lr
 
         second_redistributed_grad = first_redistributed_grad.flip(0).contiguous()
         second_local_blocks_grad = first_local_blocks_grad.flip(0).contiguous()
