@@ -12,6 +12,7 @@ import spmd_types as spmd
 
 import torch
 from torch.nn.attention import current_flash_attention_impl
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType, MultipleOf
@@ -39,6 +40,11 @@ from torchtitan.tools.utils import (
     get_cuda_flash_attention_impl,
     set_default_dtype,
 )
+
+# Verify steps with fewer rows than this, padded rows included, keep FA4's varlen call:
+# `_verify_rows_as_decode`'s fp32 tail adds ~60 us per layer, more than SwapAB saves on few rows (hd256,
+# GB300). A FULL graph sees only the row count, not the context or shared prompts, so the check counts rows.
+_MIN_VERIFY_ROWS_ON_DECODE_KERNEL = 8
 
 
 class _FA4PageSize:
@@ -163,6 +169,20 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
 
         self.enable_gqa = self.num_heads > self.num_kv_heads
 
+        # Query tokens of a verify row (the token plus its MTP drafts), where FA4's SwapAB decode
+        # kernel takes them as query heads (limits: SwapABPolicy in flash_attn/cute/config.py).
+        # A DiffKV layer's V head dim can still be refused: FA4's standard kernel runs it, slower.
+        speculative_config = get_current_vllm_config().speculative_config
+        self.verify_query_len = None
+        if speculative_config is not None:
+            verify_query_len = 1 + speculative_config.num_speculative_tokens
+            if (
+                torch.cuda.get_device_capability() in ((10, 0), (10, 3))
+                and self.head_size in (64, 96, 128, 256)
+                and self.num_queries_per_kv * verify_query_len <= 32
+            ):
+                self.verify_query_len = verify_query_len
+
         activate_cuda_flash_attention_impl()
 
     # Based on vLLM's FlashAttentionImpl.forward():
@@ -275,9 +295,37 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         cu_seqlens_q = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
         seqused_k = attn_metadata.seq_lens
+
+        # Every row holds max_seqlen_q tokens, e.g. a verify step: one token plus its drafts
+        # (FULL graphs pad with whole rows). With max_seqlen_q > 1, no row is a single-token
+        # decode row, so the decode/prefill split below has nothing to split.
+        is_uniform = num_actual_tokens == max_seqlen_q * seqused_k.shape[0]
+        # TODO: once the FA4 floor has SwapAB token mode (Dao-AILab/flash-attention#3217), the
+        # plain varlen call serves verify rows. Keep this path only for rows token mode refuses:
+        # over 32 columns once query heads per KV head and tokens per row are each rounded up to a
+        # power of two (6 query heads per KV head at 5 tokens: 8 x 8 = 64). If FA4 declines token
+        # mode, fuse the tail and the merge into one Triton kernel.
+        if (
+            is_uniform
+            and max_seqlen_q == self.verify_query_len
+            and seqused_k.shape[0] >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
+            and current_flash_attention_impl() == "FA4"
+            and sliding_window_size == (-1, 0)
+            and self.out_transform is None
+            and not is_in_batch_invariant_mode()
+        ):
+            return self._verify_rows_as_decode(
+                output[:num_actual_tokens],
+                query[:num_actual_tokens],
+                key_cache,
+                value_cache,
+                attn_metadata,
+            )
+
         if (
             current_flash_attention_impl() == "FA4"
             and max_seqlen_q > 1
+            and not is_uniform
             and self.out_transform is None
         ):
             is_single_token = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]) == 1
@@ -320,6 +368,111 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         out = self.out_transform(out, lse.transpose(0, 1))
         output[:num_actual_tokens].copy_(out)
         return output[:num_actual_tokens]
+
+    def _verify_rows_as_decode(
+        self,
+        output: torch.Tensor,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+    ) -> torch.Tensor:
+        """Attention of a verify step, every row `n` query tokens, on FA4's decode kernel.
+
+        FA4 sends rows of `n` > 1 tokens to its prefill kernel: 25.5 ms of attention kernels per
+        Qwen3.8-27B verify step (26 rows sharing 3 prompts, GB300); this way, 14.9 ms plus 1.2 ms
+        for the fp32 tail's kernels. Row with `seq_len` L, n = 4:
+
+            tokens at positions          L-4, L-3, L-2, L-1
+            FA4 decode, 4 x heads        keys 0 .. L-4             every token
+            here, fp32, causal           keys L-3 .. L-1           token j: the first j of them
+            merge                        logsumexp of the two parts
+
+        Shape suffixes: R rows, K KV heads, J tokens of a row, G query heads per KV head,
+        I tail keys (the last n - 1), D head dim, V value head dim.
+        """
+        num_rows = attn_metadata.seq_lens.shape[0]
+        num_tokens, num_heads, head_dim = query.shape
+        query_len = num_tokens // num_rows
+        num_kv_heads = key_cache.shape[2]
+        head_dim_v = value_cache.shape[-1]
+        num_queries_per_kv = num_heads // num_kv_heads
+        page_size = key_cache.shape[1]
+
+        # ======== Keys every token sees: one decode row of n x heads per row ========
+        # Heads ordered (KV head, token, head in group), so FA4's GQA maps each to its KV head.
+        query_RKJGD = query.view(
+            num_rows, query_len, num_kv_heads, num_queries_per_kv, head_dim
+        ).transpose(1, 2)
+        num_shared_keys_R = (attn_metadata.seq_lens - (query_len - 1)).clamp_(min=0)
+        shared_out_RKJGV = query.new_empty(
+            num_rows, num_kv_heads, query_len, num_queries_per_kv, head_dim_v
+        )
+        _, shared_lse = paged_varlen_attention_out(
+            shared_out_RKJGV.view(num_rows, -1, head_dim_v),
+            query_RKJGD.reshape(num_rows, -1, head_dim),
+            key_cache,
+            value_cache,
+            cu_seqlens_q=torch.arange(
+                num_rows + 1, device=query.device, dtype=torch.int32
+            ),
+            max_seqlen_q=1,
+            max_seqlen_k=attn_metadata.max_seq_len,
+            seqused_k=num_shared_keys_R,
+            block_table=attn_metadata.block_table,
+            scale=self.scale,
+            window_size=(-1, 0),
+            enable_gqa=True,
+            return_lse=True,
+        )
+        # FA4's lse is [heads, rows], heads ordered (K, J, G).
+        shared_lse_RKJG = shared_lse.view(
+            num_kv_heads, query_len, num_queries_per_kv, num_rows
+        ).permute(3, 0, 1, 2)
+
+        # ======== The last n - 1 keys, causal among the row's tokens ========
+        # These ~15 small kernels add 53-71 us per layer at 1-4 rows and 1.2 ms per Qwen3.8-27B
+        # verify step at 26 rows (GB300), which keeps steps under
+        # _MIN_VERIFY_ROWS_ON_DECODE_KERNEL rows off this path.
+        # vLLM's merge_attn_states takes token-major outputs of one dtype: here that costs
+        # three layout copies and a bf16 tail, for ~5 fewer kernels.
+        tail_positions_RI = num_shared_keys_R[:, None] + torch.arange(
+            query_len - 1, device=query.device
+        )
+        tail_pages_RI = attn_metadata.block_table.gather(
+            1, tail_positions_RI // page_size
+        ).long()
+        tail_offsets_RI = tail_positions_RI % page_size
+        tail_keys_RIKD = key_cache[tail_pages_RI, tail_offsets_RI].float()
+        tail_values_RIKV = value_cache[tail_pages_RI, tail_offsets_RI].float()
+        tail_scores_RKJGI = torch.einsum(
+            "rkjgd,rikd->rkjgi", query_RKJGD.float(), tail_keys_RIKD
+        ).mul_(self.scale)
+        key_index_I = torch.arange(query_len - 1, device=query.device)
+        token_index_J = torch.arange(query_len, device=query.device)
+        is_future_JI = key_index_I[None, :] >= token_index_J[:, None]
+        tail_scores_RKJGI.masked_fill_(is_future_JI[:, None, :], float("-inf"))
+        tail_lse_RKJG = torch.logsumexp(tail_scores_RKJGI, dim=-1)
+        tail_out_RKJGV = torch.einsum(
+            "rkjgi,rikv->rkjgv",
+            torch.softmax(tail_scores_RKJGI, dim=-1).nan_to_num_(0.0),
+            tail_values_RIKV,
+        )
+
+        # ======== Merge; token 0 has no tail keys (lse -inf) ========
+        lse_RKJG = torch.logaddexp(shared_lse_RKJG, tail_lse_RKJG)
+        merged_RKJGV = (
+            torch.exp(shared_lse_RKJG - lse_RKJG).nan_to_num_(0.0)[..., None]
+            * shared_out_RKJGV
+            + torch.exp(tail_lse_RKJG - lse_RKJG).nan_to_num_(0.0)[..., None]
+            * tail_out_RKJGV
+        )
+        output.view(num_rows, query_len, num_heads, head_dim_v).copy_(
+            merged_RKJGV.permute(0, 2, 1, 3, 4).reshape(
+                num_rows, query_len, num_heads, head_dim_v
+            )
+        )
+        return output
 
 
 class TorchTitanVarlenInnerAttentionDiffKVImpl(TorchTitanVarlenInnerAttentionImpl):
