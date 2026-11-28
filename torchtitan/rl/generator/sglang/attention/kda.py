@@ -202,7 +202,7 @@ class TorchTitanKDAAttnBackend(TorchTitanLinearAttnBackend):
             ).transpose(0, 1)
         # SGLang's extra_buffer prefix cache: copy the states of the requests at a
         # tracked position into their track slots, once, after the last layer.
-        self._track_mamba_state_decode(
+        self.track_mamba_state_decode(
             forward_batch,
             conv_state,
             recurrent_state,
@@ -214,7 +214,7 @@ class TorchTitanKDAAttnBackend(TorchTitanLinearAttnBackend):
             # state holds no tokens. SGLang does not copy the replay entries, so zero
             # the track slots' replay counts.
             count_N = replay_state[-1][:, 0]
-            track_slots = self.forward_metadata.mamba_track_indices.clamp(min=0).long()
+            track_slots = self.state_tracking_indices.clamp(min=0).long()
             count_N[track_slots] = torch.where(
                 forward_batch.mamba_track_mask, 0, count_N[track_slots]
             )
