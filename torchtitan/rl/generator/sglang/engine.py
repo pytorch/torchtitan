@@ -156,9 +156,10 @@ class SGLangEngine(GenerationEngine):
             # cuda_graph owns SGLang's CUDA-graph settings: SGLang applies its
             # per-phase graph keys (e.g. cuda_graph_backend_decode) over
             # disable_cuda_graph, so one would capture graphs that the engine's
-            # checks of cuda_graph assume are off. SGLang's default capture sizes
-            # also stay within the step budget that Dist-MoE's buffers and the
-            # DeepEP / HybridEP capacity check assume.
+            # checks of cuda_graph assume are off. SGLang's prefill capture sizes and
+            # the decode graphs, which stop at max_num_seqs (a DP rank's decode
+            # tokens per step), stay within the step budget that Dist-MoE's buffers
+            # and the DeepEP / HybridEP capacity check assume.
             owned_keys = sorted(
                 key
                 for key in self.extra_server_args
@@ -472,19 +473,29 @@ class SGLangEngine(GenerationEngine):
             # KV and GDN / KDA states share one pool, so memory one does not use can
             # hold the other (see the README). SGLang builds it for hybrid models only.
             server_kwargs["enable_unified_memory"] = True
+
+        # A decode batch holds up to max_num_seqs requests; SGLang runs a decode batch
+        # above its largest graph eagerly, so capture up to that many.
+        cuda_graph_config: dict[str, dict[str, Any]] = {
+            "decode": {"max_bs": max_num_seqs}
+        }
         if self.config.cuda_graph == "full":
             # Full graphs also capture attention, whose eager CPU cost otherwise
             # dominates small prefills. SGLang runs a prefill batch eagerly if it
             # has more requests than full_prefill_max_req. A prefill batch has at
             # most max_num_seqs requests, so with that many slots every prefill
             # batch runs in a graph.
-            server_kwargs["cuda_graph_config"] = {
-                "prefill": {"backend": "full", "full_prefill_max_req": max_num_seqs}
+            cuda_graph_config["prefill"] = {
+                "backend": "full",
+                "full_prefill_max_req": max_num_seqs,
             }
         elif self.config.cuda_graph == "breakable":
-            server_kwargs["cuda_graph_config"] = {"prefill": {"backend": "breakable"}}
+            cuda_graph_config["prefill"] = {"backend": "breakable"}
         else:
             server_kwargs["disable_prefill_cuda_graph"] = True
+        if self.config.cuda_graph != "none":
+            server_kwargs["cuda_graph_config"] = cuda_graph_config
+
         if max_num_batched_tokens is not None:
             server_kwargs["chunked_prefill_size"] = (
                 max_num_batched_tokens * parallelism.data_parallel_degree
