@@ -14,6 +14,7 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 
 import asyncio
 import concurrent.futures
+import inspect
 import json
 import os
 from contextlib import nullcontext
@@ -61,7 +62,9 @@ from torchtitan.rl.generator.vllm.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
 from torchtitan.rl.generator.vllm.worker import (
+    _alias_draft_weight,
     TorchTitanCudagraphDispatcher,
+    TorchTitanEagleProposer,
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
 )
@@ -80,8 +83,12 @@ from vllm.config import (
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
-from vllm.sampling_params import RequestOutputKind
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils.cache import LRUCache
+from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+from vllm.v1.worker import gpu_input_batch, mamba_utils
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -154,9 +161,15 @@ def _request_output(
     )
 
 
-def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
+def _vllm_engine(
+    *,
+    reset_kv_cache_on_model_state_dict_load=False,
+    model=None,
+    num_speculative_tokens=0,
+):
     """A `VLLMEngine` around a fake `LLMEngine` (no engine build)."""
     engine = VLLMEngine.__new__(VLLMEngine)
+    engine.config = SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
     engine._engine = _FakeLLMEngine()
     engine._uses_kv_offload = False
     engine._coordinate_kv_offload = False
@@ -534,6 +547,23 @@ def test_admission_rejects_only_the_request_whose_image_does_not_decode():
     assert [kwargs["request_id"] for _, kwargs in llm_engine.add_requests] == ["text"]
 
 
+def test_admission_rejects_one_token_prompts_with_drafts():
+    # vLLM pads a 1-token prompt with placeholder drafts, which GDN's verify kernels can't run.
+    engine = _vllm_engine(num_speculative_tokens=3)
+    one_token = _engine_request("one_token", min_policy_version=6)
+    one_token.prompt = Prompt(token_ids=[1])
+
+    [(request_id, error)] = engine.add_requests(
+        [one_token, _engine_request("two_tokens", min_policy_version=6)]
+    )
+
+    assert request_id == "one_token" and isinstance(error, ValueError)
+    llm_engine = cast(_FakeLLMEngine, engine._engine)
+    assert [kwargs["request_id"] for _, kwargs in llm_engine.add_requests] == [
+        "two_tokens"
+    ]
+
+
 def test_admission_rejects_only_the_invalid_request():
     engine = _vllm_engine()
     invalid = _engine_request("invalid", min_policy_version=6)
@@ -772,6 +802,14 @@ def test_generator_dp_can_supply_expert_parallelism():
             VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             True,
             "batch_invariant",
+        ),
+        (
+            _FLEX_MODEL_CONFIG,
+            VLLMEngine.Config(
+                cuda_graph=VLLMCudaGraphConfig(mode="NONE"), num_speculative_tokens=3
+            ),
+            False,
+            "num_speculative_tokens=3 needs CUDA",
         ),
         (
             _GDN_MODEL_CONFIG,
@@ -1034,6 +1072,7 @@ def test_cuda_graph_none_mode_preserves_sequence_parallel_config():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=True,
+        num_speculative_tokens=0,
     )
 
     assert compilation_config.cudagraph_mode.name == "NONE"
@@ -1053,6 +1092,7 @@ def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
         max_model_len=4096,
         expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
 
     assert cfg.cudagraph_capture_sizes == [4, 8]
@@ -1064,6 +1104,7 @@ def test_expert_sequence_parallel_padding_keeps_small_cuda_graph_batches():
         max_model_len=4096,
         expert_sequence_parallel_size=8,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
 
     assert cfg.cudagraph_capture_sizes[0] == 8
@@ -1079,6 +1120,7 @@ def test_expert_sequence_parallel_padding_rejects_no_valid_cuda_graph_sizes():
             max_model_len=4096,
             expert_sequence_parallel_size=4,
             enable_sequence_parallel=False,
+            num_speculative_tokens=0,
         )
 
 
@@ -1200,6 +1242,7 @@ def test_runner_replays_the_verify_graph_only_when_every_row_verifies(
     runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
     runner.vllm_config = config
     runner.compilation_config = config.compilation_config
+    runner.cache_config = config.cache_config
     runner.model_config = SimpleNamespace(is_encoder_decoder=False)
     runner.input_batch = SimpleNamespace(lora_id_to_lora_request={})
     runner.get_model = lambda: SimpleNamespace(set_num_valid_tokens=lambda n: None)
@@ -1235,6 +1278,200 @@ def test_runner_replays_the_verify_graph_only_when_every_row_verifies(
     assert dispatch_step(None) == mixed_step
 
 
+@pytest.mark.parametrize(
+    "use_async_scheduling, prev_req_id_to_index, is_new, num_scheduled_tokens, mamba_state_idx, copy",
+    [
+        # Async scheduling, and no row of this batch sampled in the last step (empty map): offset 0.
+        # A new request after a 64-token prefix hit: its GDN state is cached in block 3 (16-token blocks).
+        (True, {}, True, 8, {}, (3, 4, 0)),
+        # A request in the middle of a chunked prefill, moved to row 0 when the row's last request left:
+        # its running state is in block 3, and this 32-token chunk ends in block 5.
+        (True, {}, False, 32, {"b": 3}, (3, 5, 0)),
+        # A running request the scheduler skipped in the last step, which vLLM adds back: its state is in block 3.
+        (True, {}, False, 8, {"b": 3}, (3, 4, 0)),
+        # Sync scheduling never builds the map: a running request keeps its own last step's count, 3.
+        (False, None, False, 8, {"b": 3}, (3, 4, 2)),
+    ],
+    ids=["new", "mid_prefill", "re_added", "sync_running"],
+)
+def test_a_row_copies_its_gdn_state_from_its_own_last_steps_offset(
+    use_async_scheduling,
+    prev_req_id_to_index,
+    is_new,
+    num_scheduled_tokens,
+    mamba_state_idx,
+    copy,
+):
+    runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
+    runner.cache_config = SimpleNamespace(mamba_cache_mode="align")
+    runner.use_async_scheduling = use_async_scheduling
+    runner.num_accepted_tokens_event = SimpleNamespace(synchronize=lambda: None)
+    runner.uniform_decode_query_len = 4
+    runner.num_decode_draft_tokens = SimpleNamespace(np=np.full(4, -1, dtype=np.int32))
+    runner.input_batch = SimpleNamespace(
+        req_ids=["b"],
+        req_id_to_index={"b": 0},
+        num_accepted_tokens_cpu=np.ones(4, dtype=np.int32),
+        prev_req_id_to_index=prev_req_id_to_index,
+    )
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={},
+        scheduled_new_reqs=[SimpleNamespace(req_id="b")] if is_new else [],
+        scheduled_cached_reqs=SimpleNamespace(resumed_req_ids=set()),
+        num_scheduled_tokens={"b": num_scheduled_tokens},
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+    )
+
+    # vLLM's gather leaves row 0 with 3: async, the count of the row's last request; sync, the row's own.
+    def prepare_inputs_with_last_requests_count(
+        self, scheduler_output, num_scheduled_tokens
+    ):
+        self.input_batch.num_accepted_tokens_cpu[0] = 3
+
+    copies = []
+    with (
+        patch.object(GPUModelRunner, "_update_states", lambda self, so: None),
+        patch.object(
+            GPUModelRunner, "_prepare_inputs", prepare_inputs_with_last_requests_count
+        ),
+        patch.object(
+            mamba_utils,
+            "collect_mamba_copy_meta",
+            lambda *args: copies.append(args[4:7]),
+        ),
+        patch.object(mamba_utils, "do_mamba_copy_block", lambda copy_bufs: None),
+    ):
+        runner._update_states(scheduler_output)
+        runner._prepare_inputs(scheduler_output, None)
+        mamba_utils.preprocess_mamba(
+            scheduler_output,
+            None,
+            SimpleNamespace(enable_prefix_caching=True),
+            mamba_state_idx,
+            runner.input_batch,
+            {"b": SimpleNamespace(num_computed_tokens=64)},
+            {},
+            None,
+            SimpleNamespace(
+                mamba_group_ids=[0],
+                mamba_spec=SimpleNamespace(num_speculative_blocks=3, block_size=16),
+            ),
+        )
+
+    # (source block, running block, token offset)
+    assert copies == [copy]
+
+
+@pytest.mark.parametrize(
+    "copy_lands, added_req_id, expected_counts",
+    [
+        # A ends and B is new.
+        ("before_update_states", "B", {"D": 2, "B": 1}),
+        ("in_prepare_inputs", "B", {"D": 2, "B": 1}),
+        # A forced preemption (a weight load that resets the KV cache): vLLM removes A and adds it again.
+        ("before_update_states", "A", {"D": 2, "A": 1}),
+    ],
+    ids=["copy_before_update_states", "copy_in_prepare_inputs", "force_resumed"],
+)
+def test_a_row_moved_by_the_reorder_keeps_its_accepted_count(
+    copy_lands, added_req_id, expected_counts, monkeypatch
+):
+    """Last step: rows [A, D], decodes that accepted 3 and 2 tokens. This step A leaves and the added request (an
+    8-token prefill after a 64-token prefix hit) takes row 0, so vLLM's decode/prefill reorder swaps D to row 0.
+    vLLM then gathers counts by last-step row."""
+
+    def request(req_id: str, num_prompt_tokens: int, num_computed_tokens: int):
+        return CachedRequestState(
+            req_id=req_id,
+            prompt_token_ids=list(range(num_prompt_tokens)),
+            mm_features=[],
+            sampling_params=SamplingParams(temperature=0.0),
+            generator=None,
+            block_ids=([0, 1, 2, 3, 4, 5, 6, 7],),
+            num_computed_tokens=num_computed_tokens,
+            output_token_ids=[1] * max(num_computed_tokens - num_prompt_tokens, 0),
+        )
+
+    # A CPU test: InputBatch's CPU buffers without pinned memory.
+    monkeypatch.setattr(gpu_input_batch, "PIN_MEMORY", False)
+    batch = InputBatch(
+        max_num_reqs=4,
+        max_model_len=128,
+        max_num_batched_tokens=64,
+        device=torch.device("cpu"),
+        vocab_size=100,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[8],
+        num_spec_tokens=3,
+    )
+    batch.add_request(request("A", 72, 75))
+    batch.add_request(request("D", 20, 25))
+    batch.prev_req_id_to_index = {"A": 0, "D": 1}
+
+    class LastStepCountCopy:
+        """The last step's non-blocking copy of its counts [3, 2] into the CPU buffer, in its row order."""
+
+        landed = False
+
+        def synchronize(self):
+            if not self.landed:
+                batch.num_accepted_tokens_cpu[:2] = [3, 2]
+                self.landed = True
+
+    count_copy = LastStepCountCopy()
+    if copy_lands == "before_update_states":
+        count_copy.synchronize()
+
+    runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
+    runner.cache_config = SimpleNamespace(mamba_cache_mode="align")
+    runner.use_async_scheduling = True
+    runner.num_accepted_tokens_event = count_copy
+    runner.uniform_decode_query_len = 4
+    runner.num_decode_draft_tokens = SimpleNamespace(np=np.full(4, -1, dtype=np.int32))
+    runner.input_batch = batch
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={"D": [0, 0, 0]},
+        num_scheduled_tokens={"D": 4, added_req_id: 8},
+    )
+
+    # vLLM's row changes for this step.
+    def update_states(self, scheduler_output):
+        batch.remove_request("A")
+        batch.add_request(request(added_req_id, 72, 64))
+        batch.condense()
+        reorder_batch_to_split_decodes_and_prefills(
+            batch, scheduler_output, decode_threshold=4
+        )
+
+    # vLLM waits for the copy, then gathers each row's count by its last-step row (a row without one reads 1),
+    # or keeps the raw counts with an empty map.
+    def prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        count_copy.synchronize()
+        if batch.prev_req_id_to_index:
+            last_rows = np.array(
+                [batch.prev_req_id_to_index.get(req_id, -1) for req_id in batch.req_ids]
+            )
+            counts = batch.num_accepted_tokens_cpu
+            counts[: len(last_rows)] = np.where(
+                last_rows < 0, 1, counts[np.maximum(last_rows, 0)]
+            )
+
+    with (
+        patch.object(GPUModelRunner, "_update_states", update_states),
+        patch.object(GPUModelRunner, "_prepare_inputs", prepare_inputs),
+    ):
+        runner._update_states(scheduler_output)
+        runner._prepare_inputs(scheduler_output, None)
+
+    assert batch.req_ids[0] == "D"
+    assert (
+        dict(zip(batch.req_ids, batch.num_accepted_tokens_cpu[:2].tolist()))
+        == expected_counts
+    )
+
+
 def test_only_weights_use_cumem_allocator(monkeypatch):
     base_worker_cls = TorchTitanGPUWorker.__mro__[1]
     monkeypatch.setattr(
@@ -1252,12 +1489,40 @@ def test_only_weights_use_cumem_allocator(monkeypatch):
         assert value is None
 
 
+def test_eagle_proposer_hooks_match_vllm():
+    # If vLLM renames a hook, its drafter keeps its own lm_head copy, which weight syncs
+    # never update, and nothing else fails.
+    # TODO: check on GPU that the draft's embedding and lm_head still alias the target's after a
+    # model state dict load. Qwen3.5-0.8B has an MTP head; no engine test loads a state dict with drafts yet.
+    for name in (
+        "_create_draft_vllm_config",
+        "_maybe_share_embeddings",
+        "_maybe_share_lm_head",
+    ):
+        vllm_hook = inspect.signature(getattr(SpecDecodeBaseProposer, name))
+        override = inspect.signature(getattr(TorchTitanEagleProposer, name))
+        assert list(override.parameters) == list(vllm_hook.parameters), name
+
+
+def test_alias_draft_weight_shares_storage_and_checks_shape():
+    # A copy instead of an alias would leave the draft's weights stale after a weight sync.
+    target = torch.randn(8, 4)
+    draft = torch.nn.Parameter(torch.zeros(8, 4))
+    _alias_draft_weight(draft_weight=draft, target_weight=target)
+    assert draft.data_ptr() == target.data_ptr()
+    with pytest.raises(ValueError, match="does not match"):
+        _alias_draft_weight(
+            draft_weight=torch.nn.Parameter(torch.zeros(8, 5)), target_weight=target
+        )
+
+
 def test_cuda_graph_default_mode_is_full():
     cfg = VLLMCudaGraphConfig().get_vllm_compilation_config(
         max_num_seqs=256,
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
     assert cfg.cudagraph_mode.name == "FULL"
     assert int(cfg.mode) == 0
@@ -1270,6 +1535,7 @@ def test_cuda_graph_full_mode_no_compile():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
     assert cfg.cudagraph_mode.name == "FULL"
     assert int(cfg.mode) == 0
@@ -1282,10 +1548,26 @@ def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
     sizes = cfg.cudagraph_capture_sizes
     assert 40 in sizes  # 34 sequences pad to 40, not 64
     assert sizes[-1] == 500  # a full decode batch has its own graph
+
+
+def test_cuda_graph_config_with_draft_tokens():
+    kwargs = dict(
+        max_num_seqs=64,
+        max_model_len=4096,
+        expert_sequence_parallel_size=1,
+        enable_sequence_parallel=False,
+        num_speculative_tokens=3,
+    )
+    # With 3 drafts, a decode step verifies 1 + 3 tokens per sequence.
+    cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
+        **kwargs
+    )
+    assert cfg.cudagraph_capture_sizes[-1] == 256
 
 
 def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
@@ -1297,6 +1579,7 @@ def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
         max_num_batched_tokens=16384,
+        num_speculative_tokens=0,
     )
     sizes = cfg.cudagraph_capture_sizes
     assert 40 in sizes  # 34 sequences pad to 40, not 64
@@ -1311,6 +1594,7 @@ def test_cuda_graph_full_mode_caps_sizes_at_the_largest_step():
         max_model_len=1000,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
     # Packed prefills reach the 2048-token budget, so it is graphed.
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**kwargs)
@@ -1335,6 +1619,7 @@ def test_cuda_graph_rejects_nonpositive_max_num_seqs():
             max_model_len=4096,
             expert_sequence_parallel_size=1,
             enable_sequence_parallel=False,
+            num_speculative_tokens=0,
         )
 
 
@@ -1353,6 +1638,7 @@ def test_inference_parallelism_propagates_dense_sequence_parallelism():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=parallelism.enable_sequence_parallel,
+        num_speculative_tokens=0,
     )
     assert compilation_config.cudagraph_capture_sizes == [1, 4, 5, 8]
     assert compilation_config.pass_config.enable_sp

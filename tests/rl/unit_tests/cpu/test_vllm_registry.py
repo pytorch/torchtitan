@@ -27,6 +27,7 @@ from torchtitan.rl.generator.vllm.attention import gdn, kda
 from torchtitan.rl.generator.vllm.registry import model_config_to_hf_config_dict
 
 from transformers import GenerationConfig, PretrainedConfig
+from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
 )
@@ -83,6 +84,21 @@ def test_hf_config_requires_full_attention(attention_type):
 
     with pytest.raises(ValueError, match="no full attention layer"):
         model_config_to_hf_config_dict(config)
+
+
+def test_speculative_draft_parse_is_told_apart_from_the_target_parse():
+    # vLLM marks an MTP draft's config parse by its hf_overrides; it gets the checkpoint's
+    # HF config, while the target's parse builds TorchTitan's.
+    def target_override(config):
+        return config
+
+    for target_hf_overrides in (None, {"max_position_embeddings": 8}, target_override):
+        draft_hf_overrides = SpeculativeConfig.compose_draft_hf_overrides(
+            target_hf_overrides
+        )
+        assert registry._is_speculative_draft_parse(draft_hf_overrides)
+    assert not registry._is_speculative_draft_parse(None)
+    assert not registry._is_speculative_draft_parse(target_override)
 
 
 def test_gdn_hybrid_model_registers_state_copy_funcs(monkeypatch):

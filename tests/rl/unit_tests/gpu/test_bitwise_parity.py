@@ -253,6 +253,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         max_model_len=gen_config.model.max_context_length,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
+        num_speculative_tokens=0,
     )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config

@@ -354,6 +354,7 @@ class TorchTitanLinearAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 (num_decode_draft_tokens >= 0) & (context_lens == 0)
             )
             if no_context_draft_rows.size:
+                # A backstop for VLLMEngine.add_requests' check.
                 # TODO: run such a row on the prefill kernels and drop its placeholder drafts' states.
                 raise RuntimeError(
                     f"Row {int(no_context_draft_rows[0])} has drafts but no context: a 1-token "
