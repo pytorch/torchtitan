@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import random
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import pytest
@@ -152,6 +153,39 @@ def test_replay_mismatch_is_fatal():
 
 
 @pytest.mark.parametrize(
+    ("reference_ids", "replay_ids", "mismatch"),
+    [
+        ([1, 1, 3], [3, 1, 1], False),  # reordered duplicate indices
+        ([], [], False),  # empty gradient on a nonempty table
+        ([1, 1, 3], [1, 1, 4], True),  # move a row
+        ([1, 1, 3], [1, 3, 3], True),  # swap the two rows' gradient values
+        ([1, 1, 3], [1, 3], True),  # change one row's gradient
+    ],
+)
+def test_replay_sparse_embedding_gradients(reference_ids, replay_ids, mismatch):
+    module = torch.nn.Embedding(6, 2, sparse=True)
+    module.weight.detach().zero_()  # Keep the loss identical across executions.
+    replayer = SDCReplayer.Config().build(modules=[module], device=torch.device("cpu"))
+    batches = enumerate((reference_ids, replay_ids))
+
+    def execute():
+        replay, ids = next(batches)
+        loss = module(torch.tensor(ids, dtype=torch.long)).sum()
+        loss.backward()
+        if replay:
+            module.weight.grad = module.weight.grad.coalesce()
+        return loss
+
+    expected = (
+        pytest.raises(SDCReplayMismatch, match="gradient:0:weight")
+        if mismatch
+        else nullcontext()
+    )
+    with expected:
+        replayer.run_fwd_bwd(execute, step=1, get_loss=lambda loss: loss)
+
+
+@pytest.mark.parametrize(
     ("corruption", "expected"),
     (
         ("buffer", "buffer:0:counter"),
@@ -270,6 +304,24 @@ def test_empty_tensor_hash_uses_zero_sentinel():
 
     assert digest.dtype == torch.int64
     assert digest.item() == 0
+
+
+def test_sparse_hash_distinguishes_coordinates_from_values():
+    # Identical stored words, but the nonzero value is in a different column.
+    row = torch.tensor([[0.0, 0.0, 1.0]]).to_sparse(1)
+    scalar = torch.tensor([[1.0, 0.0, 0.0]]).to_sparse()
+    assert _hash_tensor(row).item() != _hash_tensor(scalar).item()
+
+
+def test_sparse_hash_detects_a_swap_at_the_same_offset_in_two_blocks():
+    values = torch.zeros((1, 256 * 1024 + 1))
+    values[0, 0], values[0, -1] = 1.0, 2.0
+    indices = torch.tensor([[1]])
+    shape = (2, values.shape[1])
+    original = torch.sparse_coo_tensor(indices, values, shape)
+    swapped = torch.sparse_coo_tensor(indices, values.flip(dims=(1,)), shape)
+
+    assert _hash_tensor(original).item() != _hash_tensor(swapped).item()
 
 
 def test_complex_tensor_hash_uses_real_view():

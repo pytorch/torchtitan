@@ -30,8 +30,8 @@ checksummed matmuls). It trades extra forward/backward time on checked
 steps for an in-training, hardware-agnostic check, and requires fully
 deterministic execution (``debug.deterministic``).
 
-Unregistered execution scratch state is intentionally outside the replay
-contract when each invocation overwrites it before reading it.
+Register state that accumulates across microbatches as a module buffer so
+replay restores it. Unregistered scratch state must be overwritten before use.
 """
 
 from __future__ import annotations
@@ -107,14 +107,49 @@ def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
 def _hash_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Return a lightweight device-side digest for replay comparison.
 
-    The current hash is order-insensitive and can therefore collide for tensor
-    permutations. Complex tensors are viewed as real components and inherit the
-    same limitation across their real and imaginary values. This hash is used
-    because it is simple to apply across tensors and fast enough for replay.
+    The dense hash is order-insensitive and can therefore collide for tensor
+    permutations, including permutations of real and imaginary components.
+    Tensors with the torch.sparse_coo layout are checksummed in coalesced order.
     """
     local = _local_tensor(tensor).detach()
     if local.numel() == 0:
         return torch.zeros((), dtype=torch.int64, device=local.device)
+    if local.layout == torch.sparse_coo:
+        coalesced = local.coalesce()
+        indices, values = coalesced.indices(), coalesced.values()
+        digest = torch.zeros((), dtype=torch.int64, device=local.device)
+        if values.numel() == 0:
+            return digest
+        word_size = min(values.element_size(), 4)
+        word_dtype = {1: torch.uint8, 2: torch.int16, 4: torch.int32}[word_size]
+        num_words = sum(
+            part.numel() * (part.element_size() // word_size)
+            for part in (indices, values)
+        )
+        # Weight stored bits by position. Row-wise XOR loses column order and
+        # can give two different rows the same digest before mixing their indices.
+        prime = 0x100000001B3
+        block_words = min(num_words, 256 * 1024)
+        weights = torch.full(
+            (block_words,), prime, dtype=torch.int64, device=local.device
+        ).cumprod_(0)
+        offset = 0
+        for part in (indices, values):
+            flat = part.resolve_conj().resolve_neg().reshape(-1)
+            if flat.stride(0) != 1:
+                flat = flat.clone(memory_format=torch.contiguous_format)
+            words = flat.view(word_dtype)
+            for start in range(0, words.numel(), block_words):
+                block = words[start : start + block_words]
+                # Reuse the weights and advance their exponent modulo 2**64.
+                scale = pow(prime, offset, 1 << 64)
+                if scale >= 1 << 63:
+                    scale -= 1 << 64
+                digest.add_((block * weights[: block.numel()]).sum() * scale)
+                offset += block.numel()
+        # Include the index count to distinguish identical words split at a
+        # different boundary between coordinates and values.
+        return digest + num_words + indices.numel()
     if local.is_complex():
         # for RoPE caches
         local = torch.view_as_real(local)
