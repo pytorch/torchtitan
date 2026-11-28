@@ -25,11 +25,14 @@ from torchtitan.components.data.balancing import packed_attention_cost
 from torchtitan.components.data.multimodal.mrope import get_mrope_positions
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
-from torchtitan.components.data.padding import append_padded_segment
+from torchtitan.components.data.padding import (
+    append_padded_segment,
+    get_microbatch_token_counts,
+    pack_microbatch_fields,
+)
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 
 from torchtitan.config import Configurable
-from torchtitan.models.common.mtp import get_mtp_token_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import KeptSets, PromptImage, RolloutGroup
@@ -266,12 +269,12 @@ _PAD_VALUES: dict[str, int | float | bool] = {
     "loss_mask": False,
     "advantages": 0.0,
 }
-_DTYPES: dict[str, type[np.generic]] = {
-    "input_ids": np.int64,
-    "labels": np.int64,
-    "generator_logprobs": np.float32,
-    "loss_mask": np.bool_,
-    "advantages": np.float32,
+_DTYPES: dict[str, torch.dtype] = {
+    "input_ids": torch.int64,
+    "labels": torch.int64,
+    "generator_logprobs": torch.float32,
+    "loss_mask": torch.bool,
+    "advantages": torch.float32,
 }
 
 
@@ -1022,14 +1025,10 @@ class TrainingBatchBuilder(Configurable):
             positions = [ 0,  1,  0,  1, 0, 1, 2, 3]
         """
         pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
-        keys = list(pad_values)
         packed_fields: dict[str, list[np.ndarray]] = {
-            key: [] for key in (*keys, "positions", "padding_mask")
+            key: [] for key in (*pad_values, "positions", "padding_mask")
         }
         sample_lens: list[int] = []
-
-        def pad(key: str, num_tokens: int) -> np.ndarray:
-            return np.full(num_tokens, pad_values[key], dtype=_DTYPES[key])
 
         # Shift labels/logits and pad to per_sample_pad_multiple.
         for training_sample in training_samples:
@@ -1049,24 +1048,14 @@ class TrainingBatchBuilder(Configurable):
             )
             sample_lens.append(sample_len)
 
-        num_tokens_per_rank = self._num_tokens_per_microbatch
-        pad_len = num_tokens_per_rank - sum(sample_lens)
-        assert pad_len >= 0
-        if pad_len > 0:
-            for key in keys:
-                packed_fields[key].append(pad(key, pad_len))
-            packed_fields["positions"].append(
-                np.arange(pad_len, dtype=np.int64) % self.seq_len
-            )
-            packed_fields["padding_mask"].append(np.ones(pad_len, dtype=bool))
-
-        # Concatenate into the packed dtype (e.g. float64 logprobs -> float32); torch.from_numpy doesn't copy
-        packed = {
-            key: torch.from_numpy(
-                np.concatenate(packed_fields[key], dtype=_DTYPES[key])
-            )
-            for key in keys
-        }
+        packed = pack_microbatch_fields(
+            packed_fields,
+            num_tokens=self._num_tokens_per_microbatch,
+            max_context_length=self.seq_len,
+            fill_values=pad_values,
+            dtypes=_DTYPES,
+            pin_memory=False,
+        )
         generator_logprobs = packed["generator_logprobs"]
         loss_mask = packed["loss_mask"]
         topk_token_ids = topk_logprobs = None
@@ -1112,13 +1101,10 @@ class TrainingBatchBuilder(Configurable):
                 training_samples, max_kept_set_size=self._max_kept_set_size
             )
         )
-        target_mask = loss_mask & torch.isfinite(generator_logprobs)
-        positions_tensor = torch.from_numpy(np.concatenate(packed_fields["positions"]))
-        padding_mask_tensor = torch.from_numpy(
-            np.concatenate(packed_fields["padding_mask"])
-        )
-        loss_token_counts, routing_token_counts = get_mtp_token_counts(
-            target_mask=target_mask,
+        positions_tensor = packed["positions"]
+        padding_mask_tensor = packed["padding_mask"]
+        loss_token_counts, routing_token_counts = get_microbatch_token_counts(
+            target_mask=loss_mask & torch.isfinite(generator_logprobs),
             positions=positions_tensor,
             padding_mask=padding_mask_tensor,
             num_mtp_layers=self._num_mtp_layers,

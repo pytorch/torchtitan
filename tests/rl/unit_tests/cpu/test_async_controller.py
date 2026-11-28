@@ -276,7 +276,7 @@ def test_training_batch_builder_carries_metric_only_groups_until_trainable_batch
     )
     assert batch is not None
     assert group_is_trainable
-    assert batch.global_loss_token_counts[0] > 0
+    assert batch.global_loss_token_counts > 0
     assert batch.global_routing_token_counts.shape == (1,)
     assert batch.group_ids == [0, 1]
 
@@ -409,7 +409,7 @@ def test_training_batch_builder_uses_flat_rank_capacity_and_reports_padding() ->
     microbatch = batch.microbatch_groups[0][0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 0, 1, 2, 0, 1]
     assert not microbatch.padding_mask.any()
-    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([8]))
+    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor(8))
     assert _metric_value(batch, "train_batch/padding_frac") == 0.0
 
 
@@ -433,7 +433,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
     assert batch is not None
     microbatch = batch.microbatch_groups[0][0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
-    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([3]))
+    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor(3))
     assert microbatch.padding_mask.tolist() == [
         False,
         False,
