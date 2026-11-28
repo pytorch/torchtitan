@@ -92,11 +92,9 @@ int64 indices occupy `8R` bytes, or 256 KiB at `R = 32768`. This counts index
 storage, not the opaque DeepEP handle or other retained tensors.
 
 Scores are supplied by replayed dispatch/permutation or retained dispatch
-outputs. The optimized combine does not consume scores. W2 follows its
-configured remat policy, and the GPT-OSS bias addition follows the same
-`grouped_mm` decision rather than an independent bias policy. Replaying even a
-cheap bias addition after a saved matmul would retain the matmul's full routed
-output; saving both avoids this dependency. Other replayed consumers, such as a
-dtype conversion, can still need W2's output, so saved combine alone does not
-guarantee its complete removal from retained memory. FullAC can still replay
-the W2 GEMM and its bias addition.
+outputs. Combine does not consume scores. For native experts without output
+postprocessing, W2 and its GPT-OSS bias addition are saved even under FullAC.
+The output dtype cast runs inside the saved projection or bias-add region,
+avoiding a read of W2's output during replay. Both gradient GEMMs still run.
+Quantized and LoRA projections and output postprocessing retain their
+configured remat policy.

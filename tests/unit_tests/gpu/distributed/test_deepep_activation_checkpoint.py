@@ -7,6 +7,7 @@
 import itertools
 import unittest
 
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import pytest
@@ -266,6 +267,30 @@ class _EPActivationCheckpointing(DTensorTestBase):
                         )
                     ).to(self.device_type, torch.bfloat16)
                     reference.load_state_dict(baseline.state_dict())
+                check_w2_saved_bytes = (
+                    isinstance(activation_remat, FullActivationRematConfig)
+                    and output_postprocess is None
+                )
+                w2_saved_storages = {}
+                saved_kinds = set()
+
+                def pack(tensor):
+                    info = remat.current_saved_tensor_info()
+                    saved_kinds.add(info.kind)
+                    if (
+                        info.kind is remat.SavedTensorKind.BACKWARD
+                        and info.region is not None
+                        and ".w2." in info.region
+                    ):
+                        storage = tensor.untyped_storage()
+                        w2_saved_storages[storage.data_ptr()] = storage.nbytes()
+                    return tensor.detach()
+
+                hooks = (
+                    remat.saved_tensors_hooks(pack, lambda tensor: tensor)
+                    if check_w2_saved_bytes
+                    else nullcontext()
+                )
                 activation_remat.apply(ac_model)
                 # As in training, the buffer is created after AC is applied. All
                 # models share it, so the baseline also runs deterministic when
@@ -275,6 +300,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
                 if reference is not None:
                     reference.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
+                w2 = ac_model.layers["0"].routed_experts.w2
                 num_calls = {"dispatch": 0, "combine": 0}
                 original = {
                     "dispatch": getattr(buffer_type, dispatch_method),
@@ -315,6 +341,8 @@ class _EPActivationCheckpointing(DTensorTestBase):
                         autospec=True,
                         side_effect=counted("combine"),
                     ),
+                    patch.object(w2, "forward", wraps=w2.forward) as w2_forward,
+                    patch.object(w2, "_grouped_mm", wraps=w2._grouped_mm) as w2_mm,
                 ):
                     expected = _run_forward_backward(baseline, x_TD)
                     baseline_calls = dict(num_calls)
@@ -325,7 +353,8 @@ class _EPActivationCheckpointing(DTensorTestBase):
                             actual = _run_forward_backward(ac_model, x_TD)
                         graph.replay()
                     else:
-                        actual = _run_forward_backward(ac_model, x_TD)
+                        with hooks:
+                            actual = _run_forward_backward(ac_model, x_TD)
 
                 if reference is not None:
                     reference_values = _run_forward_backward(reference, x_TD)
@@ -358,6 +387,14 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     },
                     msg=f"unexpected EP communication replays: {num_calls}",
                 )
+                absorbed = w2_forward.call_args.kwargs.get("scores_R") is not None
+                self.assertEqual(
+                    w2_mm.call_count,
+                    1 + int(not absorbed and w2.remat_should_recompute("grouped_mm")),
+                )
+                if check_w2_saved_bytes and absorbed:
+                    self.assertIn(remat.SavedTensorKind.CHECKPOINT_INPUT, saved_kinds)
+                    self.assertEqual(sum(w2_saved_storages.values()), 0)
                 if exact:
                     for actual_grad, expected_grad in zip(actual, expected):
                         torch.testing.assert_close(
