@@ -368,6 +368,7 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
     layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
     layer.prefix, layer.kv_cache = "gdn", (torch.empty(0), torch.empty(0))
+    layer.num_speculative_tokens = 0
     layer.local_num_v_heads = layer.head_v_dim = 1
     extent = 4 if decode else 3
     metadata = TorchTitanLinearAttentionMetadata(
@@ -488,6 +489,7 @@ def test_packed_forward_routes_decode_rows(monkeypatch, capturing):
     layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
     layer.prefix, layer.kv_cache = "gdn", (torch.empty(0), torch.empty(0))
+    layer.num_speculative_tokens = 0
     layer.local_num_k_heads = layer.local_num_v_heads = 1
     layer.head_k_dim = layer.head_v_dim = 1
     monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: False)
@@ -548,6 +550,7 @@ def test_packed_decode_routing_matches_recurrence(monkeypatch) -> None:
     layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
     layer.prefix = "gdn"
+    layer.num_speculative_tokens = 0
     layer.local_num_k_heads = layer.local_num_v_heads = 16
     layer.head_k_dim = layer.head_v_dim = 128
     pools = (
@@ -581,6 +584,315 @@ def test_packed_decode_routing_matches_recurrence(monkeypatch) -> None:
 # Qwen3.5-0.8B's local TP=1 GDN shapes: 16 heads of 128, q | k | v channels, width-4 conv.
 _HEADS, _HEAD_DIM = 16, 128
 _CHANNELS = 3 * _HEADS * _HEAD_DIM
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("num_accepted", [1, 2, 4])
+def test_verify_rows_match_single_token_decodes(num_accepted) -> None:
+    """Verifying 1 + k tokens, j = `num_accepted` of them accepted, matches j single-token decodes.
+
+        draft step:  verify x0 x1 x2 x3 from state S        (keeps one state per token)
+        next step:   verify y0 y1 y2 y3, num_accepted_tokens = j
+        reference:   decode x0 .. x(j-1), then y0 .. y3, one token per step, no drafts
+
+    The draft step's first j outputs, and the states it keeps after x(j-1), match the
+    reference: the rejected drafts change nothing. The next step starts from those states.
+    """
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    weights = _random_gdn_weights(device)
+    # State S: the conv's last 3 inputs and the SSM state.
+    history = (torch.randn(3, _CHANNELS, device=device) * 0.5).bfloat16()
+    state = torch.randn(_HEADS, _HEAD_DIM, _HEAD_DIM, device=device) * 0.05
+    # The verify request owns slots 1-4, one per draft position. Its conv state is in slot 1.
+    verify_layer = _qwen3_5_gdn_layer(num_speculative_tokens=3, num_slots=5)
+    verify_layer.kv_cache[0][1, :3] = history
+    verify_layer.kv_cache[1][1] = state
+    decode_layer = _qwen3_5_gdn_layer(num_speculative_tokens=0, num_slots=2)
+    decode_layer.kv_cache[0][1] = history
+    decode_layer.kv_cache[1][1] = state
+    draft_tokens, next_tokens = _random_tokens(4, device), _random_tokens(4, device)
+
+    def verify(tokens, context_len, num_accepted_tokens):
+        metadata = _draft_step(
+            _draft_builder(),
+            query_lens=[4],
+            context_lens=[context_len],
+            slots=[[1, 2, 3, 4]],
+            num_draft_tokens=[3],
+            num_accepted_tokens=[num_accepted_tokens],
+        )
+        return _run(verify_layer, metadata, tokens, weights)
+
+    def decode(tokens, context_len):
+        outputs = []
+        for index in range(tokens[0].shape[0]):
+            metadata = _packed_metadata(
+                [0, 1], [context_len + index + 1], [1], max_num_seqs=1, device="cuda"
+            )
+            one_token = tuple(tensor[index : index + 1] for tensor in tokens)
+            outputs.append(_run(decode_layer, metadata, one_token, weights))
+        return torch.cat(outputs)
+
+    draft_output = verify(draft_tokens, context_len=40, num_accepted_tokens=1)
+    accepted_tokens = tuple(tensor[:num_accepted] for tensor in draft_tokens)
+    expected = decode(accepted_tokens, context_len=40)
+    _assert_close(draft_output[:num_accepted], expected)
+    # Kept for the next step: the SSM state after x(j-1) in slot j, and the last 3 inputs in
+    # conv rows j - 1 to j + 1.
+    _assert_close(verify_layer.kv_cache[1][num_accepted], decode_layer.kv_cache[1][1])
+    assert torch.equal(
+        verify_layer.kv_cache[0][1, num_accepted - 1 : num_accepted + 2],
+        decode_layer.kv_cache[0][1],
+    )
+    next_output = verify(
+        next_tokens, context_len=40 + num_accepted, num_accepted_tokens=num_accepted
+    )
+    _assert_close(next_output, decode(next_tokens, context_len=40 + num_accepted))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    "kinds",
+    [
+        ("decode", "verify", "prefill"),
+        ("decode", "prefill"),
+        ("decode",),
+        ("trimmed", "verify", "prefill"),
+        ("trimmed", "decode", "prefill"),
+        ("verify", "prefill_with_context"),
+    ],
+    ids="+".join,
+)
+def test_speculative_step_matches_step_without_drafts(kinds) -> None:
+    """Each row of a step with drafts on matches the same request in a step without drafts.
+
+        decode, verify, prefill:   the decode row resumes after accepting 1 token
+        decode, prefill:           no verify rows
+        decode:                    a decode-only step
+        trimmed, verify, prefill:  the scheduler trimmed the 1-token row's drafts; its last
+                                   verify accepted 3, so it reads its state from slot 3
+        trimmed, decode, prefill:  no row has drafts, so vLLM passes no accepted counts; the
+                                   trimmed row's slot 3 comes from the runner's counts
+        verify, prefill_with_context:  the prefill row reads its history, as a new turn after
+                                       a prefix-cache hit does
+
+    Requests come in vLLM's order: up to 1 + k tokens first, then prefills. The reference
+    step runs the verify row's 4 tokens as one chunk. Outputs, SSM states and conv states
+    must match.
+    """
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    weights = _random_gdn_weights(device)
+    # kind: (query_len, context_len, num_draft_tokens, num_accepted_tokens)
+    shapes = {
+        "decode": (1, 40, -1, 1),
+        "trimmed": (1, 40, -1, 3),
+        "verify": (4, 40, 3, 2),
+        "prefill": (13, 0, -1, 1),
+        "prefill_with_context": (13, 40, -1, 1),
+    }
+    query_lens, context_lens, num_draft_tokens, num_accepted_tokens = zip(
+        *(shapes[kind] for kind in kinds)
+    )
+    # Request i owns slots 4i + 1 to 4i + 4 with drafts, slot i + 1 without.
+    slots = [
+        [4 * index + column for column in range(1, 5)] for index in range(len(kinds))
+    ]
+    drafts_layer = _qwen3_5_gdn_layer(
+        num_speculative_tokens=3, num_slots=4 * len(kinds) + 1
+    )
+    plain_layer = _qwen3_5_gdn_layer(num_speculative_tokens=0, num_slots=len(kinds) + 1)
+    for index, accepted in enumerate(num_accepted_tokens):
+        history = (torch.randn(3, _CHANNELS, device=device) * 0.5).bfloat16()
+        state = torch.randn(_HEADS, _HEAD_DIM, _HEAD_DIM, device=device) * 0.05
+        # A row starts from what its last step kept after `accepted` tokens (1 without drafts).
+        drafts_layer.kv_cache[0][slots[index][0], accepted - 1 : accepted + 2] = history
+        drafts_layer.kv_cache[1][slots[index][accepted - 1]] = state
+        plain_layer.kv_cache[0][index + 1] = history
+        plain_layer.kv_cache[1][index + 1] = state
+    tokens = _random_tokens(sum(query_lens), device)
+
+    drafts_metadata = _draft_step(
+        _draft_builder(),
+        query_lens=list(query_lens),
+        context_lens=list(context_lens),
+        slots=slots,
+        num_draft_tokens=list(num_draft_tokens),
+        num_accepted_tokens=list(num_accepted_tokens),
+    )
+    offsets = torch.tensor([0, *query_lens]).cumsum(0).tolist()
+    plain_metadata = _packed_metadata(
+        offsets,
+        [context + query for context, query in zip(context_lens, query_lens)],
+        list(range(1, len(kinds) + 1)),
+        max_num_seqs=4,
+        device="cuda",
+    )
+    drafts_output = _run(drafts_layer, drafts_metadata, tokens, weights)
+    plain_output = _run(plain_layer, plain_metadata, tokens, weights)
+    for index, kind in enumerate(kinds):
+        rows = slice(offsets[index], offsets[index + 1])
+        _assert_close(drafts_output[rows], plain_output[rows])
+        # A verify row keeps the state after its 4th token in its 4th slot, and its last 3
+        # inputs in conv rows 3-5, where the next step reads them if all 4 are accepted.
+        last_column = 3 if kind == "verify" else 0
+        _assert_close(
+            drafts_layer.kv_cache[1][slots[index][last_column]],
+            plain_layer.kv_cache[1][index + 1],
+        )
+        assert torch.equal(
+            drafts_layer.kv_cache[0][slots[index][0], last_column : last_column + 3],
+            plain_layer.kv_cache[0][index + 1],
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_draft_steps_replay_one_packed_graph() -> None:
+    """One packed graph, captured from a dummy batch, replays any mix of rows bitwise vs eager.
+
+    Rows come in vLLM's order for reorder threshold 1 + k: rows with context and at most
+    4 tokens first. The capture's block table holds real slots, which dummy staging nulls.
+
+        verify, verify, prefill               adjacent verify rows: one null prefill interval
+        verify, trimmed, chunk tail, prefill  1-token rows that resume a state: verify kernels
+        prefill, prefill                      no verify rows
+        verify, verify                        verify rows only, eager takes VERIFY
+    """
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    weights = _random_gdn_weights(device)
+    num_tokens = 32
+    slots = [[4 * row + column for column in range(1, 5)] for row in range(4)]
+    graph_builder, eager_builder = _draft_builder(), _draft_builder()
+    graph_layer = _qwen3_5_gdn_layer(num_speculative_tokens=3, num_slots=17)
+    eager_layer = _qwen3_5_gdn_layer(num_speculative_tokens=3, num_slots=17)
+    eager_layer.kv_cache = tuple(pool.clone() for pool in graph_layer.kv_cache)
+
+    # ======== Capture, as vLLM's mixed dummy batch: 4 requests of 8 tokens ========
+    graph_builder.dummy_run_uniform = False
+    capture_metadata = _draft_step(
+        graph_builder,
+        query_lens=[8] * 4,
+        context_lens=[0] * 4,
+        slots=slots,
+        num_draft_tokens=[],
+        num_accepted_tokens=[],
+        capture=True,
+    )
+    graph_builder.dummy_run_uniform = None
+    static_tokens = _random_tokens(num_tokens, device)
+    graph, static_output = _capture_gdn_graph(
+        graph_layer, capture_metadata, static_tokens, weights
+    )
+    for graph_pool, eager_pool in zip(graph_layer.kv_cache, eager_layer.kv_cache):
+        assert torch.equal(graph_pool, eager_pool)
+
+    # ======== Replay the mixes ========
+    graph_builder.replays_packed_graph = True
+    mixes = [
+        ([4, 4, 13], [40, 50, 0], [3, 3, -1], [2, 4, 1]),
+        ([3, 1, 1, 9], [40, 30, 20, 0], [2, -1, -1, -1], [3, 3, 1, 1]),
+        ([7, 5], [0, 12], [-1, -1], [1, 1]),
+        ([4, 2], [40, 50], [3, 1], [1, 2]),
+    ]
+    for query_lens, context_lens, num_draft_tokens, num_accepted_tokens in mixes:
+        step = dict(
+            query_lens=query_lens,
+            context_lens=context_lens,
+            slots=slots[: len(query_lens)],
+            num_draft_tokens=num_draft_tokens,
+            num_accepted_tokens=num_accepted_tokens,
+        )
+        graph_metadata = _draft_step(graph_builder, **step, num_tokens=num_tokens)
+        assert graph_metadata.execution_path is LinearAttentionExecutionPath.PACKED
+        tokens = _random_tokens(sum(query_lens), device)
+        for static, tensor in zip(static_tokens, tokens):
+            static.zero_()
+            static[: tensor.shape[0]].copy_(tensor)
+        graph.replay()
+        expected = _run(
+            eager_layer, _draft_step(eager_builder, **step), tokens, weights
+        )
+        num_real = sum(query_lens)
+        assert torch.equal(static_output[:num_real].float(), expected), query_lens
+        assert not static_output[num_real:].any()
+        for graph_pool, eager_pool in zip(graph_layer.kv_cache, eager_layer.kv_cache):
+            assert torch.equal(graph_pool, eager_pool), query_lens
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_draft_verify_graph_follows_the_dummy_key() -> None:
+    """The uniform graph runs only the verify kernels, whatever vLLM's stale draft counts say.
+
+    warm-up and capture   draft and accepted counts 0 (stale): null slots, counts of 1
+    replay                3 verify rows padded to 4 (16 tokens): bitwise vs eager, zero padding
+    eager, same padding   zero padding over NaN buffers
+    """
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    weights = _random_gdn_weights(device)
+    slots = [[4 * row + column for column in range(1, 5)] for row in range(4)]
+    graph_builder, eager_builder = _draft_builder(), _draft_builder()
+    graph_layer = _qwen3_5_gdn_layer(num_speculative_tokens=3, num_slots=17)
+    eager_layer = _qwen3_5_gdn_layer(num_speculative_tokens=3, num_slots=17)
+    eager_layer.kv_cache = tuple(pool.clone() for pool in graph_layer.kv_cache)
+    dummy = dict(
+        query_lens=[4] * 4,
+        context_lens=[4] * 4,
+        slots=slots,
+        num_draft_tokens=[0] * 4,
+        num_accepted_tokens=[0] * 4,
+    )
+
+    graph_builder.dummy_run_uniform = True
+    warmup_metadata = _draft_step(graph_builder, **dummy)
+    capture_metadata = _draft_step(graph_builder, **dummy, capture=True)
+    graph_builder.dummy_run_uniform = None
+    for metadata in (warmup_metadata, capture_metadata):
+        assert metadata.execution_path is LinearAttentionExecutionPath.VERIFY
+        assert not metadata.spec_state_indices_tensor.any()
+        assert (metadata.num_accepted_tokens == 1).all()
+    static_tokens = _random_tokens(16, device)
+    graph, static_output = _capture_gdn_graph(
+        graph_layer, capture_metadata, static_tokens, weights
+    )
+
+    graph_builder.replays_uniform_graph = True
+    # vLLM pads a uniform batch with zero-token rows at the end.
+    padded = dict(
+        query_lens=[4, 4, 4, 0],
+        context_lens=[40, 50, 60, 0],
+        slots=[*slots[:3], [0] * 4],
+        num_draft_tokens=[3, 3, 3, -1],
+        num_accepted_tokens=[2, 4, 1, 1],
+    )
+    _draft_step(graph_builder, **padded)
+    tokens = _random_tokens(12, device)
+    for static, tensor in zip(static_tokens, tokens):
+        static.zero_()
+        static[:12].copy_(tensor)
+    graph.replay()
+    real = {name: values[:3] for name, values in padded.items()}
+    expected = _run(eager_layer, _draft_step(eager_builder, **real), tokens, weights)
+    assert torch.equal(static_output[:12].float(), expected)
+    assert not static_output[12:].any()
+    for graph_pool, eager_pool in zip(graph_layer.kv_cache, eager_layer.kv_cache):
+        assert torch.equal(graph_pool, eager_pool)
+
+    # The verify kernels leave the padding unwritten. With new_empty returning NaN (vLLM's
+    # verify kernel allocates its output with it), only the zeroing makes the padding zero.
+    probe_metadata = _draft_step(eager_builder, **padded, num_tokens=16)
+    assert probe_metadata.execution_path is LinearAttentionExecutionPath.VERIFY
+    probe_layer = _qwen3_5_gdn_layer(num_speculative_tokens=3, num_slots=17)
+    probe_tokens = _random_tokens(16, device)
+    with patch.object(
+        torch.Tensor,
+        "new_empty",
+        lambda self, *size, **kwargs: self.new_full(size, torch.nan, **kwargs),
+    ):
+        padded_output = _run(probe_layer, probe_metadata, probe_tokens, weights)
+    assert not padded_output[12:].any()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -697,6 +1009,77 @@ def test_draft_builder_rejects_rows_it_cannot_stage() -> None:
             num_draft_tokens=[3, 3, 3, -1],
             num_accepted_tokens=[2, 4, 1, 1],
         )
+
+
+def _qwen3_5_gdn_layer(num_speculative_tokens: int, num_slots: int) -> gdn.VLLMInnerGDN:
+    """A `VLLMInnerGDN` with random conv and SSM pools; slot 0 is vLLM's null slot.
+
+    The conv pool keeps 3 + k inputs per slot (width - 1 + k), as vLLM allocates it.
+    """
+    layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "gdn"
+    layer.num_speculative_tokens = num_speculative_tokens
+    layer.local_num_k_heads = layer.local_num_v_heads = _HEADS
+    layer.head_k_dim = layer.head_v_dim = _HEAD_DIM
+    layer.conv_kernel_size = 4
+    conv_rows = 3 + num_speculative_tokens
+    layer.kv_cache = (
+        (torch.randn(num_slots, conv_rows, _CHANNELS, device="cuda") * 0.5).bfloat16(),
+        torch.randn(num_slots, _HEADS, _HEAD_DIM, _HEAD_DIM, device="cuda") * 0.05,
+    )
+    return layer
+
+
+def _random_gdn_weights(device: torch.device) -> tuple[torch.Tensor, ...]:
+    """Random (conv_weight, A_log, dt_bias)."""
+    conv_weight = (torch.randn(_CHANNELS, 4, device=device) / 2).bfloat16()
+    A_log = torch.log1p(torch.rand(_HEADS, device=device) * 15)
+    dt_bias = torch.full((_HEADS,), -3.0, device=device)
+    return conv_weight, A_log, dt_bias
+
+
+def _random_tokens(num_tokens: int, device: torch.device) -> tuple[torch.Tensor, ...]:
+    """(mixed_qkv, a, b) for `num_tokens` tokens."""
+    mixed_qkv = torch.randn(num_tokens, _CHANNELS, device=device, dtype=torch.bfloat16)
+    a, b = torch.randn(2, num_tokens, _HEADS, device=device, dtype=torch.bfloat16)
+    return mixed_qkv, a, b
+
+
+def _run(layer, metadata, tokens, weights) -> torch.Tensor:
+    conv_weight, A_log, dt_bias = weights
+    mixed_qkv, a, b = tokens
+    context = ForwardContext(
+        no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
+    )
+    with torch.inference_mode(), override_forward_context(context):
+        # vLLM's conv update writes its output over its input.
+        output = layer._forward(
+            mixed_qkv.clone(), a, b, conv_weight, None, A_log, dt_bias
+        )
+    return output.float()
+
+
+def _capture_gdn_graph(
+    layer, metadata, static_tokens, weights
+) -> tuple[torch.cuda.CUDAGraph, torch.Tensor]:
+    """Warm `layer` up on `metadata`, then capture its forward; return the graph and its output."""
+    conv_weight, A_log, dt_bias = weights
+    context = ForwardContext(
+        no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
+    )
+    with torch.inference_mode(), override_forward_context(context):
+        layer._forward(*static_tokens, conv_weight, None, A_log, dt_bias)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = layer._forward(*static_tokens, conv_weight, None, A_log, dt_bias)
+    return graph, output
+
+
+def _assert_close(got: torch.Tensor, want: torch.Tensor) -> None:
+    error = ((got.float() - want.float()).norm() / want.float().norm()).item()
+    assert error < 1e-2, error
 
 
 def _linear_builder(
