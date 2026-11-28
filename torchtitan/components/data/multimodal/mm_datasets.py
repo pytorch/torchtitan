@@ -620,6 +620,8 @@ class MMSamplePackingConfig:
             ),
             seed=dataset_iteration_policy.seed,
             shuffle_bins=dataset_iteration_policy.shuffle,
+            # Fixed-shape varlen metadata asserts at most max_num_documents per microbatch.
+            max_sequences_per_bin=context.max_num_documents,
         )
         return dataset.map(
             partial(
