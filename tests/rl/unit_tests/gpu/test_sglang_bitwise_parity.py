@@ -35,6 +35,10 @@ Test bitwise parity between the SGLang generator and the TorchTitan trainer.
 Debug models with random weights start from the trainer's weights, loaded through the
 same in-place model state dict load.
 
+TestSGLangFp8KVCacheGDNHiCache runs the GDN HiCache tests with an fp8 KV cache at TP 1
+(one process), outside batch-invariant mode: tests 1, 3 and 4 and
+test_trainer_vs_sglang_decode_after_host_load_back compare logprobs within a tolerance.
+
 Runs in the B200 RL CI job.
 Run each class in its own launch, with as many processes as its DP x TP degree (one
 for TestSGLangBitwiseParityKDA, four for TestSGLangBitwiseParityMoEDPEP,
@@ -62,6 +66,7 @@ from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.batch_invariant import set_batch_invariance
@@ -73,6 +78,7 @@ from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
+from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest, SamplingConfig
@@ -84,6 +90,7 @@ from torchtitan_recipes.rl.alphabet_sort import (
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_kimi_k3_debug_varlen_batch_invariant,
+    rl_grpo_qwen3_5_debug_varlen,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 
@@ -114,6 +121,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     cuda_graph = "full"
     # SGLangEngine.Config.extra_server_args.
     extra_server_args = {}
+    # SGLangEngine.Config.kv_cache_dtype.
+    kv_cache_dtype = "auto"
     BATCH_SIZE = 5
     PROMPT_LENGTH = 150
     MAX_GEN_TOKENS = 50
@@ -154,7 +163,9 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding.cache_clear()
 
         cls.engine = SGLangEngine.Config(
-            cuda_graph=cls.cuda_graph, extra_server_args=cls.extra_server_args
+            cuda_graph=cls.cuda_graph,
+            extra_server_args=cls.extra_server_args,
+            kv_cache_dtype=cls.kv_cache_dtype,
         ).build(
             model=config.generator.model,
             parallelism=config.generator.parallelism,
@@ -245,6 +256,10 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             torch.equal(a, b), f"{name}: NOT bitwise identical ({max_delta=:.2e})"
         )
 
+    def _assert_trainer_logprobs_match(self, name, trainer_logprobs, sglang_logprobs):
+        """SGLang's logprobs of its sampled tokens equal the trainer's, bitwise."""
+        self._assert_bitwise_equal(name, trainer_logprobs, sglang_logprobs)
+
     def _trainer_logprobs(self, token_ids):
         """``compute_trainer_prefill_logprobs`` of the trainer model."""
         with self.parallelism_context.activate_spmd(), torch.no_grad():
@@ -263,7 +278,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         trainer_lps = self._trainer_logprobs(sequences)
         if dist.get_rank() == 0:
             for i, (prompt, result) in enumerate(zip(prompt_ids, results)):
-                self._assert_bitwise_equal(
+                self._assert_trainer_logprobs_match(
                     f"seq {i}: trainer prefill vs SGLang decode",
                     trainer_lps[i][len(prompt) - 1 :],
                     result.token_logprobs,
@@ -542,6 +557,69 @@ class TestSGLangBitwiseParityGDNHiCache(TestSGLangBitwiseParityGDN):
                 num_cached_tokens = result.metrics_inputs.num_cached_tokens
                 self.assertGreater(num_cached_tokens, len(prompt))
                 self.assertEqual(req.cached_tokens_host, num_cached_tokens)
+
+
+def _qwen3_5_debug_tp1_config() -> Controller.Config:
+    """The Qwen3.5 debug recipe at TP 1 on both sides, outside batch-invariant mode."""
+    config = rl_grpo_qwen3_5_debug_varlen()
+    trainer_parallelism = ParallelismConfig()
+    generator_parallelism = InferenceParallelismConfig()
+    trainer_model, generator_model = build_rl_model_configs(
+        build_qwen3_5_model_config,
+        "debugmodel",
+        seq_len=config.trainer.model.max_context_length,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
+    config.trainer = dataclasses.replace(
+        config.trainer, model=trainer_model, parallelism=trainer_parallelism
+    )
+    config.generator = dataclasses.replace(
+        config.generator, model=generator_model, parallelism=generator_parallelism
+    )
+    return config
+
+
+class TestSGLangFp8KVCacheGDNHiCache(TestSGLangBitwiseParityGDNHiCache):
+    """``TestSGLangBitwiseParityGDNHiCache`` with an fp8 KV cache, on one GPU: a smoke test
+    of SGLang's fp8 path (the pool dtype, the q cast, HiCache's copies of fp8 KV).
+
+    fp8 runs outside batch-invariant mode, and attention runs FA4's fp8 forward, which the
+    trainer does not run: SGLang's logprobs match the trainer's within a tolerance, and
+    SGLang's own results may change with the batch. The bound catches garbage KV, not a
+    wrong scale: this random-weight model's attention is flat, so a k descale of 2 gives
+    about 5e-3. test_sglang_fp8_attention.py checks the kernel's numerics.
+    """
+
+    config_fn = staticmethod(_qwen3_5_debug_tp1_config)
+    kv_cache_dtype = "fp8"
+    # The bound on the mean |trainer - SGLang| logprob of a sequence's sampled tokens; fp8
+    # gives about 2e-3 on this model.
+    MAX_MEAN_ABS_DIFF = 0.01
+
+    def test_runs_on_fp8_kv_pool(self):
+        model_runner = self.engine._scheduler.tp_worker.model_runner
+        self.assertEqual(model_runner.kv_cache_dtype, torch.float8_e4m3fn)
+
+    def test_sglang_decode_batch_invariance(self):
+        self.skipTest("fp8 runs outside batch-invariant mode")
+
+    def test_sglang_decode_across_model_state_dict_load(self):
+        self.skipTest(
+            "fp8 runs outside batch-invariant mode: recomputed KV may change the tokens"
+        )
+
+    def _assert_trainer_logprobs_match(self, name, trainer_logprobs, sglang_logprobs):
+        trainer_logprobs = torch.as_tensor(trainer_logprobs, dtype=torch.float32).cpu()
+        sglang_logprobs = torch.as_tensor(sglang_logprobs, dtype=torch.float32).cpu()
+        self.assertEqual(trainer_logprobs.shape, sglang_logprobs.shape, name)
+        abs_diff = (trainer_logprobs - sglang_logprobs).abs()
+        print(
+            f"  {name}: mean |diff| {abs_diff.mean().item():.2e}, "
+            f"max {abs_diff.max().item():.2e}"
+        )
+        self.assertLess(abs_diff.mean().item(), self.MAX_MEAN_ABS_DIFF, name)
 
 
 def _debug_model_config(

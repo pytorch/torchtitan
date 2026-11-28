@@ -82,6 +82,7 @@ scripts/install_rl_env.sh --sglang
 | GDN linear attention (Qwen3.5) | Supported; see below |
 | KDA linear attention (Kimi K3) | Supported; see below |
 | MLA (DeepSeek V3) | Supported with per-head K/V in the KV cache, as the vLLM engine runs MLA in batch-invariant mode; SGLang's compressed-latent MLA cache is not used |
+| fp8 KV cache (`SGLangEngine.Config.kv_cache_dtype="fp8"`) | Supported on SM100-family GPUs at TP 1 and DP 1, outside batch-invariant mode, with or without HiCache; tested on GDN models (Qwen3.5). Raises for sliding-window layers, MLA layers (DeepSeek V3, Kimi K3) and the Mooncake HiCache storage backend (untested). Attention runs FA4's fp8 forward |
 | Flex attention, attention sinks (GPT-OSS) | Not supported |
 | MoE with expert parallelism over the DP and TP ranks, Dist-MoE | Supported; see below |
 | Sequence parallelism | Not supported |
