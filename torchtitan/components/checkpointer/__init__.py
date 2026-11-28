@@ -9,10 +9,12 @@ from .base import (
     CheckpointStorage,
     DATALOADER,
     EMA,
+    export_state_dict,
     LR_SCHEDULER,
     MODEL,
     ModelWrapper,
     OPTIMIZER,
+    ParamCheckpointType,
     TRAIN_STATE,
 )
 from .dcp import AsyncMode, CheckpointManager
@@ -24,9 +26,11 @@ __all__ = [
     "CheckpointStorage",
     "DATALOADER",
     "EMA",
+    "export_state_dict",
     "LR_SCHEDULER",
     "MODEL",
     "ModelWrapper",
     "OPTIMIZER",
+    "ParamCheckpointType",
     "TRAIN_STATE",
 ]

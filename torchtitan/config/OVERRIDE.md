@@ -9,9 +9,8 @@ This is the reference for how the mechanism works and how to write overrides.
 
 Torchtitan has a config-driven build system: every component defines a nested
 `Config` dataclass and `config.build()` constructs the owning object. Swapping a
-component currently works through model config converters and transforms,
-which traverse the model config tree and replace `Config` nodes before model
-construction.
+component currently works through model config transforms, which traverse
+the model config tree and replace `Config` nodes before model construction.
 
 That works well for in-repo, first-class features, but it requires editing the
 repo for *every* alternative implementation. The override mechanism removes that
@@ -77,7 +76,7 @@ tree and replaces matching nodes with the factory's output.
   model.
 - **Minimal surface.** The whole mechanism lives in
   `torchtitan/config/override.py`, reusing the `Configurable.Config.traverse()` +
-  replace pattern that quantization converters and the LoRA transform already use.
+  replace pattern that the quantization and LoRA transforms already use.
 
 ## How It Works
 
@@ -91,28 +90,35 @@ example); no `triton_rope.py` is shipped. It is a valid override: each attention
 module owns a `rope` submodule (a `RoPE.Config`), so swapping in a custom RoPE is
 an ordinary component override.
 
+The example targets `ComplexRoPE.Config`, the format its kernel implements. RoPE
+formats read `positions` differently (1D ids for text, `(T, 2)` coordinates for
+the vision RoPEs), so target the format you replace; `target=RoPE.Config` would
+match all of them. Vision attention works the same way:
+`VisionAttention.Config.rope` holds a `ComplexVisionRoPE.Config` or a
+`CosSinVisionRoPE.Config`.
+
 ```python
 from dataclasses import dataclass
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import ComplexRoPE
 
 
-class TritonRoPE(RoPE):
+class TritonRoPE(ComplexRoPE):
     """RoPE applied with a Triton kernel (illustrative)."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(RoPE.Config):
+    class Config(ComplexRoPE.Config):
         block_size: int = 128
 
     def __init__(self, config: Config): ...
     def forward(self, query, key, positions=None): ...
 
 
-@override(target=RoPE.Config,
+@override(target=ComplexRoPE.Config,
           description="Triton rotary embedding, ~2x faster on A100+")
-def triton_rope(cfg: RoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
-    # `derive` copies every field shared with RoPE.Config; the factory states
+def triton_rope(cfg: ComplexRoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
+    # `derive` copies every field shared with ComplexRoPE.Config; the factory states
     # only its deltas. See "Deriving the replacement config" below. `block_size`
     # defaults to 128 but can be tuned per config tree via a per-entry kwarg
     # (see "Optional per-entry kwargs" below).
@@ -137,14 +143,14 @@ This matters for version-robustness. Hand-copying couples a factory to the
 target's field set at the time it was written:
 
 ```python
-# Fragile: RoPE.Config has many fields (theta, scaling, rope_factor, beta_fast,
+# Fragile: ComplexRoPE.Config has many fields (theta, scaling, sharding_config,
 # ...); hand-copying only some silently drops the rest to their defaults — and a
 # field added later would be dropped too, with no error.
 return TritonRoPE.Config(
     dim=cfg.dim, max_context_length=cfg.max_context_length,
                          theta=cfg.theta, scaling=cfg.scaling)
 
-# Robust: every RoPE.Config field (including ones added later, inherited by the
+# Robust: every ComplexRoPE.Config field (including ones added later, inherited by the
 # subclass TritonRoPE.Config) is copied automatically; only block_size is a delta.
 return derive(cfg, TritonRoPE.Config, block_size=128)
 ```
@@ -173,11 +179,6 @@ second module:
 OverrideConfig(imports=["my_pkg.triton_rope.triton_rope"])                       # -> 128
 OverrideConfig(imports=[("my_pkg.triton_rope.triton_rope", {"block_size": 256})])
 ```
-
-(The RL trainer and generator use this to activate one HybridEP dispatch override
-with opposite `capacity_factor` values — blocking `None` for the trainer, a float
-for the CUDA-graph-capturing generator — instead of two modules or a hardcoded
-per-actor branch.)
 
 The factory declares the keyword parameters it accepts (or `**kwargs`); a kwarg
 it does not accept raises rather than silently no-op'ing. On the CLI, attach
@@ -230,22 +231,28 @@ In `Trainer.__init__`, before any component is built:
    re-traversed). An override that changes a module's sharding contract must set
    the replacement's `sharding_config`; `derive()` preserves it when the contract
    is unchanged.
-7. Log every replacement.
+7. Log one line per distinct (override, source class -> replacement class,
+   kwargs) group, with the match count and folded indexed FQN ranges
+   (matching `format_config()`). `apply_overrides()` returns one line per
+   replaced node.
 
 ```
-INFO: [Override] fused_swiglu: model.layers.0.feed_forward FeedForward.Config -> FeedForward.Config
-INFO: [Override] fused_swiglu: model.layers.1.feed_forward FeedForward.Config -> FeedForward.Config
-...
+INFO: [Override] fused_swiglu: DenseFeedForward.Config -> DenseFeedForward.Config matched=32 fqns=['model.layers.{0..31}.feed_forward']
 INFO: Applied 32 override(s)
 ```
 
 The model config is a `Configurable.Config` nested directly at `model` in the
 trainer config. FQNs are kept as full paths from the `Trainer.Config` root, so a
-component is `model.layers.0.feed_forward`. Preserving the full path (rather
+component is `model.layers.0.feed_forward`. An RL `Controller.Config` holds an
+`override` field too, applied to its whole tree before actors spawn; there the
+same component is both `trainer.model.layers.0.feed_forward` and
+`generator.model.layers.0.feed_forward`, so an override changes both models.
+Settings that must differ between the RL trainer and generator (for example the
+MoE token dispatcher) belong in per-role model config transforms instead. Preserving the full path (rather
 than resetting to bare model names) lets per-node conflict detection recognize
 a whole-model override as an ancestor of a component override. (This differs
-from converter `filter_fqns`, which are bare because converters traverse the
-model config directly.)
+from quantization transform `fqns`, which are bare because transforms traverse
+the model config directly.)
 
 ### External packages
 
@@ -311,7 +318,7 @@ def nvfp4_linear(cfg: Linear.Config) -> "NVFP4Linear.Config":
     return NVFP4Linear.Config(in_features=cfg.in_features, ...)
 
 # Fused MoE only on the later layers
-@override(target=MoE.Config, fqns=["*.layers.1[0-9].moe"])
+@override(target=MoE.Config, fqns=["*.layers.1[0-9].feed_forward"])
 def vendor_moe(cfg: MoE.Config) -> "VendorMoE.Config":
     return VendorMoE.Config(num_experts=cfg.num_experts, ...)
 ```
@@ -340,11 +347,11 @@ This same rule answers the parent/child question directly. Say override A
 targets a parent Config (e.g. `MoE.Config`) and override B targets a Config
 nested inside it (e.g. `GroupedLinear.Config`):
 
-- **Disjoint subtrees** (A on `...layers.0.moe`, B on
-  `...layers.1.moe.routed_experts.w13`) — the claimed nodes are
+- **Disjoint subtrees** (A on `...layers.0.feed_forward`, B on
+  `...layers.1.feed_forward.routed_experts.w13`) — the claimed nodes are
   unrelated, so both apply.
-- **Overlapping** (A on `...layers.0.moe`, B on
-  `...layers.0.moe.routed_experts.w13`) — B's node is inside A's, the
+- **Overlapping** (A on `...layers.0.feed_forward`, B on
+  `...layers.0.feed_forward.routed_experts.w13`) — B's node is inside A's, the
   ancestor case above, so we **error**.
 
 We error rather than pick one of the two plausible behaviors implicitly:
@@ -370,39 +377,39 @@ in by targeting `OptimizersContainer.Config` without editing a recipe
 function. The model config itself is a valid target for a whole-model swap
 because it is a `Configurable.Config` subclass.
 
-## Interaction with Converters and Transforms
+## Interaction with Transforms
 
-In-repo quantization converters run first inside `build_model_config()` during
-config construction. Model config transforms such as LoRA run afterward when
-the recipe calls `apply_transforms`. Overrides run later in `Trainer.__init__`
-and see the post-converter, post-transform tree. The order is deliberate:
-in-repo conversions run against known core configs, and overrides layer on top.
+In-repo model config transforms such as quantization and LoRA run during
+config construction, when the recipe calls `apply_transforms`. Overrides run
+later in `Trainer.__init__` and see the post-transform tree. The order is
+deliberate: in-repo transforms run against known core configs, and overrides
+layer on top.
 
-Conversely, converter-style transforms *can* be expressed as overrides (a
-factory that rewrites a `Config`), so external code does not need the converter
-machinery.
+Conversely, a transform that rewrites `Config` nodes *can* be expressed as an
+override (a factory that rewrites a `Config`), so external code does not need
+the transform machinery.
 
-| Override Target | Conflicts with a converter? | Notes |
-|-----------------|------------------------------|-------|
-| RoPE / FeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
-| GroupedLinear.Config | Possibly | Quantization converters can rewrite this |
+| Override Target | Conflicts with quantization or LoRA? | Notes |
+|-----------------|--------------------------------------|-------|
+| RoPE / DenseFeedForward / MoE / RMSNorm / inner attention | No | Neither touches these |
+| GroupedLinear.Config | Possibly | Quantization transforms can rewrite this |
 | Linear.Config | Yes | Quantization and LoRA can replace these |
 
-Where a converter already rewrote a node, target that node by location with
+Where a transform already rewrote a node, target that node by location with
 `fqns` so the override only claims the instances you intend (e.g. specific
-layers the converter left as plain `Linear.Config`). Field/type-based exclusion
+layers the transform left as plain `Linear.Config`). Field/type-based exclusion
 -- "skip instances already turned into a quantized config" -- is not expressible
 with FQN globs alone and motivates the future predicate selector.
 
-### Override vs. converter: which to use
+### Override vs. transform: which to use
 
-Converters are the right home for **core, broadly-applicable transforms that
+Transforms are the right home for **core, broadly-applicable rewrites that
 preserve a property we guarantee** (e.g. batch-invariance, which is largely
 op-level and must hold across the model). Overrides exist for an *unblocking*
 purpose: swapping in an alternative implementation. By design we make **no
 promise that any core property survives an arbitrary override** — that is the
 override author's responsibility. So features like batch-invariant mode stay
-converters, not overrides.
+transforms, not overrides.
 
 ## Checkpoint Compatibility
 
@@ -411,14 +418,16 @@ checkpoint FQNs. By default an override checkpoints whatever real parameters it
 defines. Keep format-specific layout conversion in a model-level
 `BaseStateDictAdapter` (for example, `Llama3StateDictAdapter` converts native
 `w13.weight` into Hugging Face `gate_proj.weight` and `up_proj.weight`). This
-keeps native DCP checkpoints and per-step RL weight synchronization in the
+keeps native DCP checkpoints and per-step RL model state dict pushes in the
 model's physical layout without hook-produced copies.
 
 ## Parallelism
 
 Parallelism is expressed entirely through the `Module` protocol: a replacement
 satisfies `init_states` and declares a `ShardingConfig` for the states and
-activations it wants sharded. `Module._parallelize()` reads that `ShardingConfig`
+activations it wants sharded. The matched config is already sharded for its
+parallelism (`build_model_config(..., parallelism=...)`), so a replacement keeps
+the matched `sharding_config` (`derive` copies it) or sets the sharding it needs. `Module._parallelize()` reads that `ShardingConfig`
 exactly as it does for core modules, so an override composes with TP/FSDP by
 declaring its own sharding — nothing model-specific is required, and the
 mechanism deliberately stays config-driven rather than depending on imperative
@@ -428,7 +437,7 @@ One thing worth stating plainly:
 
 - **Fusion under TP.** Fusing weights can interact subtly with tensor
   parallelism -- the fused tensor's row order must admit a correct shard.
-  The default `FeedForward` stores a `Linear` weight
+  The default `DenseFeedForward` stores a `Linear` weight
   `(2, hidden, dim)`. Sharding dimension 1 gives each TP rank matching feature
   slices of the gate and up projections while keeping their rows in separate
   contiguous slabs. The output retains the same `(2, hidden)` structure. This
@@ -473,19 +482,20 @@ for the full recipe.
 
 - `torchtitan_recipes/overrides/fused_swiglu.py` -- **the custom Triton activation
   example.** It replaces the default torch-native SiLU and multiply operations
-  while retaining the core `FeedForward` parameter layout and checkpoint
+  while retaining the core `DenseFeedForward` parameter layout and checkpoint
   behavior. Because the override targets `SwiGLU.Config`, it also applies to
   grouped experts and dist-GEMM feed-forwards that use that activation.
-- `torchtitan_recipes/overrides/helion_rope.py` — **the custom-kernel example.** Swaps
-  `ComplexRoPE` for a fused Helion kernel (forward + backward) wrapped in a
-  `torch.library.custom_op` (with `register_fake` / `register_autograd`), the
-  recipe from "Custom kernels and `torch.compile`". `helion` is an optional
-  dependency, so the module imports without it and falls back to the PyTorch RoPE
-  when it (or CUDA) is unavailable; it is checkpoint-compatible with stock.
+- `torchtitan_recipes/overrides/higher_precision_rms_norm.py` -- **a
+  higher-precision norm example.** It replaces every exact `RMSNorm.Config`
+  (decoder norms and QK norms) with `HigherPrecisionRMSNorm`, which keeps the
+  `nn.RMSNorm` parameter layout and accumulates the sum of squares with
+  compensated FP32 summation (FP64 with `use_kahan_summation=False`). The Triton
+  kernels are registered as `torch.library.custom_op`s with fake and autograd
+  registrations. It runs as a local SPMD region typed by the norm's own
+  `ShardingConfig`.
 The `TritonRoPE` snippets above are illustrative — no `triton_rope.py` is
-shipped — but RoPE is a fully valid override target (`helion_rope.py` is a real
-one): each attention module owns a `rope` submodule (`RoPE.Config`), so a custom
-RoPE is an ordinary component override.
+shipped — but RoPE is a fully valid override target: each attention module owns a
+`rope` submodule (`RoPE.Config`), so a custom RoPE is an ordinary component override.
 
 ## Code map
 
@@ -493,10 +503,11 @@ RoPE is an ordinary component override.
 |------|------|
 | `torchtitan/config/override.py` | The mechanism: `OverrideConfig`, `Override`, `override`, `derive`, `apply_overrides`, `clear_overrides`. |
 | `torchtitan/config/__init__.py` | Re-exports the override API. |
-| `torchtitan/protocols/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
+| `torchtitan/models/base/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field and applies recipe-provided overrides before builds. |
-| `torchtitan_recipes/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
-| `tests/unit_tests/cpu/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
+| `torchtitan/rl/controller/controller.py` | Holds the RL `override` field and applies it to the trainer and generator models before spawning actors. |
+| `torchtitan_recipes/overrides/` | In-repo example implementations (`fused_swiglu.py`). |
+| `tests/unit_tests/cpu/config/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
 
 Overriding a component requires no changes to a recipe or model package; that
 is the point of the design.
@@ -527,4 +538,4 @@ is the point of the design.
 
 - **Predicate `fqns` selector.** A `(fqn, cfg) -> bool` selector to complement
   the glob strings, enabling field/type-based selection (e.g. skipping linears a
-  converter already turned into a quantized config).
+  quantization transform already turned into a quantized config).

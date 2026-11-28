@@ -21,6 +21,11 @@ Kimi K3 is built on Kimi Delta Attention (KDA) and Attention Residuals
 (AttnRes), with 69 KDA layers and 24 Gated MLA layers. Stable LatentMoE selects
 16 of 896 experts per token, and MoonViT-V2 provides native vision input.
 
+The `Kimi-K3` and `debugmodel` flavors are text-only: they build `KimiK3Model`,
+the decoder without the vision encoder, and read the language model from the
+multimodal checkpoint. The `_mm` flavors build `KimiK3MultimodalModel`, which
+adds MoonViT-V2.
+
 ## Released Model Configuration
 
 The values below follow the
@@ -50,10 +55,28 @@ describe the released model.
 | Expert parallelism | Supported |
 | Pipeline parallelism | Supported |
 
+## Full-Scale Recipe
+
+`torchtitan_recipes.models.kimi_k3` provides a text-only throughput recipe for
+the full 93-layer model at 4K sequence length. It runs the routed experts
+through Dist-MoE in MXFP8, keeps parameters, gradients and optimizer state in
+FP32, and uses DistMuon. Expert routing is forced round-robin, so the recipe
+measures throughput, not learned-router training.
+
+| Recipe | GPUs | PP / VPP / EP / FSDP | Routing | Tokens / update | Tokens/s/GPU | Model TFLOP/s/GPU |
+| --- | --- | --- | --- | ---: | ---: | ---: |
+| `kimi_k3_dist_moe_mxfp8_gb200_512` | 512 GB200 | 8 / 1 / 64 / 64 | Forced round-robin | 16.8M | 1,010 | 651 |
+| `kimi_k3_dist_moe_mxfp8_gb200_512` | 512 GB200 | 8 / 1 / 64 / 64 | Learned | 16.8M | 971 | 627 |
+
+Throughput is the median of steady-state updates in a 12-update run. The first
+row was measured with this recipe. The learned-routing row keeps Kimi K3's
+default quantile-balanced router and raises the Dist-MoE scratch capacity
+factor from 1.0 to 2.0.
+
 ## Numerical Parity
 
 The parity script reduces the released Hugging Face configuration to match
-TorchTitan's local `debugmodel` configuration before initializing both models.
+TorchTitan's local `debugmodel_mm` configuration before initializing both models.
 
 End-to-end KL divergence against the Hugging Face implementation (multimodal
 inputs): **1.0212e-5**, with **100% top-1 and top-5 match**.
@@ -65,4 +88,4 @@ Test scripts:
 
 - `scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` -- Hugging Face vs.
   TorchTitan comparison
-- `tests/unit_tests/gpu/test_kimi_k3.py` -- KDA and FSDP2 correctness
+- `tests/unit_tests/gpu/models/kimi_k3/test_kimi_k3.py` -- KDA and FSDP2 correctness

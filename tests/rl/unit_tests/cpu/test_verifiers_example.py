@@ -21,8 +21,9 @@ from torchtitan.components.renderer import RenderersConfigAdapter
 
 from torchtitan.config import ConfigLoader
 from torchtitan.rl.examples.dapo_math import DapoMathSample
-from torchtitan.rl.examples.verifiers import VerifiersRollouter, VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.dapo_math import data
+from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
+from torchtitan.rl.examples.verifiers.rollouter import VerifiersRollouter
 from torchtitan_recipes.rl.verifiers_dapo_math import _verifiers_math_rollouter_config
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 
@@ -75,6 +76,24 @@ def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
     assert [next(resumed) for _ in range(3)] == expected
 
 
+def test_verifiers_task_dataset_keeps_the_first_num_tasks(monkeypatch) -> None:
+    samples = [
+        DapoMathSample(prompt=f"problem {i}", ground_truth="1") for i in range(3)
+    ]
+    monkeypatch.setattr(data, "_load_math_dataset", lambda name: (iter(samples), 3))
+    dataset = VerifiersTaskDataset.Config(
+        verifiers_taskset=data.VerifiersMathTasksetConfig(
+            id="torchtitan.rl.examples.verifiers.dapo_math.data",
+            dataset="dapo_math",
+        ),
+        num_tasks=2,
+        shuffle=False,
+    ).build()
+
+    task_indices = [next(dataset).verifiers_task_data["idx"] for _ in range(4)]
+    assert task_indices == [0, 1, 0, 1]
+
+
 def test_verifiers_environment_uses_no_sandbox() -> None:
     rollouter_config = _verifiers_math_rollouter_config(max_rollout_tokens=10240)
     config = rollouter_config.verifiers_env_server
@@ -85,7 +104,8 @@ def test_verifiers_environment_uses_no_sandbox() -> None:
     assert isinstance(config.serve.pool, vf.StaticPoolConfig)
     assert config.serve.pool.num_workers == 1
     assert (
-        config.environment.taskset == rollouter_config.train_dataset.verifiers_taskset
+        config.environment.taskset
+        == rollouter_config.training_dataloader.dataset.verifiers_taskset
     )
     assert config.local_taskset_module == data.__name__
 
@@ -101,7 +121,7 @@ def test_verifiers_config_keeps_dapo_training_recipe() -> None:
     )
     assert isinstance(config.rollouter, VerifiersRollouter.Config)
     assert config.generator.sampling.max_tokens == 8192
-    assert config.rollouter.generation_server.max_rollout_tokens == 10240
+    assert config.rollouter.worker.generation_server.max_rollout_tokens == 10240
     assert config.dump_folder == "outputs/rl/qwen3_4b_verifiers_8k"
     assert isinstance(config.renderer, RenderersConfigAdapter)
     assert config.renderer.renderers_config.name == "qwen3"

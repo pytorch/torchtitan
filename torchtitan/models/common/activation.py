@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -11,7 +12,6 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from torchtitan.config.configurable import Configurable
 from torchtitan.config.function import Function
 from torchtitan.distributed.local_compile import local_compile
 
@@ -24,11 +24,18 @@ class BinaryActivationFn(Function[torch.Tensor], ABC):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+    class Config(Function.Config):
         pass
 
     # recompile_limit=16: ~3 graphs per static F; DeepSeek-V3 at TP8 needs 10 (default 8).
-    @local_compile("fused_binary_activation", batch_invariant=True, recompile_limit=16)
+    # Backward stacks the gate and up gradients into [..., 2, F]. Both limits at 0 make Inductor write
+    # each gradient into its half, not one kernel that picks a half per element. Both are needed.
+    @local_compile(
+        "fused_binary_activation",
+        batch_invariant=True,
+        recompile_limit=16,
+        options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
+    )
     def __call__(
         self, gate_up: torch.Tensor, *, offsets: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -67,7 +74,7 @@ class UnaryActivationFn(Function[torch.Tensor], ABC):
     """Base class for configurable one-input activation functions."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+    class Config(Function.Config):
         pass
 
     @abstractmethod
@@ -167,6 +174,51 @@ class SwiGLU(BinaryActivationFn):
 
     def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         return F.silu(gate) * up
+
+
+class LimitedSwiGLU(BinaryActivationFn):
+    """SwiGLU that clamps gate above and up on both sides (DeepSeek-V4 ``swiglu_limit``)."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BinaryActivationFn.Config):
+        limit: float
+
+        def __post_init__(self) -> None:
+            if not math.isfinite(self.limit) or self.limit <= 0:
+                raise ValueError(f"limit must be finite and positive, got {self.limit}")
+
+    def __init__(self, config: Config) -> None:
+        self.limit = config.limit
+
+    def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        gate = gate.clamp(max=self.limit)
+        up = up.clamp(min=-self.limit, max=self.limit)
+        return F.silu(gate) * up
+
+
+class ClampedSwiGLU(BinaryActivationFn):
+    """Clamped SwiGLU with configurable sigmoid scale and input bound."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BinaryActivationFn.Config):
+        alpha: float = 1.702
+        limit: float = 7.0
+
+        def __post_init__(self) -> None:
+            if not math.isfinite(self.alpha) or self.alpha <= 0:
+                raise ValueError(f"alpha must be finite and positive, got {self.alpha}")
+            if not math.isfinite(self.limit) or self.limit <= 0:
+                raise ValueError(f"limit must be finite and positive, got {self.limit}")
+
+    def __init__(self, config: Config) -> None:
+        self.alpha = config.alpha
+        self.limit = config.limit
+
+    def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        gate = gate.clamp(max=self.limit)
+        up = up.clamp(min=-self.limit, max=self.limit)
+        silu = gate * torch.sigmoid(self.alpha * gate)
+        return torch.addcmul(silu, silu, up)
 
 
 # TODO: move to models/kimi_k3, its only user.

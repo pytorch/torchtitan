@@ -5,13 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import gc
-from dataclasses import fields
 
 import pytest
 
-from torchtitan.config.configs import TrainingConfig
 from torchtitan.tools.garbage_collector import GarbageCollector
-from torchtitan.training_engine import TrainingEngine
 
 
 @pytest.mark.parametrize("gc_freq", [0, -1])
@@ -33,10 +30,9 @@ def test_positive_gc_freq_is_accepted(gc_freq: int) -> None:
             gc.enable()
 
 
-def test_training_engine_owns_garbage_collector_defaults() -> None:
-    garbage_collector = TrainingEngine.Config().garbage_collector
-    assert garbage_collector.gc_freq == 50
-    assert garbage_collector.debug is False
-    training_fields = {field.name for field in fields(TrainingConfig)}
-    assert "gc_freq" not in training_fields
-    assert "gc_debug" not in training_fields
+def test_freeze_moves_survivors_to_the_permanent_generation() -> None:
+    try:
+        GarbageCollector.freeze("test")
+        assert gc.get_freeze_count() > 0
+    finally:
+        gc.unfreeze()

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from torchtitan.rl.examples.search_r1.data import SearchR1Sample
 from torchtitan.rl.rollout import Rollout
-from torchtitan.rl.rubric import RewardFn
+from torchtitan.rl.rollout.rubric import RewardFn
 
 
 def _normalize_answer(s: str) -> str:

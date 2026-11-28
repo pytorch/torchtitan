@@ -4,133 +4,133 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import replace
-from datetime import timedelta
-from pathlib import Path
+import dataclasses
+import importlib
+from unittest import mock
 
-import spmd_types as spmd
+import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
+import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import distribute_tensor, Replicate, Shard
+from torch.distributed.fsdp import fully_shard
+
 from torchtitan.config.parallelism import ParallelismConfig
-
-from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.common.attention import QKVLinear
-from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import GroupedLinear, Linear
+from torchtitan.models.common.attention import InnerAttention, MLAAttention
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.deepseek_v3 import build_model_config as build_deepseek_config
+from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
+from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.models.qwen3_5.model import Qwen35Model
-from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.rl.generator.model import ModelStateDictLoader
+from torchtitan.rl.generator.vllm import registry
+from torchtitan.rl.generator.vllm.attention.attention import VLLMInnerAttention
 
-from torchtitan.rl.model.vllm_wrapper import (
-    _replace_vllm_layer_configs,
-    PlainToDTensorStateDictAdapter,
-    VLLMModelWrapper,
+from torchtitan.rl.generator.vllm.attention.mla import (
+    _VLLMKVBProj,
+    _VLLMNativeMLAAttention,
+    VLLMMLAAttention,
+    VLLMMLAInnerAttention,
 )
+from torchtitan.rl.generator.vllm.model_wrapper import _replace_vllm_layer_configs
+from vllm.model_executor.layers.attention import MLAAttention as VLLMNativeMLAAttention
 
 
-def test_state_dict_layouts_include_native_feed_forward_weight():
-    """Verify the fused dense FFN layout uses its native w13 state-dict key."""
-    colwise = dense_param_placement(tp=spmd.S(1))
-    rowwise = dense_param_placement(tp=spmd.S(1))
-    config = FeedForward.Config(
-        w13=Linear.Config(
-            in_features=16,
-            out_features=32,
-            num_linears=2,
-            sharding_config=ShardingConfig(state_shardings={"weight": colwise}),
+@pytest.mark.parametrize(
+    "model_name, expected_scale",
+    [
+        ("gpt_oss", 0.22665755425493697),
+        ("qwen3", None),
+    ],
+)
+def test_vllm_replacement_preserves_attention_scale(model_name, expected_scale):
+    """Preserve YaRN scaling as well as the backend's default scale."""
+    model_config = importlib.import_module(
+        f"torchtitan.models.{model_name}"
+    ).build_model_config("debugmodel", seq_len=128, parallelism=ParallelismConfig())
+    vllm_config = _replace_vllm_layer_configs(model_config)
+
+    for model_layer, vllm_layer in zip(
+        model_config.layers, vllm_config.layers, strict=True
+    ):
+        attention_config = model_layer.attention
+        scale = vllm_layer.attention.inner_attention.scale
+        if expected_scale is None:
+            assert scale is None
+        else:
+            assert scale == pytest.approx(expected_scale)
+            with torch.device("meta"):
+                attention = attention_config.build()
+            assert scale == attention.softmax_scale
+
+
+@pytest.mark.parametrize(
+    "build_config",
+    [build_qwen3_config, build_model_config],
+    ids=["qwen3", "qwen3_5"],
+)
+def test_vllm_replacement_preserves_full_attention_selection(build_config) -> None:
+    model_config = build_config("debugmodel", parallelism=ParallelismConfig())
+    full_attention_index = next(
+        i
+        for i, layer in enumerate(model_config.layers)
+        if layer.attention is model_config.first_full_attention
+    )
+
+    vllm_config = _replace_vllm_layer_configs(model_config)
+
+    assert (
+        vllm_config.first_full_attention
+        is vllm_config.layers[full_attention_index].attention
+    )
+    for model_layer, vllm_layer in zip(
+        model_config.layers, vllm_config.layers, strict=True
+    ):
+        inner_attention = vllm_layer.attention.inner_attention
+        assert isinstance(inner_attention, InnerAttention.Config)
+        assert inner_attention._owner is not None
+        assert issubclass(inner_attention._owner, InnerAttention)
+        assert (
+            inner_attention.is_full_attention
+            == model_layer.attention.inner_attention.is_full_attention
+        )
+        assert inner_attention.build_attention_metadata(torch.arange(8)) is None
+
+
+@pytest.mark.parametrize("sliding_window_size", [None, 128])
+def test_vllm_attention_classifies_sliding_window(sliding_window_size) -> None:
+    config = VLLMInnerAttention.Config(
+        hidden_size=256,
+        num_heads=4,
+        num_kv_heads=2,
+        head_dim=64,
+        sliding_window_size=sliding_window_size,
+    )
+    assert config.is_full_attention is (sliding_window_size is None)
+
+
+@pytest.mark.parametrize(
+    "build_config", [build_model_config, build_kimi_k3_config], ids=["gdn", "kda"]
+)
+def test_vllm_replacement_preserves_attention_sharding(build_config) -> None:
+    """Pass the trainer attention's sharding config through unchanged."""
+    model_config = build_config(
+        "debugmodel",
+        attn_backend="flex",
+        parallelism=ParallelismConfig(
+            tensor_parallel_degree=2, enable_sequence_parallel=True
         ),
-        w2=Linear.Config(
-            in_features=32,
-            out_features=16,
-            sharding_config=ShardingConfig(state_shardings={"weight": rowwise}),
-        ),
     )
-    model = torch.nn.Module()
-    model.feed_forward = config.build()
-    wrapper = VLLMModelWrapper.__new__(VLLMModelWrapper)
-    torch.nn.Module.__init__(wrapper)
-    wrapper.model = model
-
-    layouts = wrapper.get_state_dict_layouts()
-
-    assert layouts["feed_forward.w13.weight"] is colwise
-    assert "feed_forward.w1.weight" not in layouts
-    assert "feed_forward.w3.weight" not in layouts
-    assert layouts["feed_forward.w2.weight"] is rowwise
-
-
-def test_state_dict_layouts_include_native_qkv_weight():
-    """Verify QKV layout lookup uses the native packed state-dict key."""
-    colwise = dense_param_placement(tp=spmd.S(0))
-    config = QKVLinear.Config(
-        head_dim=8,
-        n_heads=4,
-        n_kv_heads=2,
-        wqkv=Linear.Config(
-            in_features=16,
-            out_features=64,
-            sharding_config=ShardingConfig(state_shardings={"weight": colwise}),
-        ),
+    # Check only Kimi K3's KDA layers; test_vllm_replaces_mla_layer_configs covers MLA.
+    model_config = dataclasses.replace(
+        model_config,
+        layers=[
+            layer
+            for layer in model_config.layers
+            if not isinstance(layer.attention.inner_attention, MLAAttention.Config)
+        ],
     )
-    model = torch.nn.Module()
-    model.qkv_linear = config.build()
-    wrapper = VLLMModelWrapper.__new__(VLLMModelWrapper)
-    torch.nn.Module.__init__(wrapper)
-    wrapper.model = model
-
-    layouts = wrapper.get_state_dict_layouts()
-
-    assert layouts["qkv_linear.wqkv.weight"] is colwise
-    assert "qkv_linear.wq.weight" not in layouts
-    assert "qkv_linear.wk.weight" not in layouts
-    assert "qkv_linear.wv.weight" not in layouts
-
-
-def test_state_dict_layouts_include_native_grouped_linear_weights():
-    """Verify routed expert layouts use native grouped-linear state keys."""
-    physical_colwise = dense_param_placement(tp=spmd.S(2))
-    rowwise = dense_param_placement(tp=spmd.S(1))
-    w13_config = GroupedLinear.Config(
-        group_size=4,
-        in_features=16,
-        out_features=32,
-        num_linears=2,
-        sharding_config=ShardingConfig(state_shardings={"weight": physical_colwise}),
-    )
-    w2_config = GroupedLinear.Config(
-        group_size=4,
-        in_features=32,
-        out_features=16,
-        sharding_config=ShardingConfig(state_shardings={"weight": rowwise}),
-    )
-    model = torch.nn.Module()
-    model.experts = torch.nn.Module()
-    model.experts.w13 = w13_config.build()
-    model.experts.w2 = w2_config.build()
-    wrapper = VLLMModelWrapper.__new__(VLLMModelWrapper)
-    torch.nn.Module.__init__(wrapper)
-    wrapper.model = model
-
-    layouts = wrapper.get_state_dict_layouts()
-
-    assert layouts["experts.w13.weight"] is physical_colwise
-    assert layouts["experts.w2.weight"] is rowwise
-
-
-def test_vllm_replacements_preserve_resolved_sharding():
-    model_config = build_model_config("debugmodel", attn_backend="flex")
-    model_config.set_sharding_(
-        ParallelismConfig(tensor_parallel_degree=2, enable_sequence_parallel=True)
-    )
-    model_config.layers = [
-        layer for layer in model_config.layers if layer.attention is not None
-    ]
-
+    assert model_config.layers
     vllm_config = _replace_vllm_layer_configs(model_config)
 
     for model_layer, vllm_layer in zip(
@@ -138,90 +138,182 @@ def test_vllm_replacements_preserve_resolved_sharding():
     ):
         assert model_layer.attention is not None
         assert vllm_layer.attention is not None
-        assert (
-            vllm_layer.attention.inner_attention.sharding_config
-            is model_layer.attention.inner_attention.sharding_config
-        )
-        assert (
-            vllm_layer.attention.inner_attention.attention_metadata_key
-            is model_layer.attention.inner_attention._owner
-        )
+        model_sharding = model_layer.attention.inner_attention.sharding_config
+        vllm_sharding = vllm_layer.attention.inner_attention.sharding_config
+        assert model_sharding is not None
+        assert vllm_sharding is not None
+        assert vllm_sharding.input_shardings is model_sharding.input_shardings
+        assert vllm_sharding.output_shardings is model_sharding.output_shardings
+        assert vllm_sharding.local_spmd is model_sharding.local_spmd
+        for name, layout in model_sharding.state_shardings.items():
+            assert vllm_sharding.state_shardings[name] is layout
 
 
-def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:
-    torch.set_num_threads(1)
+@pytest.mark.parametrize(
+    "compressed", [True, False], ids=["compressed", "batch_invariant"]
+)
+def test_vllm_replaces_mla_layer_configs(monkeypatch, compressed) -> None:
+    """MLA uses the compressed cache unless batch invariance keeps materialized K/V."""
+    monkeypatch.setattr(registry, "is_in_batch_invariant_mode", lambda: not compressed)
+    model_config = build_deepseek_config(
+        "debugmodel",
+        parallelism=ParallelismConfig(),
+        attn_backend="varlen",
+        seq_len=128,
+    )
+
+    vllm_config = _replace_vllm_layer_configs(model_config)
+
+    num_mla_layers = 0
+    for model_layer, vllm_layer in zip(
+        model_config.layers, vllm_config.layers, strict=True
+    ):
+        if not isinstance(model_layer.attention.inner_attention, MLAAttention.Config):
+            continue
+        num_mla_layers += 1
+        attention = model_layer.attention
+        vllm_mla_config = vllm_layer.attention.inner_attention
+        inner_config = vllm_mla_config.inner_attention
+        assert vllm_mla_config.wkv_b is attention.inner_attention.wkv_b
+        assert inner_config.is_full_attention
+        assert inner_config.scale == attention.softmax_scale
+        if compressed:
+            assert type(vllm_mla_config) is VLLMMLAAttention.Config
+            assert type(inner_config) is VLLMMLAInnerAttention.Config
+            assert inner_config.num_heads == attention.n_heads
+            assert inner_config.kv_lora_rank == attention.kv_lora_rank
+            assert inner_config.qk_nope_head_dim == attention.qk_nope_head_dim
+            assert inner_config.qk_rope_head_dim == attention.qk_rope_head_dim
+            assert inner_config.v_head_dim == attention.v_head_dim
+        else:
+            assert type(vllm_mla_config) is MLAAttention.Config
+            assert type(inner_config) is VLLMInnerAttention.Config
+    assert num_mla_layers > 0
+
+
+def test_vllm_compressed_mla_owns_wkv_b():
+    config = VLLMMLAAttention.Config(
+        wkv_b=Linear.Config(in_features=5, out_features=28),
+        packed_kv_head_dim=7,
+        inner_attention=VLLMMLAInnerAttention.Config(
+            num_heads=4,
+            kv_lora_rank=5,
+            qk_nope_head_dim=4,
+            qk_rope_head_dim=2,
+            v_head_dim=3,
+            scale=0.5,
+        ),
+    )
+    with mock.patch.object(
+        VLLMMLAInnerAttention.Config,
+        "build",
+        autospec=True,
+        return_value=nn.Identity(),
+    ) as build:
+        attention = VLLMMLAAttention(config)
+
+    build.assert_called_once_with(config.inner_attention, kv_b_proj=attention.wkv_b)
+    assert "wkv_b.weight" in attention.state_dict()
+
+
+def test_vllm_mla_inner_attention_matches_vllm_mla_shapes():
+    attention = VLLMMLAInnerAttention.__new__(VLLMMLAInnerAttention)
+    torch.nn.Module.__init__(attention)
+    attention.num_heads = 4
+    attention.v_head_dim = 3
+    attention.vllm_mla = vllm_mla = mock.Mock(
+        scale=0.5, return_value=torch.randn(8, 12)
+    )
+    q_THK = torch.randn(8, 4, 6)
+    kv_c_normed_TL = torch.randn(8, 5)
+    k_shared_TR = torch.randn(8, 2)
+
+    out_THV = attention(q_THK, kv_c_normed_TL, k_shared_TR, scale=0.5)
+
+    args, kwargs = vllm_mla.call_args
+    assert args[0] is q_THK
+    assert args[1] is kv_c_normed_TL
+    assert torch.equal(args[2], k_shared_TR.unsqueeze(1))
+    assert kwargs == {"output_shape": (8, 12)}
+    assert torch.equal(out_THV, vllm_mla.return_value.view(8, 4, 3))
+
+
+def test_vllm_native_mla_decode_weights_follow_weight_sync(tmp_path) -> None:
+    """vLLM's decode weights are views of wkv_b, so weight sync updates them."""
     dist.init_process_group(
-        "gloo",
-        init_method=rendezvous,
-        rank=rank,
-        world_size=2,
-        timeout=timedelta(seconds=60),
+        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
     )
     try:
-        mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
-        model_config = build_model_config("0.8B", seq_len=256, attn_backend="varlen")
-        assert isinstance(model_config, Qwen35Model.Config)
-        # This state dict carries lm_head without tok_embeddings; untie so the
-        # adapter keeps lm_head instead of expecting it from embed_tokens.
-        model_config = replace(model_config, enable_weight_tying=False)
-        model_adapter = Qwen35StateDictAdapter(model_config, hf_assets_path=None)
-        state_dict, expected, layouts = {}, {}, {}
-        for pattern, shape in (
-            ("layers.0.attn.in_proj_{}.weight", (2048, 1024)),
-            ("layers.0.attn.conv_{}.weight", (2048, 1, 4)),
-            ("vision_encoder.layers.0.attn.w{}.weight", (768, 768)),
-            ("vision_encoder.layers.0.attn.w{}.bias", (768,)),
-        ):
-            for index, part in enumerate(("q", "k", "v")):
-                key = pattern.format(part)
-                full = torch.arange(torch.Size(shape).numel()).reshape(shape).float()
-                full += index * 100
-                state_dict[key] = distribute_tensor(full, mesh, [Shard(0)])
-                expected[key] = full.chunk(2, dim=0)[rank].clone()
-                layouts[key] = dense_param_placement(tp=spmd.S(0))
-        # Check unchanged row-sharded, replicated, and plain values as well.
-        for key, placement, shape in (
-            ("layers.3.attn.wo.weight", Shard(1), (8, 8)),
-            ("norm.weight", Replicate(), (8,)),
-        ):
-            full = torch.arange(torch.Size(shape).numel()).reshape(shape).float()
-            state_dict[key] = distribute_tensor(full, mesh, [placement])
-            expected[key] = (
-                full.chunk(2, dim=1)[rank].clone()
-                if isinstance(placement, Shard)
-                else full
-            )
-            layouts[key] = dense_param_placement(
-                tp=spmd.S(1) if isinstance(placement, Shard) else spmd.R
-            )
-        state_dict["lm_head.weight"] = expected["lm_head.weight"] = torch.ones(1)
-        adapter = PlainToDTensorStateDictAdapter(
-            model_adapter,
-            layouts,
-            ParallelismContext(
-                dp_replicate=1,
-                dp_shard=1,
-                cp=1,
-                tp=2,
-                pp=1,
-                ep=1,
-                world_size=2,
-                enable_sequence_parallel=False,
-            ),
+        torch.manual_seed(0)
+        block = nn.Module()
+        block.wkv_b = Linear.Config(in_features=5, out_features=2 * (3 + 4)).build()
+        block.to(torch.bfloat16)
+        torch.nn.init.normal_(block.wkv_b.weight)
+        model = nn.Module()
+        model.layers = nn.ModuleList([block])
+        mesh = init_device_mesh("cpu", (1,))
+        fully_shard(block, mesh=mesh)
+        fully_shard(model, mesh=mesh)
+        model.set_keep_unsharded_storage(True)
+        new_state_dict = {k: 3.0 * v.detach() for k, v in model.state_dict().items()}
+        loader = ModelStateDictLoader(
+            model,
+            checkpointer_config=None,
+            model_state_dict_load_mode="gpu_fetch",
+            frozen_param_keys=frozenset(),
+            hf_assets_path="/hf",
         )
-        restored = adapter.from_hf(model_adapter.to_hf(state_dict))
-        assert restored.keys() == expected.keys()
-        for key in expected:
-            assert type(restored[key]) is torch.Tensor
-            torch.testing.assert_close(restored[key], expected[key], rtol=0, atol=0)
+
+        attention = _VLLMNativeMLAAttention.__new__(_VLLMNativeMLAAttention)
+        torch.nn.Module.__init__(attention)
+        attention.impl = mock.Mock()
+        attention.is_amx_bmm_enabled = False
+        attention.is_aiter_triton_fp4_bmm_enabled = False
+        attention.is_aiter_triton_fp8_bmm_enabled = False
+        attention.dcp_q_replicate = False
+        attention.quant_config = None
+        attention.kv_lora_rank = 5
+        attention.num_heads = 2
+        attention.qk_nope_head_dim = 3
+        attention.v_head_dim = 4
+        attention.kv_b_proj = _VLLMKVBProj(block.wkv_b)
+        for name in VLLMInnerAttention.vllm_attn_scale_buffer_names:
+            attention.register_buffer(name, torch.tensor(0.0), persistent=False)
+        block.vllm_mla = attention
+
+        attention.process_weights_after_loading(torch.bfloat16)
+
+        assert not attention.state_dict()
+        assert {"W_UK_T", "W_UV"} <= {name for name, _ in attention.named_buffers()}
+
+        def copy(state_dict: dict[str, torch.Tensor]) -> list[str]:
+            with torch.no_grad():
+                for key, tensor in state_dict.items():
+                    tensor.copy_(new_state_dict[key])
+            return list(state_dict)
+
+        loader.load(copy)
+
+        new_weight = new_state_dict["layers.0.wkv_b.weight"].to_local()
+        w_uk, w_uv = new_weight.T.view(5, 2, 7).split([3, 4], dim=-1)
+        assert torch.equal(attention.W_UK_T, w_uk.permute(1, 2, 0))
+        assert torch.equal(attention.W_UV, w_uv.transpose(0, 1))
     finally:
         dist.destroy_process_group()
 
 
-def test_hf_adapter_restores_local_shards(tmp_path: Path) -> None:
-    mp.spawn(
-        _check_hf_adapter_restores_local_shards,
-        args=(f"file://{tmp_path / 'rendezvous'}",),
-        nprocs=2,
-        join=True,
-    )
+def test_vllm_native_mla_rejects_copied_decode_weights() -> None:
+    """A decode weight that does not share wkv_b's storage would go stale silently."""
+    wkv_b = Linear.Config(in_features=5, out_features=2 * (3 + 4)).build()
+    attention = _VLLMNativeMLAAttention.__new__(_VLLMNativeMLAAttention)
+    torch.nn.Module.__init__(attention)
+    attention.kv_b_proj = _VLLMKVBProj(wkv_b)
+
+    def copy_decode_weights(self, act_dtype) -> None:
+        self.W_UK_T = nn.Parameter(torch.zeros(2, 3, 5), requires_grad=False)
+        self.W_UV = nn.Parameter(torch.zeros(2, 5, 4), requires_grad=False)
+
+    with mock.patch.object(
+        VLLMNativeMLAAttention, "process_weights_after_loading", copy_decode_weights
+    ), pytest.raises(AssertionError, match="must be a view of wkv_b.weight"):
+        attention.process_weights_after_loading(torch.bfloat16)

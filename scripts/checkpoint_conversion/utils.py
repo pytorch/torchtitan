@@ -8,10 +8,14 @@ import importlib
 
 from torchtitan.config import Configurable
 
+from torchtitan.config.parallelism import ParallelismConfig
+
 
 def build_model_config_for_conversion(
     model_name: str, model_flavor: str
 ) -> Configurable.Config:
     """Build the unparallelized model config used for checkpoint conversion."""
     model_module = importlib.import_module(f"torchtitan.models.{model_name}")
-    return model_module.build_model_config(model_flavor)
+    return model_module.build_model_config(
+        model_flavor, parallelism=ParallelismConfig()
+    )

@@ -140,16 +140,28 @@ metrics_processor.log(step=step, metrics=val_metrics, is_validation=True)
 
 ## Backends
 
-`MetricsProcessor.Config.enable_wandb` and `MetricsProcessor.Config.enable_tensorboard`
-add the corresponding backend at build time. Both require `log_dir` to be
-passed to `MetricsProcessor.Config.build(...)`. `WANDB_PROJECT` defaults to
-`titan_rl`; set the env var or `wandb_project=` on the config to override.
+`MetricsProcessor.Config.loggers` selects exporters by config type. Pass
+`log_dir` to `MetricsProcessor.Config.build(...)` when this list is non-empty.
+
+```python
+from torchtitan.observability.metrics import TensorBoardLogger, WandBLogger
+
+config.metrics.loggers = [
+    WandBLogger.Config(),
+    TensorBoardLogger.Config(),
+]
+```
+
+`WANDB_PROJECT` selects the W&B project; the default is `torchtitan` for both
+supervised and RL runs. Logger construction does not change the environment. See
+[metric exporter configuration](../../../observability/METRICS.md#configure-metric-exporters)
+for custom exporters.
 
 ## vLLM engine metrics
 
 `VllmOtelStatLogger` exports engine-level rollout metrics through
 [OpenTelemetry](https://opentelemetry.io/). The logger is disabled by default
-and is only registered when `generator.vllm_stat_logger` contains a
+and is only registered when `generator.engine.stat_logger` contains a
 `VllmOtelStatLogger.Config`. Once enabled, `OTEL_METRICS_EXPORTER` must select
 `jsonl` or `otlp`. This explicit gate prevents inherited OpenTelemetry
 environment variables from activating the logger accidentally. Only TP rank 0
@@ -209,7 +221,7 @@ the destination changes:
 After completing the [DAPO Math setup](../../examples/dapo_math/README.md#setup),
 use `jsonl` for local inspection without a collector:
 
-Set `config.metrics.enable_wandb = False` in the selected recipe if W&B is not
+Set `config.metrics.loggers = []` in the selected recipe if W&B is not
 configured.
 
 ```bash

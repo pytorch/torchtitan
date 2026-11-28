@@ -34,10 +34,16 @@ def _resolve(path: str | os.PathLike):
     Imported lazily so pure-local environments never need fsspec, and so a
     missing backend driver (e.g. ``gcsfs`` for ``gs://``) surfaces fsspec's own
     ``ImportError`` at the point of use.
+
+    The filesystem is created with fsspec's listing cache off. Async saves
+    (from another thread or process), the purge thread and other ranks change
+    a checkpoint folder while the caller keeps probing it. A cached listing
+    only sees changes made through the same filesystem instance and never
+    expires by default, so it would not show those changes.
     """
     from fsspec.core import url_to_fs
 
-    return url_to_fs(path)
+    return url_to_fs(path, use_listings_cache=False)
 
 
 def exists(path: str | os.PathLike) -> bool:
@@ -85,17 +91,16 @@ def listdir(path: str | os.PathLike) -> list[str]:
 
 
 def rmtree(path: str | os.PathLike) -> None:
-    if is_remote(path):
-        fs, p = _resolve(path)
-        # Mirror ``shutil.rmtree(..., ignore_errors=True)`` for the common
-        # already-deleted case. Other errors (permissions, transient backend
-        # failures) propagate so the caller can decide how to handle them.
-        try:
+    # A missing path is a no-op. Other errors (permissions, transient backend
+    # failures) propagate so the caller can decide how to handle them.
+    try:
+        if is_remote(path):
+            fs, p = _resolve(path)
             fs.rm(p, recursive=True)
-        except FileNotFoundError:
-            pass
-    else:
-        shutil.rmtree(path, ignore_errors=True)
+        else:
+            shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
 
 
 def join(base: str | os.PathLike, name: str) -> str:

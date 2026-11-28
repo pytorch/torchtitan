@@ -7,7 +7,10 @@
 """NVFP4 recipe utilities."""
 
 import math
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
+
+from torchtitan.models.common.feed_forward import DenseFeedForward
 
 
 if TYPE_CHECKING:
@@ -38,7 +41,7 @@ def nvfp4_bf16_tail_fqns(num_layers: int, bf16_tail_fraction: float) -> list[str
 
 
 def nvfp4_ffn_submodules(
-    layers: list["TransformerBlock.Config"],
+    layers: Sequence["TransformerBlock.Config"],
 ) -> tuple[str, ...]:
     """Select the FFN submodules NVFP4 can convert for this model.
 
@@ -50,9 +53,13 @@ def nvfp4_ffn_submodules(
     it, rather than as a literal each config has to pick correctly.
     """
     dense = next(
-        (layer.feed_forward for layer in layers if layer.feed_forward is not None),
+        (
+            layer.feed_forward
+            for layer in layers
+            if isinstance(layer.feed_forward, DenseFeedForward.Config)
+        ),
         None,
     )
     if dense is not None and dense.w13.out_features % _NVFP4_GEMM_ALIGNMENT:
-        return ("moe.shared_experts.",)
-    return ("feed_forward.", "moe.shared_experts.")
+        return ("feed_forward.shared_experts.",)
+    return ("feed_forward.w13", "feed_forward.w2", "feed_forward.shared_experts.")

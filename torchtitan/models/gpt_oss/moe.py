@@ -13,27 +13,10 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.models.common.activation import BinaryActivationFn
 from torchtitan.models.common.linear import GroupedLinear
 
-
-class GptOssSwiGLU(BinaryActivationFn):
-    """GPT-OSS clamped SwiGLU activation."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(BinaryActivationFn.Config):
-        swiglu_limit: float = 7.0
-
-    def __init__(self, config: Config):
-        self.swiglu_limit = config.swiglu_limit
-
-    def _activation_fn(
-        self, gate_RF: torch.Tensor, up_RF: torch.Tensor
-    ) -> torch.Tensor:
-        gate_RF = gate_RF.clamp(max=self.swiglu_limit)
-        up_RF = up_RF.clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
-        silu_RF = gate_RF * torch.sigmoid(1.702 * gate_RF)
-        return torch.addcmul(silu_RF, silu_RF, up_RF)
+# Shape suffix legend: R = routed rows, E = experts, I = input features,
+# O = flattened output features, including stacked projections.
 
 
 class GptOssGroupedLinear(GroupedLinear):
@@ -47,14 +30,28 @@ class GptOssGroupedLinear(GroupedLinear):
         super().__init__(config)
         self.bias = nn.Parameter(torch.empty(self.weight.shape[:-1]))
 
-    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
-        output_RO = super().forward(input_RI, offsets_E)
-        # The bias add below reads the grouped_mm output with bare ops.
-        remat.recompute_needs_tensor(output_RO)
+    def forward(
+        self,
+        input_RI: torch.Tensor,
+        offsets_E: torch.Tensor,
+        *,
+        scores_R: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        output_RO = super().forward(input_RI, offsets_E, scores_R=scores_R)
         bias_RO = self._expand_grouped_bias(
             self.bias.flatten(1), offsets_E, output_RO.shape[0]
-        ).reshape_as(output_RO)
-        return self._add_grouped_bias(output_RO, bias_RO)
+        )
+        if scores_R is not None:
+            bias_RO = (bias_RO * scores_R.reshape(-1, 1).to(torch.float32)).to(
+                output_RO.dtype
+            )
+        # Match the matmul's policy: replaying even this cheap add after a saved
+        # matmul would force retention of its full routed output.
+        return remat.region(
+            self._add_grouped_bias,
+            self.remat_region_name("bias_add"),
+            recompute=self.remat_should_recompute("grouped_mm"),
+        )(output_RO, bias_RO.reshape_as(output_RO))
 
     @staticmethod
     def _expand_grouped_bias(

@@ -11,23 +11,23 @@ import dataclasses
 from collections.abc import Callable
 from functools import partial
 
+import spmd_types as spmd
 import torch.nn as nn
 
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common import (
     ComplexRoPE,
-    Embedding,
+    DenseFeedForward,
     FeedForward,
     HiMidLoLinear,
+    LimitedSwiGLU,
     Linear,
     MoE,
     RMSNorm,
     RoPE,
     RowParallelLinear,
     SqrtSoftplus,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
@@ -36,19 +36,50 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_shared_expert_ffn_config,
 )
+from torchtitan.models.common.decoder_sharding import (
+    colwise_sharding_config,
+    dense_activation_placement,
+    lm_head_sharding_config,
+    norm_sharding_config,
+    replicated_state_sharding_config,
+    residual_activation_placement,
+    rope_cache_sharding_config,
+    rowwise_sharding_config,
+    token_embedding_sharding_config,
+)
+from torchtitan.models.common.moe.sharding import (
+    moe_sharding_config,
+    router_gate_sharding_config,
+)
 from torchtitan.models.common.param_init import depth_scaled_std
+from torchtitan.models.common.rope import YaRNScalingConfig
 
 from .attention import (
-    Attention,
     CompressedSparseAttention,
+    DeepSeekV4Attention,
     HeavilyCompressedAttention,
     SlidingWindowAttention,
 )
-from .compressor import Compressor, Indexer
+from .compressor import Compressor, Indexer, InnerIndexer, SparseIndexerLoss
 from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4Router
-from .mtp import MTPBlock
+from .mtp import DeepSeekV4MTPBlock
+from .sharding import (
+    attention_sharding_config,
+    attn_sink_sharding_config,
+    compressor_sharding_config,
+    deepseek_v4_router_sharding_config,
+    dsa_inner_attention_sharding_config,
+    hc_head_sharding_config,
+    hc_post_sharding_config,
+    hc_pre_sharding_config,
+    indexer_sharding_config,
+    inner_indexer_sharding_config,
+    mtp_block_sharding_config,
+    mtp_hc_head_sharding_config,
+    wo_a_sharding_config,
+)
 
 __all__ = [
     "DeepSeekV4Model",
@@ -103,30 +134,38 @@ def _make_compressor_config(
     rope: RoPE.Config,
 ) -> "Compressor.Config":
     return Compressor.Config(
-        rope=dataclasses.replace(rope),
+        rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
         head_dim=head_dim,
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
+        # The compressor runs these under fp32 autocast, which the in-place
+        # WGRAD accumulation path does not support.
         wkv=Linear.Config(
             in_features=dim,
             out_features=coff * head_dim,
             bias=False,
             param_init=_LINEAR_INIT,
+            inplace_wgrad_accum=False,
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         wgate=Linear.Config(
             in_features=dim,
             out_features=coff * head_dim,
             bias=False,
             param_init=_LINEAR_INIT,
+            inplace_wgrad_accum=False,
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         norm=RMSNorm.Config(
             normalized_shape=head_dim,
             eps=norm_eps,
             param_init=_NORM_INIT,
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         param_init={
             "ape": partial(nn.init.trunc_normal_, std=0.02),
         },
+        sharding_config=compressor_sharding_config(),
     )
 
 
@@ -138,12 +177,18 @@ def _make_indexer_config(
     rope_head_dim: int,
     q_lora_rank: int,
     compress_ratio: int,
+    index_topk: int,
     norm_eps: float,
     rope: RoPE.Config,
 ) -> "Indexer.Config":
     coff = 2  # overlap always True for indexer
     return Indexer.Config(
-        rope=dataclasses.replace(rope),
+        inner_indexer=InnerIndexer.Config(
+            ratio=compress_ratio,
+            topk=index_topk,
+            sharding_config=inner_indexer_sharding_config(),
+        ),
+        rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
         num_index_heads=num_index_heads,
         index_head_dim=index_head_dim,
         rope_head_dim=rope_head_dim,
@@ -152,12 +197,14 @@ def _make_indexer_config(
             out_features=num_index_heads * index_head_dim,
             bias=False,
             param_init=_LINEAR_INIT,
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         weights_proj=Linear.Config(
             in_features=dim,
             out_features=num_index_heads,
             bias=False,
             param_init=_LINEAR_INIT,
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         compressor=_make_compressor_config(
             dim=dim,
@@ -168,6 +215,7 @@ def _make_indexer_config(
             coff=coff,
             rope=rope,
         ),
+        sharding_config=indexer_sharding_config(),
     )
 
 
@@ -189,7 +237,8 @@ def _make_v4_attn_config(
     index_topk: int,
     n_layers: int,
     rope: RoPE.Config,
-) -> Attention.Config:
+    enable_sp: bool,
+) -> DeepSeekV4Attention.Config:
     hd = head_dim
     per_group_in = (n_heads * hd) // n_groups
     per_group_out = n_groups * o_lora_rank
@@ -217,6 +266,7 @@ def _make_v4_attn_config(
             rope_head_dim=rope_head_dim,
             q_lora_rank=q_lora_rank,
             compress_ratio=compress_ratio,
+            index_topk=index_topk,
             norm_eps=norm_eps,
             rope=rope,
         )
@@ -237,14 +287,29 @@ def _make_v4_attn_config(
         inner_attention_cls = HeavilyCompressedAttention
     else:
         inner_attention_cls = SlidingWindowAttention
+    aux_loss_cfg = (
+        SparseIndexerLoss.Config(
+            coeff=0.01,
+            reduce_mesh="loss",
+            softmax_scale=softmax_scale,
+            num_heads=n_heads,
+            compress_ratio=compress_ratio,
+        )
+        if compress_ratio == 4
+        else None
+    )
     inner_attention_cfg = inner_attention_cls.Config(
         window_size=window_size,
         compress_ratio=compress_ratio,
         softmax_scale=softmax_scale,
-        index_topk=index_topk,
+        sharding_config=dsa_inner_attention_sharding_config(
+            compress_ratio=compress_ratio
+        ),
+        aux_loss=aux_loss_cfg,
     )
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
-    return Attention.Config(
+    return DeepSeekV4Attention.Config(
         dim=dim,
         n_heads=n_heads,
         head_dim=head_dim,
@@ -259,46 +324,57 @@ def _make_v4_attn_config(
         n_layers=n_layers,
         layer_id=layer_id,
         inner_attention=inner_attention_cfg,
-        rope=dataclasses.replace(rope),
+        rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
         wq_a=Linear.Config(
             in_features=dim,
             out_features=q_lora_rank,
             bias=False,
             param_init=_LINEAR_INIT,
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         q_norm=RMSNorm.Config(
             normalized_shape=q_lora_rank,
             eps=norm_eps,
             param_init=_NORM_INIT,
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         wq_b=Linear.Config(
             in_features=q_lora_rank,
             out_features=n_heads * hd,
             bias=False,
             param_init=_LINEAR_INIT,
+            sharding_config=colwise_sharding_config(
+                input_layout=replicated_input_layout
+            ),
         ),
         wkv=Linear.Config(
             in_features=dim,
             out_features=hd,
             bias=False,
             param_init=_LINEAR_INIT,
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         kv_norm=RMSNorm.Config(
             normalized_shape=hd,
             eps=norm_eps,
             param_init=_NORM_INIT,
+            sharding_config=replicated_state_sharding_config("weight"),
         ),
         wo_a=Linear.Config(
             in_features=per_group_in,
             out_features=per_group_out,
             bias=False,
             param_init=_LINEAR_INIT,
+            sharding_config=wo_a_sharding_config(),
         ),
         wo_b=RowParallelLinear.Config(
             in_features=per_group_out,
             out_features=dim,
             bias=False,
             param_init=_LINEAR_INIT,
+            sharding_config=rowwise_sharding_config(
+                output_layout=residual_activation_placement(enable_sp=enable_sp)
+            ),
         ),
         # attn_sink uses a Linear wrapper to hold a (n_heads, 1) weight; the
         # forward path squeezes it back to (n_heads,) to match the original
@@ -308,10 +384,13 @@ def _make_v4_attn_config(
             out_features=n_heads,
             bias=False,
             param_init=_LINEAR_INIT,
+            preserve_dtype_params=("weight",),
+            sharding_config=attn_sink_sharding_config(),
         ),
         compressor=compressor_cfg,
         compressor_128=compressor_128_cfg,
         indexer=indexer_cfg,
+        sharding_config=attention_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -327,8 +406,35 @@ def _make_v4_moe_config(
     n_hash_layers: int,
     route_norm: bool,
     route_scale: float,
+    swiglu_limit: float | None,
     load_balance_coeff: float,
+    enable_sp: bool,
+    enable_ep: bool,
 ):
+    routed_experts = make_routed_experts_config(
+        dim=dim,
+        hidden_dim=moe_inter_dim,
+        num_experts=num_experts,
+        top_k=top_k,
+        param_init=_depth_experts_init(layer_id),
+        enable_ep=enable_ep,
+    )
+    shared_experts = (
+        make_shared_expert_ffn_config(
+            dim=dim,
+            hidden_dim=moe_inter_dim * num_shared_experts,
+            w13_param_init=_LINEAR_INIT,
+            w2_param_init=_depth_init(layer_id),
+            enable_sp=enable_sp,
+        )
+        if num_shared_experts > 0
+        else None
+    )
+    if swiglu_limit is not None:
+        routed_experts.activation_fn = LimitedSwiGLU.Config(limit=swiglu_limit)
+        if shared_experts is not None:
+            shared_experts.activation_fn = LimitedSwiGLU.Config(limit=swiglu_limit)
+
     return MoE.Config(
         num_experts=num_experts,
         router=DeepSeekV4Router.Config(
@@ -339,6 +445,7 @@ def _make_v4_moe_config(
                 backward_mode="hi_mid_lo",
                 bias=False,
                 param_init=_depth_init(layer_id),
+                sharding_config=router_gate_sharding_config(),
             ),
             top_k=top_k,
             score_func=SqrtSoftplus.Config(),
@@ -347,25 +454,14 @@ def _make_v4_moe_config(
             vocab_size=vocab_size,
             n_hash_layers=n_hash_layers,
             layer_id=layer_id,
+            sharding_config=deepseek_v4_router_sharding_config(
+                layer_id=layer_id, n_hash_layers=n_hash_layers
+            ),
         ),
-        routed_experts=make_routed_experts_config(
-            dim=dim,
-            hidden_dim=moe_inter_dim,
-            num_experts=num_experts,
-            top_k=top_k,
-            param_init=_depth_experts_init(layer_id),
-        ),
-        shared_experts=(
-            make_shared_expert_ffn_config(
-                dim=dim,
-                hidden_dim=moe_inter_dim * num_shared_experts,
-                w13_param_init=_LINEAR_INIT,
-                w2_param_init=_depth_init(layer_id),
-            )
-            if num_shared_experts > 0
-            else None
-        ),
+        routed_experts=routed_experts,
+        shared_experts=shared_experts,
         load_balance_coeff=load_balance_coeff,
+        sharding_config=moe_sharding_config(enable_sp=enable_sp),
     )
 
 
@@ -374,12 +470,14 @@ def _make_v4_dense_config(
     layer_id: int,
     dim: int,
     hidden_dim: int,
-) -> FeedForward.Config:
+    enable_sp: bool,
+) -> DenseFeedForward.Config:
     return make_ffn_config(
         dim=dim,
         hidden_dim=hidden_dim,
         w13_param_init=_LINEAR_INIT,
         w2_param_init=_depth_init(layer_id),
+        enable_sp=enable_sp,
     )
 
 
@@ -416,11 +514,16 @@ def _build_v4_layers(
     hc_eps: float = 1e-6,
     dense_hidden_dim: int | None = None,
     dense_layers: set[int] | None = None,
+    swiglu_limit: float | None = None,
+    enable_sp: bool,
+    enable_ep: bool,
 ) -> list[DeepSeekV4TransformerBlock.Config]:
     if dense_layers is None:
         dense_layers = set()
     if dense_hidden_dim is None:
         dense_hidden_dim = moe_inter_dim * 4
+    norm_sharding = norm_sharding_config(enable_sp=enable_sp)
+    hc_pre_sharding = hc_pre_sharding_config(enable_sp=enable_sp)
 
     layers = []
     for layer_id in range(n_layers):
@@ -444,18 +547,19 @@ def _build_v4_layers(
             index_topk=index_topk,
             n_layers=n_layers,
             rope=rope_compress if cr > 1 else rope,
+            enable_sp=enable_sp,
         )
 
+        ffn_cfg: FeedForward.Config
         if layer_id in dense_layers:
             ffn_cfg = _make_v4_dense_config(
                 layer_id=actual_layer_id,
                 dim=dim,
                 hidden_dim=dense_hidden_dim,
+                enable_sp=enable_sp,
             )
-            moe_cfg = None
         else:
-            ffn_cfg = None
-            moe_cfg = _make_v4_moe_config(
+            ffn_cfg = _make_v4_moe_config(
                 layer_id=actual_layer_id,
                 dim=dim,
                 moe_inter_dim=moe_inter_dim,
@@ -466,7 +570,10 @@ def _build_v4_layers(
                 n_hash_layers=n_hash_layers,
                 route_norm=route_norm,
                 route_scale=route_scale,
+                swiglu_limit=swiglu_limit,
                 load_balance_coeff=load_balance_coeff,
+                enable_sp=enable_sp,
+                enable_ep=enable_ep,
             )
 
         layers.append(
@@ -476,14 +583,15 @@ def _build_v4_layers(
                     normalized_shape=dim,
                     eps=norm_eps,
                     param_init=_NORM_INIT,
+                    sharding_config=norm_sharding,
                 ),
                 ffn_norm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=norm_eps,
                     param_init=_NORM_INIT,
+                    sharding_config=norm_sharding,
                 ),
                 feed_forward=ffn_cfg,
-                moe=moe_cfg,
                 hc_attn_pre=HcPre.Config(
                     hc_mult=hc_mult,
                     dim=dim,
@@ -491,6 +599,7 @@ def _build_v4_layers(
                     eps=hc_eps,
                     norm_eps=norm_eps,
                     param_init=_HC_INIT,
+                    sharding_config=hc_pre_sharding,
                 ),
                 hc_ffn_pre=HcPre.Config(
                     hc_mult=hc_mult,
@@ -499,8 +608,11 @@ def _build_v4_layers(
                     eps=hc_eps,
                     norm_eps=norm_eps,
                     param_init=_HC_INIT,
+                    sharding_config=hc_pre_sharding,
                 ),
-                hc_post=HcPost.Config(),
+                hc_post=HcPost.Config(
+                    sharding_config=hc_post_sharding_config(enable_sp=enable_sp)
+                ),
             )
         )
     return layers
@@ -517,12 +629,15 @@ def _make_mtp_inner_block(
     attn_cfg.compressor = None
     attn_cfg.compressor_128 = None
     attn_cfg.indexer = None
-    attn_cfg.rope = copy.deepcopy(rope)
+    attn_cfg.rope = dataclasses.replace(
+        rope, sharding_config=rope_cache_sharding_config()
+    )
     attn_cfg.inner_attention = SlidingWindowAttention.Config(
         window_size=inner_attn_cfg.window_size,
         compress_ratio=1,
         softmax_scale=inner_attn_cfg.softmax_scale,
-        index_topk=inner_attn_cfg.index_topk,
+        sharding_config=dsa_inner_attention_sharding_config(compress_ratio=1),
+        aux_loss=None,
     )
     return block_cfg
 
@@ -537,36 +652,38 @@ def _build_mtp_layers(
     norm_eps: float = 1e-6,
     hc_eps: float = 1e-6,
     rope: RoPE.Config,
-) -> list[MTPBlock.Config]:
+) -> list[DeepSeekV4MTPBlock.Config]:
     mtp_layers = []
     for depth in range(num_mtp_layers):
         layer_id = n_main_layers + depth
         block_cfg = _make_mtp_inner_block(inner_cfg, rope)
-        if block_cfg.moe is not None:
-            router_cfg = block_cfg.moe.router
+        if isinstance(block_cfg.feed_forward, MoE.Config):
+            router_cfg = block_cfg.feed_forward.router
             assert isinstance(router_cfg, DeepSeekV4Router.Config)
             router_cfg.gate.param_init = _depth_init(layer_id)
             router_cfg.layer_id = layer_id
+            router_cfg.sharding_config = deepseek_v4_router_sharding_config(
+                layer_id=layer_id, n_hash_layers=router_cfg.n_hash_layers
+            )
             expert_init = _depth_experts_init(layer_id)
-            block_cfg.moe.routed_experts.w13.param_init = (
+            block_cfg.feed_forward.routed_experts.w13.param_init = (
                 fused_grouped_gate_up_param_init(expert_init)
             )
-            block_cfg.moe.routed_experts.w2.param_init = {
+            block_cfg.feed_forward.routed_experts.w2.param_init = {
                 "weight": expert_init["w2_EDF"]
             }
-            if block_cfg.moe.shared_experts is not None:
+            if block_cfg.feed_forward.shared_experts is not None:
                 depth_init = _depth_init(layer_id)
-                block_cfg.moe.shared_experts.w2.param_init = depth_init
-                block_cfg.moe.shared_experts.w13.param_init = fused_gate_up_param_init(
-                    _LINEAR_INIT, _LINEAR_INIT
+                block_cfg.feed_forward.shared_experts.w2.param_init = depth_init
+                block_cfg.feed_forward.shared_experts.w13.param_init = (
+                    fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT)
                 )
         mtp_layers.append(
-            MTPBlock.Config(
+            DeepSeekV4MTPBlock.Config(
                 attention=block_cfg.attention,
                 attention_norm=block_cfg.attention_norm,
                 ffn_norm=block_cfg.ffn_norm,
                 feed_forward=block_cfg.feed_forward,
-                moe=block_cfg.moe,
                 hc_attn_pre=block_cfg.hc_attn_pre,
                 hc_ffn_pre=block_cfg.hc_ffn_pre,
                 hc_post=block_cfg.hc_post,
@@ -575,27 +692,32 @@ def _build_mtp_layers(
                     out_features=dim,
                     bias=False,
                     param_init=_LINEAR_INIT,
+                    sharding_config=replicated_state_sharding_config("weight"),
                 ),
                 h_proj=Linear.Config(
                     in_features=dim,
                     out_features=dim,
                     bias=False,
                     param_init=_LINEAR_INIT,
+                    sharding_config=replicated_state_sharding_config("weight"),
                 ),
                 enorm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=norm_eps,
                     param_init=_NORM_INIT,
+                    sharding_config=replicated_state_sharding_config("weight"),
                 ),
                 hnorm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=norm_eps,
                     param_init=_NORM_INIT,
+                    sharding_config=replicated_state_sharding_config("weight"),
                 ),
                 mtp_norm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=norm_eps,
                     param_init=_NORM_INIT,
+                    sharding_config=replicated_state_sharding_config("weight"),
                 ),
                 hc_head=HcHead.Config(
                     hc_mult=hc_mult,
@@ -603,8 +725,10 @@ def _build_mtp_layers(
                     norm_eps=norm_eps,
                     eps=hc_eps,
                     param_init=_HC_INIT,
+                    sharding_config=mtp_hc_head_sharding_config(),
                 ),
                 param_init=_HC_INIT,
+                sharding_config=mtp_block_sharding_config(),
             )
         )
     return mtp_layers
@@ -614,6 +738,7 @@ def _debugmodel(
     n_mtp_layers: int = 0,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> DeepSeekV4Model.Config:
     dim = 256
     n_layers = 4
@@ -649,17 +774,12 @@ def _debugmodel(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=10000.0,
-        scaling="none",
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling="yarn",
-        rope_factor=4.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=original_seq_len,
+        scaling=YaRNScalingConfig(factor=4.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(
@@ -692,6 +812,8 @@ def _debugmodel(
         sinkhorn_iters=sinkhorn_iters,
         hc_eps=hc_eps,
         dense_layers=dense_layers,
+        enable_sp=parallelism.enable_sequence_parallel,
+        enable_ep=parallelism.expert_parallel_degree > 1,
     )
 
     return DeepSeekV4Model.Config(
@@ -699,16 +821,27 @@ def _debugmodel(
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            eps=norm_eps,
+            param_init=_NORM_INIT,
+            sharding_config=norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         hc_mult=hc_mult,
@@ -720,6 +853,9 @@ def _debugmodel(
             norm_eps=norm_eps,
             eps=hc_eps,
             param_init=_HC_INIT,
+            sharding_config=hc_head_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
@@ -734,7 +870,7 @@ def _debugmodel(
                 rope=rope,
             )
             if n_mtp_layers > 0
-            else None
+            else []
         ),
     )
 
@@ -743,6 +879,7 @@ def _deepseek_v4_flash(
     n_mtp_layers: int = 0,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> DeepSeekV4Model.Config:
     dim = 4096
     n_layers = 43
@@ -766,6 +903,7 @@ def _deepseek_v4_flash(
     n_hash_layers = 3
     route_norm = True
     route_scale = 1.5
+    swiglu_limit = 10.0
     load_balance_coeff = 1e-3
     hc_mult = 4
     sinkhorn_iters = 20
@@ -778,17 +916,12 @@ def _deepseek_v4_flash(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=10000.0,
-        scaling="none",
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling="yarn",
-        rope_factor=16.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=original_seq_len,
+        scaling=YaRNScalingConfig(factor=16.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(
@@ -814,6 +947,7 @@ def _deepseek_v4_flash(
         n_hash_layers=n_hash_layers,
         route_norm=route_norm,
         route_scale=route_scale,
+        swiglu_limit=swiglu_limit,
         load_balance_coeff=load_balance_coeff,
         rope=rope,
         rope_compress=rope_compress,
@@ -821,6 +955,8 @@ def _deepseek_v4_flash(
         sinkhorn_iters=sinkhorn_iters,
         hc_eps=hc_eps,
         dense_layers=dense_layers,
+        enable_sp=parallelism.enable_sequence_parallel,
+        enable_ep=parallelism.expert_parallel_degree > 1,
     )
 
     return DeepSeekV4Model.Config(
@@ -828,16 +964,27 @@ def _deepseek_v4_flash(
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            eps=norm_eps,
+            param_init=_NORM_INIT,
+            sharding_config=norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         hc_mult=hc_mult,
@@ -849,6 +996,9 @@ def _deepseek_v4_flash(
             norm_eps=norm_eps,
             eps=hc_eps,
             param_init=_HC_INIT,
+            sharding_config=hc_head_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
@@ -863,7 +1013,7 @@ def _deepseek_v4_flash(
                 rope=rope,
             )
             if n_mtp_layers > 0
-            else None
+            else []
         ),
     )
 
@@ -872,6 +1022,7 @@ def _deepseek_v4_pro(
     n_mtp_layers: int = 0,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> DeepSeekV4Model.Config:
     dim = 7168
     n_layers = 61
@@ -895,6 +1046,7 @@ def _deepseek_v4_pro(
     n_hash_layers = 3
     route_norm = True
     route_scale = 2.5
+    swiglu_limit = 10.0
     load_balance_coeff = 1e-3
     hc_mult = 4
     sinkhorn_iters = 20
@@ -907,17 +1059,12 @@ def _deepseek_v4_pro(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=10000.0,
-        scaling="none",
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling="yarn",
-        rope_factor=16.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=original_seq_len,
+        scaling=YaRNScalingConfig(factor=16.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(
@@ -943,6 +1090,7 @@ def _deepseek_v4_pro(
         n_hash_layers=n_hash_layers,
         route_norm=route_norm,
         route_scale=route_scale,
+        swiglu_limit=swiglu_limit,
         load_balance_coeff=load_balance_coeff,
         rope=rope,
         rope_compress=rope_compress,
@@ -950,6 +1098,8 @@ def _deepseek_v4_pro(
         sinkhorn_iters=sinkhorn_iters,
         hc_eps=hc_eps,
         dense_layers=dense_layers,
+        enable_sp=parallelism.enable_sequence_parallel,
+        enable_ep=parallelism.expert_parallel_degree > 1,
     )
 
     return DeepSeekV4Model.Config(
@@ -957,16 +1107,27 @@ def _deepseek_v4_pro(
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            eps=norm_eps,
+            param_init=_NORM_INIT,
+            sharding_config=norm_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
         hc_mult=hc_mult,
@@ -978,6 +1139,9 @@ def _deepseek_v4_pro(
             norm_eps=norm_eps,
             eps=hc_eps,
             param_init=_HC_INIT,
+            sharding_config=hc_head_sharding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
@@ -992,7 +1156,7 @@ def _deepseek_v4_pro(
                 rope=rope,
             )
             if n_mtp_layers > 0
-            else None
+            else []
         ),
     )
 
@@ -1007,9 +1171,12 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig,
     seq_len: int | None = None,
     n_mtp_layers: int = 0,
-    converters: list[ModelConfigConverter.Config] | None = None,
+    indexer_loss_coeff: float = 0.01,
+    indexer_loss_mass_weighted: bool = False,
+    indexer_loss_chunk_size: int = 128,
 ) -> DeepSeekV4Model.Config:
     if flavor not in MODEL_FLAVORS:
         raise ValueError(
@@ -1026,9 +1193,23 @@ def build_model_config(
     config = get_config(
         n_mtp_layers=n_mtp_layers,
         seq_len=context_len,
+        parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for converter_cfg in converters:
-            config = converter_cfg.build().convert(config)
+    if indexer_loss_coeff < 0 or indexer_loss_chunk_size <= 0:
+        raise ValueError(
+            "Indexer loss coefficient must be nonnegative and chunk size positive."
+        )
+    for layer in config.layers:
+        inner_attention = layer.attention.inner_attention
+        if inner_attention.aux_loss is not None:
+            inner_attention.aux_loss = (
+                dataclasses.replace(
+                    inner_attention.aux_loss,
+                    coeff=indexer_loss_coeff,
+                    mass_weighted=indexer_loss_mass_weighted,
+                    chunk_size=indexer_loss_chunk_size,
+                )
+                if indexer_loss_coeff > 0
+                else None
+            )
     return config

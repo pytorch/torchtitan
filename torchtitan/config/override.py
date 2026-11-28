@@ -35,9 +35,12 @@ import importlib
 import json
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
 from fnmatch import fnmatch
 from typing import Any, cast, TYPE_CHECKING, TypeVar
+
+from torchtitan.config.format import fold_indexed_paths
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +74,11 @@ class OverrideConfig:
     whole-module form). An entry is either:
 
     - a target string, e.g.
-      ``"torchtitan_recipes.overrides.moe_token_dispatcher.hybridep_override"``; or
+      ``"torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"``; or
     - a ``(target, kwargs)`` tuple, e.g.
       ``("my_pkg.triton_rope.triton_rope", {"block_size": 256})``. The ``kwargs``
       are passed to the override the target names, so two config trees can share
-      one override yet configure it differently (e.g. the RL trainer and
-      generator activate one HybridEP dispatch override with opposite capacity
-      factors).
+      one override yet configure it differently.
 
     Each target names exactly one override, so only the named overrides are
     applied (not the entire global registry) and no override is claimed twice. A
@@ -194,14 +195,14 @@ def override(
     The decorated function takes the matched config as its first positional
     argument and returns its replacement. It may also declare keyword parameters
     (or ``**kwargs``); those are filled from the ``(target, kwargs)`` entry
-    that activated the override, letting one override be configured per actor
-    (e.g. trainer vs. generator). A kwarg the factory does not accept raises
+    that activated the override, letting one override be configured per
+    config tree. A kwarg the factory does not accept raises
     ``TypeError`` at apply time (normal Python argument binding).
 
     Example — fuse MoE only on the later layers::
 
         @override(target=MoE.Config,
-                  fqns=["layers.1[0-9].moe"],
+                  fqns=["layers.1[0-9].feed_forward"],
                   description="Vendor fused MoE")
         def vendor_moe(cfg: MoE.Config) -> VendorMoE.Config:
             return VendorMoE.Config(num_experts=cfg.num_experts, ...)
@@ -272,8 +273,8 @@ def derive(
 
     Example::
 
-        @override(target=RoPE.Config)
-        def triton_rope(cfg: RoPE.Config) -> TritonRoPE.Config:
+        @override(target=ComplexRoPE.Config)
+        def triton_rope(cfg: ComplexRoPE.Config) -> TritonRoPE.Config:
             return derive(cfg, TritonRoPE.Config, block_size=128)
     """
     if not (isinstance(target_cls, type) and is_dataclass(target_cls)):
@@ -449,7 +450,8 @@ def apply_overrides(
         config_root: The config tree to traverse and mutate in place. The
             trainer passes the top-level ``Trainer.Config``.
 
-    Returns a list of human-readable log lines describing each replacement.
+    Logs equivalent replacements together, folding indexed FQN ranges. Returns
+    a list of human-readable log lines describing each individual replacement.
     """
     # Each entry is a bare target string or a (target, kwargs) tuple; a target is
     # a module.function path (see OverrideConfig.imports). Resolve each to
@@ -467,6 +469,7 @@ def apply_overrides(
     _check_node_conflicts(claims)
 
     replacements: list[str] = []
+    groups: dict[tuple[str, str], list[str]] = defaultdict(list)
     for c in claims:
         # ``**{}`` for a bare (no-kwargs) entry is just ``factory(cfg)``; a kwarg
         # the factory does not accept raises TypeError here, naming the factory.
@@ -485,15 +488,22 @@ def apply_overrides(
             if c.kwargs
             else ""
         )
-        replacements.append(
-            f"[Override] {c.ov.name}: {c.fqn} "
+        transition = (
             f"{type(c.cfg).__qualname__} -> {type(new_cfg).__qualname__}{kwargs_note}"
         )
+        replacements.append(f"[Override] {c.ov.name}: {c.fqn} {transition}")
+        groups[c.ov.name, transition].append(c.fqn)
 
     if replacements:
-        for line in replacements:
-            logger.info(line)
-        logger.info(f"Applied {len(replacements)} override(s)")
+        for (factory, transition), fqns in groups.items():
+            logger.info(
+                "[Override] %s: %s matched=%d fqns=%s",
+                factory,
+                transition,
+                len(fqns),
+                fold_indexed_paths(fqns),
+            )
+        logger.info("Applied %d override(s)", len(replacements))
     elif override_config.imports:
         # The user asked for overrides but nothing matched — likely a wrong
         # `target` class, a `fqns` glob that matches no node, or a module that
@@ -504,6 +514,9 @@ def apply_overrides(
             f"whose `target` and `fqns` match nodes in the config tree."
         )
 
+    # Replacements are assigned after construction, so the first __post_init__
+    # did not see them. Configs with nothing to check inherit the base no-op.
+    config_root.__post_init__()
     return replacements
 
 

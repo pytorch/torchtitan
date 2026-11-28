@@ -10,95 +10,49 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
-import torch.distributed as dist
-from attn_gym.linear.context_parallel import (
-    _ContextParallelChunk,
-    context_parallel_conv_history,
-    ContextParallelRouting,
-)
-from attn_gym.linear.kda.context_parallel import context_parallel_kda
 
-from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.models.common.attn_gym import (
+    context_parallel_conv_history,
+    context_parallel_kda,
+    ContextParallelRouting,
+    require_attn_gym,
+)
 
-from .cp_attention import CPInnerAttention
-from .kda import InnerKDA, KDAAttentionMetadata
+from .cp_attention import CPInnerAttention, Ulysses
+from .cp_linear_attention import (
+    check_num_head_chunks,
+    chunk_heads,
+    ContextParallelLinearAttentionMetadata,
+    prepare_cp_linear_attention_metadata,
+    prepare_ulysses_linear_attention_metadata,
+    UlyssesLinearAttentionMetadata,
+)
+from .kda import InnerKDA
+from .linear_attention import LinearAttentionMetadata
 
-spmd.register_local_autograd_function(_ContextParallelChunk)
-
-
-@dataclass(frozen=True, slots=True)
-class ContextParallelKDAAttentionMetadata(KDAAttentionMetadata):
-    """KDA metadata prepared for rank-local context-parallel execution."""
-
-    cp_routing: ContextParallelRouting
-
-    _ROUTING_SPMD_TYPE = spmd.SpmdType(
-        {
-            MeshAxisName.DP: spmd.V,
-            MeshAxisName.CP: spmd.V,
-            MeshAxisName.TP: spmd.R,
-        }
-    )
-
-    def annotate_spmd_types(self) -> None:
-        """Annotate sequence offsets and rank-local CP routing tensors."""
-        KDAAttentionMetadata.annotate_spmd_types(self)
-        for value in vars(self.cp_routing).values():
-            if isinstance(value, torch.Tensor):
-                spmd.assert_type(value, self._ROUTING_SPMD_TYPE)
+# Shape suffixes:
+# T = tokens, C = channels, H = heads, K/V = head dimensions,
+# F = packed features per head, W = convolution kernel width.
 
 
-class ContextParallelInnerKDA(
-    CPInnerAttention[KDAAttentionMetadata, ContextParallelKDAAttentionMetadata],
-    InnerKDA,
-):
-    """Inner KDA with distributed convolution and recurrent-state plumbing."""
+class UlyssesInnerKDA(Ulysses[LinearAttentionMetadata], InnerKDA):
+    """Run convolution and KDA on full sequences with CP-sharded heads."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CPInnerAttention.Config, InnerKDA.Config):
+    class Config(Ulysses.Config, InnerKDA.Config):
         pass
 
     @staticmethod
     def prepare_cp_metadata(
-        attention_metadata: KDAAttentionMetadata,
+        attention_metadata: LinearAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
-    ) -> ContextParallelKDAAttentionMetadata:
-        """Build rank-local routing from global KDA sequence metadata."""
-        if attention_metadata.varlen is None:
-            if permutation is None:
-                raise ValueError(
-                    "KDA context parallelism requires global "
-                    "VarlenAttentionMetadata when using contiguous CP sharding."
-                )
-            cu_seqlens_global = [0, permutation.shape[1]]
-            device = permutation.device
-        else:
-            cu_seqlens_global = attention_metadata.varlen.cu_seq_q.tolist()
-            device = attention_metadata.varlen.cu_seq_q.device
-
-        group = spmd_mesh_group(MeshAxisName.CP)
-        if group is None:
-            raise RuntimeError(
-                "KDA metadata preparation requires an active multi-rank CP mesh axis."
-            )
-        routing = ContextParallelRouting.from_fragments(
-            cu_seqlens_global=cu_seqlens_global,
-            fragments=get_token_fragments(
-                cu_seqlens_global[-1],
-                cp_size=group.size(),
-                permutation=permutation,
-            ),
-            cp_rank=dist.get_rank(group),
-            device=device,
-            conv_history=attention_metadata.num_conv_history_tokens,
-        )
-        return ContextParallelKDAAttentionMetadata(
-            varlen=attention_metadata.varlen,
-            num_conv_history_tokens=attention_metadata.num_conv_history_tokens,
-            cp_routing=routing,
+    ) -> LinearAttentionMetadata:
+        """Prepare Ulysses KDA metadata in original token order."""
+        return prepare_ulysses_linear_attention_metadata(
+            attention_metadata, permutation=permutation
         )
 
     def forward(
@@ -114,9 +68,117 @@ class ContextParallelInnerKDA(
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
         *,
-        attention_metadata: KDAAttentionMetadata | None,
+        attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
-        if not isinstance(attention_metadata, ContextParallelKDAAttentionMetadata):
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is None:
+            raise RuntimeError(
+                "Ulysses KDA requires an active multi-rank CP mesh axis."
+            )
+        packed_THF = torch.cat(
+            (
+                query_TC.unflatten(-1, (-1, self.head_dim)),
+                key_TC.unflatten(-1, (-1, self.head_dim)),
+                value_TC.unflatten(-1, (-1, self.head_dim)),
+                raw_gate_THK,
+                raw_beta_TH.unsqueeze(-1),
+            ),
+            dim=-1,
+        )
+        packed_THF = spmd.redistribute(
+            packed_THF, cp_group, src=spmd.S(0), dst=spmd.S(1)
+        )
+        if isinstance(attention_metadata, UlyssesLinearAttentionMetadata):
+            # All-to-all gathers the shared CP order, not chronological order.
+            packed_THF = packed_THF.index_select(
+                0, attention_metadata.inverse_permutation
+            )
+        q_THK, k_THK, v_THV, raw_gate_THK, beta_TH1 = packed_THF.split(
+            [self.head_dim] * 4 + [1], dim=-1
+        )
+        # Parameters remain CP-replicated outside this region. Shard their heads
+        # locally; backward contributes zeros for heads owned by other CP ranks.
+        parameters = tuple(
+            spmd.shard(parameter, cp_group, src=spmd.R, dst=spmd.S(0))
+            for parameter in (
+                conv_q_weight_C1W,
+                conv_k_weight_C1W,
+                conv_v_weight_C1W,
+                A_log_H,
+                dt_bias_HK,
+            )
+        )
+        out_THV = super().forward(
+            q_THK.flatten(-2),
+            k_THK.flatten(-2),
+            v_THV.flatten(-2),
+            raw_gate_THK,
+            beta_TH1.squeeze(-1),
+            *parameters,
+            attention_metadata=attention_metadata,
+        )
+        if isinstance(attention_metadata, UlyssesLinearAttentionMetadata):
+            out_THV = out_THV.index_select(0, attention_metadata.permutation)
+        return spmd.redistribute(out_THV, cp_group, src=spmd.S(1), dst=spmd.S(0))
+
+
+class ContextParallelInnerKDA(
+    CPInnerAttention[
+        LinearAttentionMetadata,
+        ContextParallelLinearAttentionMetadata,
+    ],
+    InnerKDA,
+):
+    """Inner KDA with distributed convolution and recurrent-state plumbing."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(CPInnerAttention.Config, InnerKDA.Config):
+        num_head_chunks: int = 1
+        """Run the KDA kernel on this many chunks of heads, one after another.
+        Heads are independent, so the result is the same; each call's kernel
+        workspace is ``1 / num_head_chunks`` of one call over all heads."""
+
+        def __post_init__(self) -> None:
+            # Explicit parent: slots dataclasses can't use zero-arg super();
+            # InnerKDA.Config checks head_dim.
+            InnerKDA.Config.__post_init__(self)
+            check_num_head_chunks(self.num_head_chunks)
+
+    def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(
+            context_parallel_kda, context_parallel_conv_history, ContextParallelRouting
+        )
+        super().__init__(config)
+        self.num_head_chunks = config.num_head_chunks
+
+    @staticmethod
+    def prepare_cp_metadata(
+        attention_metadata: LinearAttentionMetadata,
+        *,
+        permutation: torch.Tensor | None,
+    ) -> ContextParallelLinearAttentionMetadata:
+        """Build rank-local routing from global KDA sequence metadata."""
+        return prepare_cp_linear_attention_metadata(
+            attention_metadata, permutation=permutation, family="KDA"
+        )
+
+    def forward(
+        self,
+        query_TC: torch.Tensor,
+        key_TC: torch.Tensor,
+        value_TC: torch.Tensor,
+        raw_gate_THK: torch.Tensor,
+        raw_beta_TH: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_HK: torch.Tensor,
+        *,
+        attention_metadata: LinearAttentionMetadata | None,
+    ) -> torch.Tensor:
+        if not isinstance(attention_metadata, ContextParallelLinearAttentionMetadata):
             raise ValueError(
                 "KDA context parallelism requires rank-local attention metadata."
             )
@@ -202,13 +264,10 @@ class ContextParallelInnerKDA(
             raise RuntimeError(
                 "KDA context parallelism requires an active multi-rank CP mesh axis."
             )
-        output_1THV, _ = context_parallel_kda(
-            q_1THK,
-            k_1THK,
-            v_1THV,
-            gate_1THK,
-            beta_1TH,
+        return chunk_heads(
+            context_parallel_kda,
+            (q_1THK, k_1THK, v_1THV, gate_1THK, beta_1TH),
+            self.num_head_chunks,
             routing=routing,
             group=cp_group,
         )
-        return output_1THV

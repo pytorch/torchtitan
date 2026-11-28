@@ -346,14 +346,8 @@ def full_inductor_compilation_pass(
     decompositions, and caching for free) instead of duplicating that prep
     around a direct ``compile_fx_inner`` call.
 
-    The collapse hides CUDA-graph-incompatible ops (unpinned D2H copies,
-    sm<10 ``_grouped_mm``) inside the opaque ``standalone_compile_inner``
-    node, so the later :func:`is_cuda_graph_compatible` scan can't see
-    them. Snapshot the verdict on the pre-collapse gm and stash it on
-    the result so the downstream scan can honor it.
-
     Must be the **terminal** pass — no FX-graph-level passes (e.g.
-    ``custom_codegen_pass``, ``insert_kernel_annotations_pass``) can
+    ``custom_codegen_pass``) can
     run after this because the FX graph is no longer authoritative.
 
     Args:
@@ -365,12 +359,6 @@ def full_inductor_compilation_pass(
             compiled region.
     """
     import torch._inductor.config as ic
-
-    from torchtitan.experiments.graph_trainer.cuda_graph import is_cuda_graph_compatible
-
-    pre_collapse_cuda_graph_compatible = is_cuda_graph_compatible(
-        gm, skip_flex_attention_check=True
-    )
 
     full_inductor_configs = {
         # Preserve the mainline full-compile behavior: AOT autograd via
@@ -407,8 +395,4 @@ def full_inductor_compilation_pass(
             boxed_codegen=boxed_codegen,
         )
 
-    # Carry the pre-collapse CUDA graph verdict forward via gm.meta. The
-    # collapse is information-destroying; this is how downstream passes
-    # know whether the artifact contains hidden CUDA-graph-incompatible ops.
-    result.meta["cuda_graph_compatible"] = pre_collapse_cuda_graph_compatible
     return result

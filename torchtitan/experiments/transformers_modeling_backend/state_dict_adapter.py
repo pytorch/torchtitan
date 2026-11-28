@@ -27,7 +27,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch
 
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+from torchtitan.models.base.state_dict_adapter import StateDictAdapter
 
 if TYPE_CHECKING:
     from .model import HFTransformerModel
@@ -60,7 +60,14 @@ class HFTransformerStateDictAdapter(StateDictAdapter):
         super().__init__(model_config, hf_assets_path)
         self._tie_word_embeddings = getattr(model_config, "tie_word_embeddings", False)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False
+    ) -> dict[str, Any]:
+        if to_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         hf_state_dict = {k.removeprefix("model."): v for k, v in state_dict.items()}
         # When weights are tied, lm_head.weight may not exist in the
         # safetensors file. Exclude it so DCP doesn't fail on missing key.
@@ -72,7 +79,14 @@ class HFTransformerStateDictAdapter(StateDictAdapter):
             del hf_state_dict["lm_head.weight"]
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], *, is_quantized_layout: bool = False
+    ) -> dict[str, Any]:
+        if is_quantized_layout:
+            raise ValueError(
+                f"{type(self).__name__} does not support loading quantized "
+                "HF checkpoints."
+            )
         # Reconstruct lm_head.weight from embed_tokens if it was excluded
         if (
             "lm_head.weight" not in hf_state_dict
@@ -89,7 +103,7 @@ def _build_hf_to_titan_patterns() -> list[tuple[str, str, bool]]:
         (r"^(.*\.)router\.proj\.weight$", r"\1router.gate.weight", False),
         (r"^(.*\.)gate\.e_score_correction_bias$", r"\1expert_bias", False),
         (r"^(.*\.)experts\.down_proj$", rf"\1{_TITAN_W2_WEIGHT}", False),
-        # Shared experts use FeedForward (w1/w2/w3 attribute names, not params)
+        # Shared experts use DenseFeedForward (w1/w2/w3 attribute names, not params)
         (r"^(.*\.shared_experts)\.gate_proj\.weight$", r"\1.w1.weight", False),
         (r"^(.*\.shared_experts)\.up_proj\.weight$", r"\1.w3.weight", False),
         (r"^(.*\.shared_experts)\.down_proj\.weight$", r"\1.w2.weight", False),

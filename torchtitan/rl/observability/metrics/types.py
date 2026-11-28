@@ -9,12 +9,14 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol
 
 
 __all__ = [
+    "fold",
     "Max",
     "Mean",
     "Metric",
@@ -384,3 +386,41 @@ class NoReduce(MetricValue):
                 f"NoReduce expects exactly one entry per key; got {len(metrics)}."
             )
         return {cls.output_suffix: metrics[0].value}
+
+
+def fold(metrics: Iterable[Metric]) -> list[Metric]:
+    """Merge the `Mean`, `Max`, `Min` and `Sum` records that share a key into one record per type.
+
+    Why: each generate call returns 16 records (8 metrics x Mean/Max). Unfolded, a
+    multi-turn rollout holds every turn's records until the step is logged, and every full GC
+    walks them: ~180K of the ~220K objects added after setup at 12 turns and ~320 rollouts in flight.
+
+    `MetricsProcessor` reduces the result to the same numbers. Other types pass through unchanged.
+
+    Example:
+        fold([
+            Metric("ttft", Mean(2.0)), Metric("ttft", Max(2.0)),  # generation 1
+            Metric("ttft", Mean(4.0)), Metric("ttft", Max(4.0)),  # generation 2
+        ])
+        # -> [Metric("ttft", Mean(6.0, count=2.0)), Metric("ttft", Max(4.0))]
+    """
+    values_by_key_and_type: dict[tuple[str, type[Any]], list[Any]] = defaultdict(list)
+    unfolded: list[Metric] = []
+    for metric in metrics:
+        if type(metric.value) in (Mean, Max, Min, Sum):
+            values_by_key_and_type[(metric.key, type(metric.value))].append(
+                metric.value
+            )
+        else:
+            unfolded.append(metric)
+    folded = []
+    for (key, value_cls), values in values_by_key_and_type.items():
+        if value_cls is Mean:
+            value = Mean(
+                sum(mean.value for mean in values),
+                count=sum(mean.count for mean in values),
+            )
+        else:
+            value = value_cls(value_cls.reduce(values)[value_cls.output_suffix])
+        folded.append(Metric(key, value))
+    return [*folded, *unfolded]

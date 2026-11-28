@@ -85,6 +85,10 @@ class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
                 *hidden_states,
                 *(entry.unsharded for entry in entries),
             )
+        if not hidden_states:
+            return super()._gradient_backprop(
+                hidden_states, accumulated_grads, total_loss
+            )
         fsdp_enabled = isinstance(lm_head, FSDPModule)
         return _ChunkedLossWrapperWithParamGrads.apply(
             len(hidden_states),

@@ -38,6 +38,7 @@ in a recipe derived from one that builds such a model::
     import dataclasses
 
     from torchtitan.models.common.moe import (
+        MoE,
         RoundRobinTokenChoiceTopKRouter,
         TokenChoiceTopKRouter,
     )
@@ -49,17 +50,16 @@ in a recipe derived from one that builds such a model::
     def paged_stash_debugmodel():
         config = graph_trainer_deepseek_v3_debugmodel_hybridep()
         config.compile.memory_policy = "sac_and_paged_stash"
-        # GraphTrainer applies its own CUDA graph pass when the trainer-level
-        # CUDA graph wrapper is off.
-        config.training.disable_cuda_graphs = True
+        # Paged stash may release and reallocate buffers after an overflow.
+        config.training.disable_accelerator_graphs = True
         config.parallelism.data_parallel_shard_degree = 4
         config.parallelism.expert_parallel_degree = 2
         # Route round-robin, with exact balance (see below).
         router_fields = dataclasses.fields(TokenChoiceTopKRouter.Config)
         for layer in config.model.layers:
-            if getattr(layer, "moe", None) is not None:
-                router = layer.moe.router
-                layer.moe.router = RoundRobinTokenChoiceTopKRouter.Config(
+            if isinstance(layer.feed_forward, MoE.Config):
+                router = layer.feed_forward.router
+                layer.feed_forward.router = RoundRobinTokenChoiceTopKRouter.Config(
                     **{f.name: getattr(router, f.name) for f in router_fields}
                 )
         return config
@@ -101,7 +101,7 @@ Options
     Megatron's). 0 reloads an activation when backward first reads it.
 ``compile.paged_stash.module_fqn``
     Module-FQN pattern of the modules annotated as the paged-stash region
-    (default ``layers.*.moe.routed_experts``).
+    (default ``layers.*.feed_forward.routed_experts``).
 ``compile.paged_stash.skip_immediate_backward``
     Keep the last paged layer resident instead of stashing it when the schedule
     runs that microbatch's backward next (default on). Matches Megatron's
@@ -180,9 +180,9 @@ How It Works
    disabled, as Megatron does. A token drop is reported but never fatal: it
    comes from the capacity factor, not the stash.
 
-The Triton kernels and the ``PagedStashBuffer`` layout are copied from
-Megatron-Core unchanged, so the page allocator, the pinned-host spill path, and
-the overflow protocol behave identically.
+The Triton kernels (``paged_stash_kernels``) and the ``PagedStashBuffer`` layout
+are copied from Megatron-Core unchanged, so the page allocator, the pinned-host
+spill path, and the overflow protocol behave identically.
 
 Limitations
 -----------
@@ -219,8 +219,6 @@ from typing import Any, Literal, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-import triton
-import triton.language as tl
 from torch._library.custom_ops import custom_op
 from torch.distributed.pipelining.schedules import (
     _Action,
@@ -257,6 +255,9 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 )
 from torchtitan.experiments.graph_trainer.registry import register_memory_policy
 
+from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.moe import MoE
+
 if TYPE_CHECKING:
     from torchtitan.components.optim.optimizer import OptimizersContainer
     from torchtitan.experiments.graph_trainer.configs import PagedStashConfig
@@ -264,271 +265,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-# ===========================================================================
-# Triton kernels for MoE paged stash
-# ===========================================================================
-#
-# Copied verbatim from Megatron-Core 0.19.0
-# (``megatron/core/transformer/moe/ops/paged_stash.py``,
-# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES) so that GraphTrainer's
-# paged stash is bit-for-bit the same page allocator, overflow protocol, and
-# copy loop as the Megatron reference. Do not "clean up" these kernels: any
-# divergence changes the freelist/overflow semantics the rest of this module
-# and the Megatron reference both assume.
-
-
-GLOBAL_BLOCK_SIZE = 1024
-
-
-@triton.jit
-def paged_stash_copy_kernel(
-    src_ptr,
-    cuda_dst_ptr,
-    host_dst_ptr,
-    num_tokens_ptr,
-    free_list_cuda_ptr,
-    free_list_host_ptr,
-    free_list_head_ptr,  # shape (2,): [cuda_head, host_head]
-    free_list_tail_ptr,  # shape (2,)
-    free_list_capacity_ptr,
-    page_record_ptr,
-    overflow_ptr,
-    host_spill_global_ptr,  # 1 if any successful host spill (not set on overflow path)
-    spilled_to_host_ptr,  # Output: 0 = stored in CUDA, 1 = stored in host or overflow
-    new_free_list_head_ptr,  # Output: shape (2,) updated heads
-    PAGE_SIZE: tl.constexpr,
-    HIDDEN_SIZE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    HAS_HOST_BUFFER: tl.constexpr,
-):
-    """Stash variable-length MoE activations into a paged buffer (CUDA, or pinned host).
-
-    Uses a custom Triton kernel because the token count is only known at runtime and
-    lives on device. Page allocation from the circular freelist, page_record metadata,
-    and the activation copy are fused in one GPU launch to avoid host sync and keep
-    stash CUDA-graph friendly. Fixed-size pages reduce fragmentation vs oversized
-    static expert buffers.
-
-    Per launch (program 0 handles metadata; all programs run the copy):
-        1. If overflow is already set, restore freelist heads and return.
-        2. Compute pages needed from num_tokens. Try the CUDA freelist; if full, try
-           the host freelist when available; otherwise set overflow and return.
-        3. Copy tokens in parallel: resolve page_id per token, record page_ids in
-           page_record, write hidden vectors into the chosen CUDA or host pages.
-        4. Program 0 writes updated freelist heads for the caller to copy_ back.
-    """
-    pid = tl.program_id(axis=0)
-    num_blocks = tl.num_programs(axis=0)
-
-    # Load overflow first (get in flight early); branch on it only before any write
-    overflow = tl.load(overflow_ptr)
-
-    num_tokens = tl.load(num_tokens_ptr)
-    required_pages = tl.cdiv(num_tokens, PAGE_SIZE)
-
-    # Common case: load only CUDA state (and head_host for output when use_cuda)
-    head_cuda = tl.load(free_list_head_ptr)
-    head_host = tl.load(free_list_head_ptr + 1)
-    tail_cuda = tl.load(free_list_tail_ptr)
-    cap_cuda = tl.load(free_list_capacity_ptr)
-
-    avail_cuda = tail_cuda - head_cuda
-    use_cuda = avail_cuda >= required_pages
-
-    # Assume CUDA path: set everything for GPU stash
-    spill = 0
-    dst_ptr = cuda_dst_ptr
-    free_list_ptr = free_list_cuda_ptr
-    head = head_cuda
-    cap = cap_cuda
-    new_head_cuda = head_cuda + required_pages
-    new_head_host = head_host
-
-    if overflow == 1:
-        # No stash; preserve heads so Python copy_ does not write garbage into the buffer.
-        if pid == 0:
-            tl.store(new_free_list_head_ptr, head_cuda)
-            tl.store(new_free_list_head_ptr + 1, head_host)
-        return
-
-    # Only when CUDA is full: load host state and maybe switch to host
-    if not use_cuda:
-        tail_host = tl.load(free_list_tail_ptr + 1)
-        cap_host = tl.load(free_list_capacity_ptr + 1)
-        use_host = HAS_HOST_BUFFER == 1 and (tail_host - head_host) >= required_pages
-        if use_host:
-            spill = 1
-            dst_ptr = host_dst_ptr
-            free_list_ptr = free_list_host_ptr
-            head = head_host
-            cap = cap_host
-            new_head_cuda = head_cuda
-            new_head_host = head_host + required_pages
-        else:
-            if pid == 0:
-                tl.store(overflow_ptr, 1)
-                tl.store(spilled_to_host_ptr, 1)
-                tl.store(new_free_list_head_ptr, head_cuda)
-                tl.store(new_free_list_head_ptr + 1, head_host)
-            return
-
-    if pid == 0:
-        tl.store(spilled_to_host_ptr, spill)
-        if spill == 1:
-            tl.store(host_spill_global_ptr, 1)
-
-    # Copy loop: strided over tokens
-    token_idx = pid
-    while token_idx < num_tokens:
-        page_slot = token_idx // PAGE_SIZE
-        token_in_page = token_idx % PAGE_SIZE
-        free_list_idx = (head + page_slot) % cap
-        page_id = tl.load(free_list_ptr + free_list_idx)
-        if token_in_page == 0:
-            tl.store(page_record_ptr + page_slot, page_id)
-        dst_token_idx = page_id * PAGE_SIZE + token_in_page
-
-        elements_per_thread = HIDDEN_SIZE // BLOCK_SIZE
-        need_mask = (HIDDEN_SIZE % BLOCK_SIZE) != 0
-        num_iters = elements_per_thread + (1 if need_mask else 0)
-        token_idx_i64 = token_idx.to(tl.int64)
-        dst_token_idx_i64 = dst_token_idx.to(tl.int64)
-        src_base = src_ptr + token_idx_i64 * HIDDEN_SIZE
-        dst_base = dst_ptr + dst_token_idx_i64 * HIDDEN_SIZE
-
-        if need_mask:
-            for iter in range(num_iters):
-                hidden_offsets = tl.arange(0, BLOCK_SIZE) + iter * BLOCK_SIZE
-                hidden_mask = hidden_offsets < HIDDEN_SIZE
-                data = tl.load(src_base + hidden_offsets, mask=hidden_mask, other=0)
-                tl.store(dst_base + hidden_offsets, data, mask=hidden_mask)
-        else:
-            for iter in range(elements_per_thread):
-                hidden_offsets = tl.arange(0, BLOCK_SIZE) + iter * BLOCK_SIZE
-                data = tl.load(src_base + hidden_offsets)
-                tl.store(dst_base + hidden_offsets, data)
-        token_idx += num_blocks
-
-    if pid == 0:
-        tl.store(new_free_list_head_ptr, new_head_cuda)
-        tl.store(new_free_list_head_ptr + 1, new_head_host)
-
-
-@triton.jit
-def paged_stash_pop_kernel(
-    cuda_src_ptr,
-    host_src_ptr,
-    dst_ptr,
-    num_tokens_ptr,
-    page_record_ptr,
-    spilled_to_host_ptr,  # 0 = read from CUDA, 1 = read from host
-    overflow_ptr,
-    free_list_cuda_ptr,
-    free_list_host_ptr,
-    free_list_tail_ptr,  # shape (2,)
-    free_list_capacity_ptr,
-    new_free_list_tail_ptr,  # Output: shape (2,) updated tails
-    PAGE_SIZE: tl.constexpr,
-    HIDDEN_SIZE: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    """Restore variable-length MoE activations from a paged buffer (CUDA, or pinned host).
-
-    Inverse of paged_stash_copy_kernel. Uses a custom Triton kernel for the same
-    reasons: runtime token count and stash metadata live on device, so the reload,
-    page_record lookup, and freelist recycle must fuse on-GPU without host sync.
-
-    Per launch (program 0 handles metadata; all programs run the copy):
-        1. If overflow is already set, restore freelist tails and return.
-        2. Read spilled_to_host from the matching stash: CUDA buffer by default, host
-           buffer when the forward stash spilled to pinned memory.
-        3. Copy tokens in parallel: look up page_id from page_record, read hidden
-           vectors from the stash pages into dst, return each page_id to the freelist.
-        4. Program 0 writes updated freelist tails for the caller to copy_ back.
-    """
-    pid = tl.program_id(axis=0)
-    num_blocks = tl.num_programs(axis=0)
-
-    # Load overflow first (get in flight early); branch on it only before any write
-    overflow = tl.load(overflow_ptr)
-
-    num_tokens = tl.load(num_tokens_ptr)
-    spill = tl.load(spilled_to_host_ptr)
-    required_pages = tl.cdiv(num_tokens, PAGE_SIZE)
-
-    # Common case: load only CUDA state (and tail_host for output when spill=0)
-    tail_cuda = tl.load(free_list_tail_ptr)
-    tail_host = tl.load(free_list_tail_ptr + 1)
-    cap_cuda = tl.load(free_list_capacity_ptr)
-
-    if overflow == 1:
-        # No pop; preserve tails so Python copy_ does not write garbage into the buffer.
-        if pid == 0:
-            tl.store(new_free_list_tail_ptr, tail_cuda)
-            tl.store(new_free_list_tail_ptr + 1, tail_host)
-        return
-
-    # Assume CUDA path
-    src_ptr = cuda_src_ptr
-    free_list_ptr = free_list_cuda_ptr
-    tail = tail_cuda
-    cap = cap_cuda
-    new_tail_cuda = tail_cuda + required_pages
-    new_tail_host = tail_host
-
-    # Only when spilled to host: load host state and switch
-    if spill == 1:
-        cap_host = tl.load(free_list_capacity_ptr + 1)
-        if cap_host == 0:
-            # Cannot pop from host; preserve tails (no-op for free-list state).
-            if pid == 0:
-                tl.store(new_free_list_tail_ptr, tail_cuda)
-                tl.store(new_free_list_tail_ptr + 1, tail_host)
-            return
-        src_ptr = host_src_ptr
-        free_list_ptr = free_list_host_ptr
-        tail = tail_host
-        cap = cap_host
-        new_tail_cuda = tail_cuda
-        new_tail_host = tail_host + required_pages
-
-    token_idx = pid
-    while token_idx < num_tokens:
-        page_slot = token_idx // PAGE_SIZE
-        token_in_page = token_idx % PAGE_SIZE
-        page_id = tl.load(page_record_ptr + page_slot)
-        src_token_idx = page_id * PAGE_SIZE + token_in_page
-
-        elements_per_thread = HIDDEN_SIZE // BLOCK_SIZE
-        need_mask = (HIDDEN_SIZE % BLOCK_SIZE) != 0
-        num_iters = elements_per_thread + (1 if need_mask else 0)
-        src_token_idx_i64 = src_token_idx.to(tl.int64)
-        token_idx_i64 = token_idx.to(tl.int64)
-        src_base = src_ptr + src_token_idx_i64 * HIDDEN_SIZE
-        dst_base = dst_ptr + token_idx_i64 * HIDDEN_SIZE
-
-        if need_mask:
-            for iter in range(num_iters):
-                hidden_offsets = tl.arange(0, BLOCK_SIZE) + iter * BLOCK_SIZE
-                hidden_mask = hidden_offsets < HIDDEN_SIZE
-                data = tl.load(src_base + hidden_offsets, mask=hidden_mask, other=0)
-                tl.store(dst_base + hidden_offsets, data, mask=hidden_mask)
-        else:
-            for iter in range(elements_per_thread):
-                hidden_offsets = tl.arange(0, BLOCK_SIZE) + iter * BLOCK_SIZE
-                data = tl.load(src_base + hidden_offsets)
-                tl.store(dst_base + hidden_offsets, data)
-
-        if token_in_page == 0:
-            write_idx = (tail + page_slot) % cap
-            tl.store(free_list_ptr + write_idx, page_id)
-        token_idx += num_blocks
-
-    if pid == 0:
-        tl.store(new_free_list_tail_ptr, new_tail_cuda)
-        tl.store(new_free_list_tail_ptr + 1, new_tail_host)
 
 
 # ===========================================================================
@@ -670,6 +406,13 @@ class PagedStashBuffer:
         num_blocks: int,
     ) -> None:
         """Launch ``paged_stash_copy_kernel`` from ``source`` into free pages."""
+        # Imported at launch: Triton has no wheels on every platform the CPU
+        # tests run on, and the kernels only run on CUDA.
+        from torchtitan.experiments.graph_trainer.paged_stash_kernels import (
+            GLOBAL_BLOCK_SIZE,
+            paged_stash_copy_kernel,
+        )
+
         paged_stash_copy_kernel[(num_blocks,)](
             source,
             self.cuda_buffer,
@@ -703,6 +446,11 @@ class PagedStashBuffer:
         num_blocks: int,
     ) -> None:
         """Launch ``paged_stash_pop_kernel`` from the recorded pages into ``dest``."""
+        from torchtitan.experiments.graph_trainer.paged_stash_kernels import (
+            GLOBAL_BLOCK_SIZE,
+            paged_stash_pop_kernel,
+        )
+
         paged_stash_pop_kernel[(num_blocks,)](
             self.cuda_buffer,
             self._host_or_cuda_buffer(),
@@ -868,7 +616,7 @@ class PagedStashManager:
         self.paging_disabled = False
         self.device: torch.device | None = None
 
-        self._stream: torch.cuda.Stream | None = None
+        self._stream: torch.Stream | None = None
 
         self.page_size = 64
         self.buffer_size_factor_cuda = 1.10
@@ -956,14 +704,14 @@ class PagedStashManager:
         self.step = 0
 
     @property
-    def stream(self) -> torch.cuda.Stream:
+    def stream(self) -> torch.Stream:
         """Side stream for both the stash and the reload copies.
 
         One stream, as in Megatron: the freelists are unsynchronized mutable
         state, so packing and unpacking must never run concurrently.
         """
         if self._stream is None:
-            self._stream = torch.cuda.Stream()
+            self._stream = torch.Stream()
         return self._stream
 
     # ------------------------------------------------------------------
@@ -1173,7 +921,7 @@ class PagedStashManager:
         # The copies run in launch order on one stream, so the last one's
         # event covers them all.
         last_event = self._stashes_in_flight[-1][0]
-        torch.cuda.current_stream(self.device).wait_event(last_event)
+        torch.accelerator.current_stream(self.device).wait_event(last_event)
         self._stashes_in_flight.clear()
 
     def prefetch_after(self, entry: ScheduleEntry, count: int) -> None:
@@ -1324,8 +1072,8 @@ class PagedStashManager:
         ``PagedStashManager.release_stash_buffers``, and by ``reset_instance``;
         both after the CUDA graphs that reference these pointers are torn down.
         """
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        if torch.accelerator.is_available():
+            torch.accelerator.synchronize()
         self.stash_buffers = None
         logger.info("Paged stash: released stash page buffers.")
 
@@ -1537,7 +1285,7 @@ def _wait_for_copy(tensor: torch.Tensor) -> None:
     if registered is None:
         return
     completion_event, device, _retained = registered
-    torch.cuda.current_stream(device).wait_event(completion_event)
+    torch.accelerator.current_stream(device).wait_event(completion_event)
 
 
 def _slot(slot_id: int) -> StashSlot:
@@ -1618,7 +1366,7 @@ def _launch_stash(
     manager = PagedStashManager.get_instance()
     device = activation.device
     buffer = manager.get_buffer(slot.dtype, slot.hidden_size)
-    current_stream = torch.cuda.current_stream(device)
+    current_stream = torch.accelerator.current_stream(device)
     page_record, spilled = _handle_views(handle, handle.numel() - 1)
 
     # Derive the token count *before* the stream join. For a scale slot
@@ -1632,7 +1380,7 @@ def _launch_stash(
     stream = manager.stream
     stream.wait_stream(current_stream)
     completion_event = torch.Event()
-    with torch.cuda.stream(stream):
+    with stream:
         # Freelist scratch never leaves the side stream, so it must be
         # allocated here: allocating on the compute stream and then freeing it
         # at op exit would let the allocator hand the block to another
@@ -1671,7 +1419,7 @@ def _launch_reload(
     manager = PagedStashManager.get_instance()
     device = handle.device
     buffer = manager.get_buffer(slot.dtype, slot.hidden_size)
-    current_stream = torch.cuda.current_stream(device)
+    current_stream = torch.accelerator.current_stream(device)
     page_record, spilled = _handle_views(handle, handle.numel() - 1)
 
     result = torch.empty(size, dtype=dtype, device=device)
@@ -1688,7 +1436,7 @@ def _launch_reload(
         result, device, retain=(handle, page_record, spilled, num_tokens, tokens)
     )
 
-    with torch.cuda.stream(stream):
+    with stream:
         # Side-stream-local scratch; see the note in ``_launch_stash``.
         new_free_list_tail = torch.empty(2, dtype=torch.int64, device=device)
         buffer.launch_pop(
@@ -1944,7 +1692,7 @@ def warmup_paged_stash_kernels() -> None:
     # The warmup launches are no-ops, but reset anyway so the step starts from
     # a pristine freelist regardless of kernel-side bookkeeping.
     manager.reset_buffers()
-    torch.cuda.synchronize(device)
+    torch.accelerator.synchronize(device)
     manager.needs_kernel_warmup = False
     logger.info(
         "Paged stash: compiled Triton kernels for %d buffer configuration(s).",
@@ -1989,7 +1737,7 @@ PAGED_STASH_REGION = "paged_stash_region"
 # Default module-FQN pattern of the paged-stash region: the routed experts, so
 # the region holds the dispatcher's output and everything inside
 # ``inner_experts``.
-DEFAULT_MODULE_FQN = "layers.*.moe.routed_experts"
+DEFAULT_MODULE_FQN = "layers.*.feed_forward.routed_experts"
 
 # Paging a tensor costs one full round trip through the stash, so tiny tensors
 # are never worth it. Same rationale as cpu_offload's ``_MIN_OFFLOAD_BYTES``.
@@ -3095,9 +2843,12 @@ def moe_expert_biases(model_parts: Sequence[nn.Module]) -> list[torch.Tensor]:
             layer_containers.append(mtp_layers)
         for layers in layer_containers:
             for block in layers.children():
-                if not getattr(block, "moe_enabled", False):
+                if not isinstance(block, TransformerBlock):
                     continue
-                bias = block.moe.expert_bias_E
+                moe = block.feed_forward
+                if not isinstance(moe, MoE):
+                    continue
+                bias = moe.expert_bias_E
                 if bias is not None:
                     # A buffer, so no gradient flows through ``to_local``.
                     biases.append(
@@ -3167,7 +2918,7 @@ class PagedStashRunner:
         self._flags_host = torch.zeros(
             3, dtype=torch.int32, device="cpu", pin_memory=True
         )
-        self._flags_event = torch.cuda.Event()
+        self._flags_event = torch.Event()
         # Device-side scratch for the all-reduced flags, bound on first use and
         # then reused. A fresh allocation of a size the caching allocator has
         # not seen calls ``cudaMalloc``, which synchronizes the device -- so
@@ -3625,9 +3376,6 @@ def build_paged_stash_runner(
 
 
 __all__ = [
-    "GLOBAL_BLOCK_SIZE",
-    "paged_stash_copy_kernel",
-    "paged_stash_pop_kernel",
     "PagedStashBuffer",
     "PagedStashManager",
     "SCALE_INV_BLOCK_SIZE",

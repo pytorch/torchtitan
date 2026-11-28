@@ -167,6 +167,22 @@ class TestChunkedLossModel(TestCase):
         expected_value.backward()
         self.assertEqual(actual_h_grad, expected_h.grad, atol=0, rtol=0)
 
+    def test_fp32_chunk_gradients_reach_the_reduction(self):
+        head, _, _, _, _, _ = self._make_case(dtype=torch.bfloat16)
+        (parameter,) = head.parameters()
+        with local_gradient_accumulation(head) as state:
+            weight = head.weight
+            self.assertEqual(weight.dtype, torch.bfloat16)
+            chunk_gradient = torch.full_like(weight, 1 + 2**-9, dtype=torch.float32)
+            for _ in range(4):
+                weight.backward(chunk_gradient)
+                state.accumulate()
+            (entry,) = state.parameters.values()
+        (gradient,) = torch.autograd.grad(entry.unsharded, parameter, entry.gradient)
+        shard = gradient.to_local()
+        expected = torch.full_like(shard, 4 * dist.get_world_size() * (1 + 2**-9))
+        self.assertEqual(shard, expected, atol=0, rtol=0)
+
     def test_trace_has_one_reduction_and_replays_updated_weights(self):
         for num_chunks in (1, 4, 8):
             with self.subTest(num_chunks=num_chunks):
@@ -225,6 +241,17 @@ class TestChunkedLossModel(TestCase):
         self.assertEqual(value, expected_value)
         for a, b in zip(actual, expected, strict=True):
             self.assertEqual(a, b, atol=2e-6, rtol=2e-5)
+
+    def test_frozen_decoder_returns_scaled_head_gradients(self):
+        head, reference, loss, baseline, hidden, labels = self._make_case()
+        expected, _ = baseline(hidden, labels, 16.0)
+        self.assertTrue(expected.is_leaf)
+        value, _ = loss(hidden, labels, 16.0)
+        self.assertEqual(value, expected)
+        (parameter,) = head.parameters()
+        self.assertIsNone(parameter.grad)
+        (gradient,) = torch.autograd.grad(value * 0.25, (parameter,))
+        self.assertEqual(gradient, next(reference.parameters()).grad * 0.25)
 
     def test_replicated_and_hybrid_gradient_sync(self):
         meshes = [("replicate", self.mesh)]

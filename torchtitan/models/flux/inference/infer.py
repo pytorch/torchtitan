@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 
 @torch.no_grad()
-@record
 def inference(config: FluxTrainer.Config):
     # Reuse trainer to perform forward passes
     trainer = FluxTrainer(config)
@@ -41,7 +40,12 @@ def inference(config: FluxTrainer.Config):
 
     if config.checkpointer is None:
         raise ValueError("Flux inference requires a checkpointer configuration.")
-    trainer.engine.load_checkpoint()
+    if not trainer.engine.load_checkpoint():
+        raise ValueError(
+            "Flux inference found no checkpoint to load. Set "
+            "checkpointer.initial_load_path to the trained export, e.g. "
+            "<dump_folder>/checkpoint/exports/step-<N>."
+        )
 
     # Build tokenizers from the config
     tokenizer = config.tokenizer.build()
@@ -97,7 +101,12 @@ def inference(config: FluxTrainer.Config):
     torch.distributed.destroy_process_group()
 
 
-if __name__ == "__main__":
+@record
+def main() -> None:
     init_logger()
     config = ConfigLoader().load()
     inference(config)  # pyrefly: ignore [bad-argument-type]
+
+
+if __name__ == "__main__":
+    main()

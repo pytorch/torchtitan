@@ -6,7 +6,7 @@
 
 import sys
 from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from itertools import count
 
@@ -24,18 +24,16 @@ from torch.distributed._tensor import (
 )
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
-from torch.distributed.tensor._redistribute import (
-    Redistribute,
-    redistribute_local_tensor,
-)
+from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor._utils import (
     compute_local_shape_and_global_offset,
     compute_local_stride,
 )
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
-from torch.fx.traceback import annotate
+from torch.fx.traceback import annotate, get_current_meta
 
-from torchtitan.protocols.module import Module
+from torchtitan.distributed.fsdp import linear_param_shard_placements
+from torchtitan.models.base.module import Module
 
 from torchtitan.quantization._fsdp_tensor import (
     _ShardedFSDPTensor,
@@ -77,8 +75,8 @@ integration and grad norm behavior unchanged.
 In pre-forward (ReplicateComputation.forward), we additionally handle any BWD reductions
 FSDP is expected to do, as the sharding annotations (R/I@TP for SP on/off) are assuming
 FSDP does its job (R FWD <-> P BWD assumes FSDP redistributes to I).
-We lookup parameter typing on non-FSDP axes, and `convert(I->R)` in pre-forward
-(P->I all-reduce in post-backward) if annotated as R.
+We lookup parameter typing on non-FSDP axes, and P->I all-reduce in post-backward
+if annotated as R.
 For other types: I is no-op, S(i) is sharded at rest, P is banned in titan for now.
 """
 
@@ -223,6 +221,9 @@ def _register_parametrization(
     TODO: In checkpoint saving/loading, avoid parametrization calls when calling
     get_model_state_dict func in torchtitan/components/checkpointer/dcp.py.
     """
+    # Keep parameterless module types stable for attention metadata lookup.
+    if not param_names:
+        return
     param_name_to_property = {}
     parametrizations = {}
     for param_name in param_names:
@@ -269,18 +270,12 @@ class LocalGradientAccumulation:
         self, parametrization: "ReplicateComputation", parameter: DTensor
     ) -> torch.Tensor:
         if parametrization not in self.parameters:
-            compute_dtype = parametrization.param_dtype or parameter.dtype
             gradient_dtype = parametrization.reduce_dtype or parameter.dtype
-            unsharded = parametrization.replicate_compute(
-                parameter,
-                # Also preserve forward values when reduction uses a lower
-                # precision than computation (or FP16 and BF16 are mixed).
-                output_dtype=torch.promote_types(compute_dtype, gradient_dtype),
-            )
+            unsharded = parametrization.replicate_compute(parameter)
             # Retain the original head's compute dtype and tensor subclass.
             # No per-chunk backward may enter the unshard graph.
             with torch.no_grad():
-                compute = unsharded.to(compute_dtype)
+                compute = unsharded
                 source = parameter._local_tensor
                 if isinstance(source, _ShardedFSDPTensor):
                     compute = _UnshardedFSDPTensor(
@@ -289,6 +284,8 @@ class LocalGradientAccumulation:
                 elif isinstance(source, _UnshardedFSDPTensor):
                     raise RuntimeError("Expected a sharded SimpleFSDP parameter")
                 local = compute.detach().requires_grad_(parameter.requires_grad)
+                if local.requires_grad:
+                    local.grad_dtype = gradient_dtype
             self.parameters[parametrization] = _LocalParameterGradient(
                 unsharded, local, gradient_dtype
             )
@@ -366,6 +363,123 @@ class _BuildUnshardedTensorFunction(torch.autograd.Function):
         return grad_weight, None
 
 
+class _UnshardAndReduceGradFunction(torch.autograd.Function):
+    """Unshard a parameter in forward and reduce its gradient in backward.
+
+    Forward (compute time), for one parameter:
+      1. Wrap ``sharded_local_tensor`` (the parameter's local FSDP shard, in
+         the master dtype) as a DTensor on ``dp_mesh`` with ``dp_placements``.
+      2. Cast it to ``param_dtype``, then unshard it over DP (all-gather for
+         FSDP/HSDP, no-op for DDP), and return the local unsharded weight.
+      3. Declare ``reduce_dtype`` as the gradient dtype of the returned
+         unsharded weight (``ctx.set_output_grad_dtype``), so autograd casts
+         any gradient flowing into it to ``reduce_dtype``. FSDP2 does the same
+         with ``grad_dtype``, which works there because its unsharded weight
+         is a leaf; here it is an intermediate.
+
+    Backward (compute time):
+      1. The gradient of the unsharded weight arrives in ``param_dtype``; the
+         ``ctx.set_output_grad_dtype`` call from forward step 3 casts it to
+         ``reduce_dtype``.
+      2. All-reduce it over the model-parallel axes (e.g. TP/EP) where the
+         parameter is replicated, if any.
+      3. Reduce it over DP: reduce-scatter for FSDP, all-reduce for DDP, both
+         for HSDP.
+      4. Cast the local shard to the master dtype and return it as the
+         gradient of ``sharded_local_tensor``.
+
+    Why one Function: FSDP2 runs its gradient reductions outside autograd, on
+    the ``.grad`` of its unsharded parameter, a leaf with ``grad_dtype =
+    reduce_dtype``. SimpleFSDP runs them inside autograd, where the unsharded
+    weight is an intermediate and ``grad_dtype`` cannot be set; with each
+    collective in its own autograd node, autograd would round the gradient to
+    ``param_dtype`` between them.
+
+    Args:
+        sharded_local_tensor: The parameter's local FSDP shard.
+        dp_mesh: The data-parallel mesh (DP axes only; TP/EP are excluded).
+        dp_placements: The parameter's placements on ``dp_mesh``.
+        unsharded_shape: Shape of the FSDP-unsharded weight on this rank. Not
+            the global shape: still sharded over model-parallel axes (TP/EP).
+        unsharded_stride: Stride of the FSDP-unsharded weight on this rank.
+        param_dtype: Dtype of the all-gather and the unsharded weight. ``None``
+            keeps the master dtype.
+        reduce_dtype: Dtype of the gradient reductions. ``None`` uses the
+            master dtype.
+        non_dp_replicate_axes: The model-parallel (e.g. TP/EP) mesh axes where
+            the parameter is replicated (R).
+    """
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(
+        ctx,
+        sharded_local_tensor: torch.Tensor,
+        dp_mesh: DeviceMesh,
+        dp_placements: tuple[Placement, ...],
+        unsharded_shape: torch.Size,
+        unsharded_stride: tuple[int, ...],
+        param_dtype: torch.dtype | None,
+        reduce_dtype: torch.dtype | None,
+        non_dp_replicate_axes: list[spmd.MeshAxis],
+    ) -> torch.Tensor:
+        ctx.dp_mesh = dp_mesh
+        ctx.dp_placements = dp_placements
+        ctx.reduce_dtype = reduce_dtype
+        ctx.non_dp_replicate_axes = non_dp_replicate_axes
+        ctx.sharded_dtype = sharded_local_tensor.dtype
+        # Graph passes find the backward collectives by their annotations
+        # (e.g. FSDP_PARAM_FQNS_META). Tracing copies them from forward nodes
+        # with the same seq_nr, which misses here: the nested DTensor Functions
+        # give the forward nodes their own seq_nr. Re-apply them in backward.
+        # Skip this under Dynamo, which tracks annotate itself: reading the
+        # global metadata would install a guard on it.
+        ctx.annotations = (
+            {}
+            if torch.compiler.is_dynamo_compiling()
+            else dict(get_current_meta().get("custom", {}))
+        )
+        # TODO: Drop the guard once the nightly has Dynamo support for
+        # set_output_grad_dtype. Until then, under torch.compile a gradient
+        # computed in a wider dtype is rounded to param_dtype on entry.
+        if not torch.compiler.is_dynamo_compiling():
+            # FSDP2 resolves the unsharded grad_dtype the same way.
+            ctx.set_output_grad_dtype(reduce_dtype or sharded_local_tensor.dtype)
+        sharded_dtensor = DTensor.from_local(
+            sharded_local_tensor,
+            dp_mesh,
+            dp_placements,
+            shape=unsharded_shape,
+            stride=unsharded_stride,
+        )
+        unsharded_dtensor = sharded_dtensor.redistribute(
+            placements=[Replicate()] * dp_mesh.ndim, forward_dtype=param_dtype
+        )
+        return unsharded_dtensor.to_local()
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def backward(ctx, grad: torch.Tensor):
+        with annotate(ctx.annotations) if ctx.annotations else nullcontext():
+            for axis in ctx.non_dp_replicate_axes:
+                grad = spmd.all_reduce(
+                    grad, axis, src=spmd.P, dst=spmd.I, op_dtype=ctx.reduce_dtype
+                )
+            partial_grad = DTensor.from_local(
+                grad,
+                ctx.dp_mesh,
+                [Partial(reduce_op="sum")] * ctx.dp_mesh.ndim,
+                run_check=False,
+            )
+            sharded_grad = partial_grad.redistribute(
+                placements=ctx.dp_placements, forward_dtype=ctx.reduce_dtype
+            )
+        return (
+            sharded_grad.to_local().to(ctx.sharded_dtype),
+            *([None] * 7),
+        )
+
+
 class ReplicateComputation(Module):
     def __init__(
         self,
@@ -382,48 +496,19 @@ class ReplicateComputation(Module):
         self.mesh_axis_names = tuple(device_mesh.mesh_dim_names or ())
         self.param_sharding = param_sharding
         self.mode = mode
-        self.compute_placements: list[Placement] = [Replicate()] * self.device_mesh.ndim
-        self.grad_placements: list[Placement] = [
-            Partial(reduce_op="sum")
-        ] * self.device_mesh.ndim
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
 
-        # non_dp_mesh_types stores local type for non-FSDP (model-parallel) axes
-        # (e.g. TP on dense, EP on sparse), so SimpleFSDP handles any TP/EP grad
-        # reductions it's responsible for.
-        self.non_dp_mesh_types = non_dp_mesh_types
+        # Non-FSDP (model-parallel) axes where the parameter is R. FSDP is
+        # responsible for their backward all-reduces: e.g. TP RMSNorm with SP
+        # uses R, so add P->I in backward. I remains a no-op.
+        self.non_dp_replicate_axes = [
+            axis for axis, axis_type in non_dp_mesh_types.items() if axis_type is spmd.R
+        ]
         self.local_gradients: LocalGradientAccumulation | None = None
 
-    def _redistribute(self, x: DTensor, output_dtype: torch.dtype | None) -> DTensor:
-        if output_dtype is None:
-            return x.redistribute(
-                placements=self.compute_placements,
-                forward_dtype=self.param_dtype,
-                backward_dtype=self.reduce_dtype,
-            )
-        # Separate the all-gather wire dtype from the autograd boundary dtype.
-        # A BF16 boundary would round the accumulated FP32 gradient before RS.
-        # DTensor.redistribute's public API couples forward and output dtypes.
-        return Redistribute.apply(
-            x,
-            self.device_mesh,
-            tuple(self.compute_placements),
-            False,
-            {
-                "op_dtype": self.param_dtype or x.dtype,
-                "out_dtype": output_dtype,
-                "backward_options": {
-                    "op_dtype": self.reduce_dtype or x.dtype,
-                    "out_dtype": x.dtype,
-                },
-            },
-        )
-
-    def replicate_compute(
-        self, x: DTensor, *, output_dtype: torch.dtype | None = None
-    ) -> torch.Tensor:
+    def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
         # the gradients are partial tensors that needs to perform reduction
         # (i.e. DDP: allreduce, FSDP: reduce_scatter, HSDP: mix of both)
@@ -431,7 +516,6 @@ class ReplicateComputation(Module):
         non_dp_mesh_dims = x._spec.mesh.ndim - self.device_mesh.ndim
         assert non_dp_mesh_dims <= 2, "Only DP + EP/TP/EP+TP is supported"
         if non_dp_mesh_dims > 0:
-            dp_mesh = self.device_mesh
             non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
             non_dp_mesh_axis_names = tuple(
                 x._spec.mesh.mesh_dim_names[-non_dp_mesh_dims:]
@@ -442,52 +526,29 @@ class ReplicateComputation(Module):
             local_shape, _ = compute_local_shape_and_global_offset(
                 x.shape, non_dp_mesh, non_dp_placements, skip_offset=True
             )
-            # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
-            sharded_local_tensor = x.to_local()
             # Preserve the input's logical dimension order when projecting its
             # layout onto the TP/EP-local shape.
             local_stride = compute_local_stride(x.stride(), local_shape)
-            sharded_dtensor = DTensor.from_local(
-                sharded_local_tensor,
-                dp_mesh,
-                self.param_sharding,
-                shape=torch.Size(local_shape),
-                stride=local_stride,
-            )
-
-            # the actual FSDP's fwd all-gather & bwd reduce-scatter
-            # DDP's bwd all-reduce on dp_mesh
-            replicated_dtensor = self._redistribute(sharded_dtensor, output_dtype)
-
-            # re-wrap all-gathered DTensor on dp_mesh to be on non_dp_mesh
-            # TODO: DTensor should support this mesh collapsing operation
-            replicated_local_tensor = replicated_dtensor.to_local(
-                grad_placements=self.grad_placements
-            )
-
-            output = replicated_local_tensor
-            for axis, axis_type in self.non_dp_mesh_types.items():
-                if axis_type is spmd.R:
-                    # Handle any backward all-reduces on non-FSDP axes that
-                    # FSDP is responsible for. For example, TP RMSNorm with SP
-                    # uses R, so add P->I in backward. I remains a no-op.
-                    output = spmd.convert(
-                        output,
-                        axis,
-                        src=spmd.I,
-                        dst=spmd.R,
-                        op_dtype=output_dtype or self.param_dtype,
-                        backward_options={"op_dtype": self.reduce_dtype},
-                    )
         elif non_dp_mesh_dims == 0:
-            output = self._redistribute(x, output_dtype)
-            output = output.to_local(grad_placements=self.grad_placements)
+            local_shape, local_stride = x.shape, x.stride()
         else:
             raise AssertionError(
                 f"Unsupported replicate compute on placement {x._spec.placements} for DTensor {x}"
             )
 
-        return output
+        # Re-wrap the TP/EP-local tensor as a DTensor on dp_mesh for an efficient
+        # FSDP all-gather.
+        # TODO: DTensor should support this mesh collapsing operation
+        return _UnshardAndReduceGradFunction.apply(
+            x.to_local(),
+            self.device_mesh,
+            self.param_sharding,
+            torch.Size(local_shape),
+            tuple(local_stride),
+            self.param_dtype,
+            self.reduce_dtype,
+            self.non_dp_replicate_axes,
+        )
 
     def forward(self, x: DTensor) -> torch.Tensor:
         with annotate(
@@ -564,9 +625,10 @@ def data_parallel(
         raise ValueError(f"Unsupported mode {mode}")
 
     if param_shard_placements is None:
-        from torchtitan.distributed.fsdp import linear_param_shard_placements
-
-        param_shard_placements = linear_param_shard_placements(model)
+        # An earlier data_parallel call may have parametrized submodules such
+        # as EP experts. Inspect raw parameters without running ReplicateComputation.
+        with disable_active_parametrization():
+            param_shard_placements = linear_param_shard_placements(model)
 
     def get_param_sharding(param: nn.Parameter) -> tuple[Placement, ...]:
         if mode == "replicate":

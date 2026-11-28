@@ -10,7 +10,7 @@ DeepSeek-V3 MTP is currently enabled through the model config builder:
 
 - `build_model_config(..., num_mtp_layers=N)` controls whether MTP is enabled.
 - `_build_mtp_layers(...)` builds MTP layer configs from the last main decoder layer config.
-- `deepseek_v3_debugmodel_mtp()` is the current debug configuration example. It sets `num_mtp_layers=1` and uses `ChunkedLossWrapper` with `MTPLoss.Config(mtp_scale=0.3)` as its inner loss.
+- `deepseek_v3_debugmodel_mtp()` is the current debug configuration example. It sets `num_mtp_layers=1` and uses `ChunkedLossWrapper` with `MTPCrossEntropyLoss.Config(mtp_scale=0.3)` as its inner loss.
 
 Each MTP layer follows the normal decoder layer structure, with the following MTP-specific modules:
 
@@ -21,14 +21,14 @@ Each MTP layer follows the normal decoder layer structure, with the following MT
 
 ### 1.2 Model Integration
 
-`DeepSeekV3Model` inherits from `MTPDecoder`. If `mtp_layers` is empty, `MTPDecoder.forward()` falls back to the normal `Decoder.forward()` path, preserving non-MTP behavior.
+`DeepSeekV3Model` inherits from `MTPDecoder` (`torchtitan/models/common/mtp.py`), which DeepSeek-V4 shares. `MTPDecoder` owns the MTP input preprocessing, FSDP wrapping, remat containers, and FLOPs; each model owns its MTP block and MTP forward. If `mtp_layers` is empty, `MTPDecoder` and `DeepSeekV3Model.forward()` fall back to the normal `Decoder` paths, preserving non-MTP behavior.
 
 When `mtp_layers` is non-empty, execution is split into two stages:
 
 1. `MTPDecoder.preprocess_inputs()` prepares one shifted token/label pair per
    MTP depth before the common CP/SPMD input handling.
 2. Forward runs the main decoder on the original tokens, then each
-   `MTPTransformerBlock` consumes its prepared shifted tokens and the previous
+   `DeepSeekV3MTPBlock` consumes its prepared shifted tokens and the previous
    depth's hidden state.
 
 The dataloader does not need to extend the input sequence for MTP. The model's
@@ -168,7 +168,7 @@ The current implementation therefore:
 
 1. Constructs `mtp_input_tokens` at the token-id level.
 2. Reuses `tok_embeddings(mtp_input_tokens)` so the shifted embedding output follows the configured sharding strategy.
-3. Passes `mtp_input_valid_mask` into `MTPTransformerBlock`; under SP, the block-level `ShardingConfig` aligns this mask to the activation layout.
+3. Passes `mtp_input_valid_mask` into `DeepSeekV3MTPBlock`; under SP, the block-level `ShardingConfig` aligns this mask to the activation layout.
 
 In other words, SP handling does not call `redistribute` explicitly in the forward code. The placement conversion for the mask input is described by the MTP layer sharding config.
 
@@ -176,13 +176,13 @@ In other words, SP handling does not call `redistribute` explicitly in the forwa
 
 ### 3.1 FSDP
 
-The current implementation integrates FSDP through `apply_fsdp_to_mtp_decoder()`. It temporarily inserts `mtp_layers` into `model.layers` and reuses the normal decoder `apply_fsdp_to_decoder()` path. This gives MTP layers the same FSDP wrapping, expert wrapping, and reshard policy as normal decoder layers.
+`MTPDecoder._apply_fsdp()` temporarily inserts `mtp_layers` into `model.layers` and calls `Decoder._apply_fsdp()`. This gives MTP layers the same FSDP wrapping, expert wrapping, and reshard policy as normal decoder layers.
 
 The benefit is that MTP reuses the existing DeepSeek-V3 FSDP policy instead of duplicating the full wrapper logic. The drawback is that the implementation is indirect. A future cleanup can factor the common FSDP apply logic into a helper shared by normal decoder layers and MTP layers.
 
 ### 3.2 TP/SP
 
-MTP TP/SP sharding is configured in `_set_deepseek_v3_mtp_sharding()`. The main rules are:
+MTP TP/SP sharding is set where `_build_mtp_layers()` in `flavors.py` builds each MTP block. The main rules are:
 
 - MTP attention/feed-forward/MoE submodules reuse the normal DeepSeek-V3 layer sharding policy.
 - `enorm`, `hnorm`, and `mtp_norm` use norm sharding that matches the activation layout.
@@ -215,7 +215,7 @@ boundary exchange between CP ranks.
 ### 4.1 Input Form
 
 `MTPDecoder.preprocess_inputs()` returns aligned tuples containing the main and
-per-depth token inputs and labels. `MTPDecoder` returns a prediction tuple with
+per-depth token inputs and labels. `DeepSeekV3Model.forward()` returns a prediction tuple with
 the same ordering. Predictions are logits on the ordinary path and hidden
 states when `_skip_lm_head=True` for `ChunkedLossWrapper`.
 
@@ -257,7 +257,7 @@ independent from MoE routing.
 
 ### 4.4 Loss Parallel
 
-When `global_vocab_size` is configured, `MTPLoss` uses the vocab size required by the loss-parallel cross entropy path. Main and auxiliary predictions share the same cross entropy helper so the loss semantics do not diverge across depths.
+When `global_vocab_size` is configured, `MTPCrossEntropyLoss` uses the vocab size required by the loss-parallel cross entropy path. Main and auxiliary predictions share the same cross entropy helper so the loss semantics do not diverge across depths.
 
 ### 4.5 Chunked Loss
 
@@ -265,7 +265,7 @@ When `global_vocab_size` is configured, `MTPLoss` uses the vocab size required b
 prediction and labels tuples. For each chunk it applies the shared LM head to
 every prediction, preserves the tensor-or-tuple structure when calling the
 inner loss, and routes one accumulated hidden-state gradient back to each model
-output. `MTPLoss` receives the aligned tuples and combines the main and weighted
+output. `MTPCrossEntropyLoss` receives the aligned tuples and combines the main and weighted
 auxiliary cross-entropy objectives.
 
 ## TODO

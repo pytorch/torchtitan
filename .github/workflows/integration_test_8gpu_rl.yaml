@@ -63,39 +63,19 @@ jobs:
 
         python -m pip install uv
 
-        # 1. Install batch-invariant ops (Monarch and shared RL deps are in the image).
-        uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
+        # 1. Install the CUDA nightlies and RL extras; Monarch and the shared
+        # RL deps are in the image. The image has the CUDA runtime but not nvcc,
+        # which FlashInfer (vLLM's default sampler) needs to JIT-compile kernels.
+        bash scripts/install_rl_env.sh --skip-base --flash-attn none --nvcc
 
-        # 2. Install PyTorch, torchvision, and vLLM CUDA nightlies here.
-        # torchvision must be installed from the nightly channel alongside torch
-        # so its C++ extensions (e.g. torchvision::nms) match the torch ABI.
-        uv pip install --upgrade torch torchvision vllm xformers --pre \
-          --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
-          --index-strategy unsafe-best-match \
-          --constraint .ci/docker/requirements.txt
-        python -c '
-        from importlib.metadata import version
-        wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
-        print(wheels)
-        assert all(".dev" in wheel and "+cu132" in wheel for wheel in wheels.values()), wheels
-        '
-
-        # TorchStore is not on PyPI; do not let its dependencies change torch.
-        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
-
-        # 3. Make the checkout importable for subprocesses spawned by the test.
+        # 2. Make the checkout importable for subprocesses spawned by the test.
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
-        # 4. Download HF model checkpoint for tests
+        # 3. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
-
-        # Install nvcc so FlashInfer can JIT compile its CUDA kernels.
-        # vLLM uses FlashInfer sampler by default (vllm-project/vllm#40376)
-        # but the CI docker image only has CUDA runtime, not the toolkit.
-        uv pip install nvidia-cuda-nvcc
 
         # RL Loss Guard runs FIRST, in a clean container, so a lingering port from
         # the E2E suite can't collide with the generator's distributed init
@@ -116,6 +96,6 @@ jobs:
 
         # Run E2E RL integration tests (up to 8 GPUs): includes the MoE TP=4 EP=4
         # random-init test and the batch-invariant debug tests (both need 8 GPUs).
-        python -m tests.rl.integration_tests.rl \
-          $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8 \
-          --hf_assets_path "$MODEL_PATH"
+        python -m tests.integration_tests.run_tests \
+          "$RUNNER_TEMP/artifacts-to-be-uploaded/integration" --ngpu 8 \
+          --test_suite rl --hf_assets_path "$MODEL_PATH"

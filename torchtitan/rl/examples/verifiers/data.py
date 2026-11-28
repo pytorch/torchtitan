@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import importlib
-import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -16,38 +14,28 @@ import grain.python as grain
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.utils.loaders import load_taskset
 
-from torchtitan.config import Configurable
-
-
-def register_local_taskset_alias(taskset_id: str) -> str:
-    """Register a dotted local taskset under an importable Verifiers plugin ID."""
-    if "." not in taskset_id or "/" in taskset_id:
-        return taskset_id
-
-    module = importlib.import_module(taskset_id)
-    alias = taskset_id.replace(".", "_").lower()
-    existing = sys.modules.get(alias)
-    if existing is not None and existing is not module:
-        raise ValueError(f"taskset alias {alias!r} is already registered")
-    sys.modules[alias] = module
-    return alias
+from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
+from torchtitan.rl.rollout.data import RLDataset
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class VerifiersTaskSample:
     """Serialized task data dispatched to a stateless Verifiers EnvServer."""
 
+    # TODO: Consider sending the task's fields as one lazily deserialized object, decoded
+    # only where the task runs. The hops before it (the controller, a checkpoint of pending
+    # samples) would copy bytes, not a nested dict.
     verifiers_task_data: dict[str, Any]
 
 
-class VerifiersTaskDataset(Configurable):
+class VerifiersTaskDataset(RLDataset):
     """Adapt one Verifiers taskset to a resumable Grain iterator."""
 
     # TODO: implement this as a SourceConfig and reuse SingleDatasetConfig once
     # Rollouter supplies the core data pipeline's build context and iteration policy.
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(RLDataset.Config):
         verifiers_taskset: VerifiersTasksetConfig
         """Typed configuration for the Verifiers taskset to load."""
 
@@ -85,7 +73,7 @@ class VerifiersTaskDataset(Configurable):
         verifiers_taskset = (
             verifiers_taskset
             if config.num_tasks is None
-            else verifiers_taskset.head(config.num_tasks)
+            else verifiers_taskset.take(config.num_tasks)
         )
         if config.shuffle:
             verifiers_taskset = verifiers_taskset.shuffle(config.seed)

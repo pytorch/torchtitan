@@ -449,10 +449,11 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
         params["load_balance_coeff"] = None
         # Remove shared expert for this comparison — we only test routed experts
         params["shared_expert_info"] = None
-        moe_config = _build_moe_config(params, config)
+        moe_config = _build_moe_config(params, enable_sp=False, enable_ep=False)
 
         with torch.device("meta"):
             titan_moe = moe_config.build()
+        titan_moe.to(dtype=torch.bfloat16)
         titan_moe.to_empty(device=device)
         buffer_device = (
             device if isinstance(device, torch.device) else torch.device(device)
@@ -461,7 +462,7 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
 
         # 4. Transfer weights — layer-level MoE keys need manual prefix
         _transfer_weights_layer_level(hf_moe_layer, titan_moe)
-        titan_moe = titan_moe.to(dtype=torch.bfloat16).eval()
+        titan_moe.eval()
 
     else:
         # Standard MoE block
@@ -490,10 +491,11 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
         config.comm_backend = "standard"
         params = _probe_hf_moe_block(hf_moe_block, config)
         params["load_balance_coeff"] = None
-        moe_config = _build_moe_config(params, config)
+        moe_config = _build_moe_config(params, enable_sp=False, enable_ep=False)
 
         with torch.device("meta"):
             titan_moe = moe_config.build()
+        titan_moe.to(dtype=torch.bfloat16)
         titan_moe.to_empty(device=device)
         buffer_device = (
             device if isinstance(device, torch.device) else torch.device(device)
@@ -502,7 +504,7 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
 
         # 4. Transfer weights from HF to titan via state dict adapter
         _transfer_weights_via_adapter(hf_moe_block, titan_moe)
-        titan_moe = titan_moe.to(dtype=torch.bfloat16).eval()
+        titan_moe.eval()
 
     # 5. Forward through titan MoE
     tt_out = titan_moe(x)

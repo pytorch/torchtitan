@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
-from torchtitan.rl.distributed.routing.strategies import (
+from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
+from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
     RoundRobinRoutingStrategy,
     StickySessionRoutingStrategy,
@@ -91,7 +91,7 @@ def test_release_unknown_request_raises():
 
 def test_sticky_pins_session_to_dp_rank():
     router = IntraGeneratorRouter.Config(
-        strategy=StickySessionRoutingStrategy.Config()
+        strategy=StickySessionRoutingStrategy.Config(repin_load_ratio=None)
     ).build(dp_degree=3)
     first = router.reserve("r0", routing_session_id="s0")
     # Even though s0's DP rank now has load, the same session sticks to it.

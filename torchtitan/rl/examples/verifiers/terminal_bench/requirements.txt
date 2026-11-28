@@ -1,0 +1,3 @@
+# Install alongside torchtitan/rl/requirements.txt.
+verifiers==0.4.0
+harbor==0.24.0

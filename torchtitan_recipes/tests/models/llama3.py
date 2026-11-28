@@ -17,6 +17,7 @@ from torchtitan.components.data import (
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
 )
+from torchtitan.components.data.text_datasets import ChatProcessor, DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -30,10 +31,12 @@ from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
     LoRATransform,
-    NVFP4LinearConverter,
+    NVFP4LinearTransform,
 )
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
+from torchtitan.distributed.activation_remat import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -41,19 +44,33 @@ from torchtitan.models.common.config_utils import (
 
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.llama3.model import Llama3Model
-from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.observability.profiler import Profiler
+
+from torchtitan.observability.metrics import MetricsProcessor, TensorBoardLogger
+from torchtitan.observability.profiler import KinetoTraceProfiler, Profiler
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
-from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_converter_config
+from torchtitan_recipes.data import c4_document_capacity
+
+from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_transform
 
 
 def llama3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B")
+    model_config = build_model_config(
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
+    )
     packed = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
+    num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -74,18 +91,22 @@ def llama3_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=(
+                c4_document_capacity(num_tokens_per_microbatch_per_dp_rank)
+                if attn_backend == "varlen"
+                else None
+            ),
             dataset=packed,
             shuffle=False,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
-        parallelism=ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B"),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
         validator=None,
     )
 
@@ -95,7 +116,10 @@ def llama3_debugmodel_varlen_attn(
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.model = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        parallelism=config.parallelism,
     )
     assert isinstance(config.dataloader, GrainDataLoader.Config)
     config.dataloader.max_num_documents = 64
@@ -117,7 +141,8 @@ def llama3_debugmodel_dist_gemm(
         config,
         [
             AsyncTensorParallelTransform(
-                enable_sequence_parallel=config.parallelism.enable_sequence_parallel
+                enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
+                disable_inplace_wgrad_accum=True,
             )
         ],
     )
@@ -131,11 +156,9 @@ def llama3_debugmodel_mxfp8(
     config.model = build_model_config(
         "debugmodel_mxfp8",
         seq_len=seq_len,
-        converters=[
-            llama3_mxfp8_linear_converter_config(),
-        ],
+        parallelism=config.parallelism,
     )
-    return config
+    return apply_transforms(config, [llama3_mxfp8_linear_transform()])
 
 
 def llama3_debugmodel_nvfp4(
@@ -145,16 +168,7 @@ def llama3_debugmodel_nvfp4(
     # fqns=["layers"] converts every in-layer Linear (attention + feed_forward)
     # while leaving the lm_head stock: NVFP4 requires each GEMM dim divisible by
     # 128, which the vocab projection does not satisfy.
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=["layers"],
-            ),
-        ],
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=["layers"])])
 
 
 def llama3_debugmodel_first_85_pct_layers_nvfp4(
@@ -166,16 +180,7 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4(
     n_layers = len(cast(Llama3Model.Config, config.model).layers)
     _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=fqns,
-            ),
-        ],
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=fqns)])
 
 
 def llama3_debugmodel_lora(
@@ -206,7 +211,9 @@ def llama3_debugmodel_ce_loss(
 
 
 def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("8B", seq_len=seq_len)
+    parallelism = ParallelismConfig()
+    model_config = build_model_config("8B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -214,29 +221,29 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         hf_assets_path="./assets/hf/Llama-3.1-8B",
-        profiler=Profiler.Config(
-            enable_profiling=True,
-            profile_freq=100,
-        ),
+        profiler=Profiler.Config(trace=KinetoTraceProfiler.Config(freq=100)),
         metrics=MetricsProcessor.Config(
-            enable_tensorboard=True,
+            loggers=[TensorBoardLogger.Config()],
         ),
         model=model_config,
+        parallelism=parallelism,
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
             )
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
         validator=None,
     )
 
@@ -248,32 +255,20 @@ def llama3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.C
     n_layers = len(cast(Llama3Model.Config, config.model).layers)
     _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
-    config.model = build_model_config(
-        "8B",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=fqns,
-            ),
-        ],
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=fqns)])
 
 
 def llama3_8b_mxfp8(seq_len: int | None = None) -> Trainer.Config:
     config = llama3_8b(seq_len=seq_len)
-    config.model = build_model_config(
-        "8B",
-        seq_len=seq_len,
-        converters=[
-            llama3_mxfp8_linear_converter_config(),
-        ],
-    )
-    return config
+    return apply_transforms(config, [llama3_mxfp8_linear_transform()])
 
 
 def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("70B", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        tensor_parallel_degree=8,
+    )
+    model_config = build_model_config("70B", seq_len=seq_len, parallelism=parallelism)
+    num_tokens_per_microbatch_per_dp_rank = 8 * model_config.max_context_length
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -281,12 +276,9 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         hf_assets_path="./assets/hf/Llama-3.1-70B",
-        profiler=Profiler.Config(
-            enable_profiling=True,
-            profile_freq=100,
-        ),
+        profiler=Profiler.Config(trace=KinetoTraceProfiler.Config(freq=100)),
         metrics=MetricsProcessor.Config(
-            enable_tensorboard=True,
+            loggers=[TensorBoardLogger.Config()],
         ),
         model=model_config,
         optim=Optim.Config(
@@ -295,18 +287,18 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             )
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
+            max_num_documents=c4_document_capacity(
+                num_tokens_per_microbatch_per_dp_rank
+            ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        parallelism=ParallelismConfig(
-            tensor_parallel_degree=8,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_remat=FullActivationRematConfig(),
         validator=None,
     )
 
@@ -322,8 +314,9 @@ def sft_debugmodel(
             {"role": "assistant", "content": sample["answer"]},
         ]
 
+    parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="flex"
+        "debugmodel", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
     )
 
     return Trainer.Config(
@@ -334,6 +327,7 @@ def sft_debugmodel(
         ),
         hf_assets_path="./tests/assets/tokenizer",
         model=model_config,
+        parallelism=parallelism,
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -347,7 +341,6 @@ def sft_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -367,5 +360,5 @@ def sft_debugmodel(
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )

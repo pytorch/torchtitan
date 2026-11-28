@@ -1,0 +1,197 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from typing import Any, ClassVar, Self, TYPE_CHECKING
+
+import torch
+
+from torchtitan.config import PrecisionConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
+
+from .module import Module
+
+if TYPE_CHECKING:
+    from torchtitan.components.optim import OptimizersContainer
+    from torchtitan.distributed.activation_remat import ActivationRematConfig
+
+    from .state_dict_adapter import BaseStateDictAdapter
+
+
+FlopsEstimator = Callable[[Mapping[str, Any]], int]
+
+
+class BaseModel(Module, ABC):
+    """Base class for all model classes.
+
+    Models inherit from BaseModel (which is Module = nn.Module + Configurable).
+    Each model defines a nested Config(BaseModel.Config) with model hyperparameters.
+    The model is constructed via ``config.build()``.
+
+    ``init_states`` (from Module) auto-recurses; override only for custom
+    ordering (e.g., weight tying before init).
+    """
+
+    def init_weights(self, **kwargs) -> None:
+        """Backward-compatible alias for ``init_states``.
+
+        External tools (e.g., AutoParallel) wrap ``init_weights`` with
+        DTensor-aware interception. This alias ensures they can find it.
+        """
+        # TODO: remove this once autoparallel has wrap_init_states
+        buffer_device = kwargs.get("buffer_device")
+        self.init_states(buffer_device=buffer_device)
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, Any],
+        *,
+        parallelism_context: ParallelismContext,
+        parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> tuple[
+        torch.Tensor | tuple[torch.Tensor, ...],
+        torch.Tensor | tuple[torch.Tensor, ...],
+        dict[str, Any],
+        dict[str, Any],
+    ]:
+        """Prepare the forward and loss inputs from a dataloader batch.
+
+        Models driven by the standard trainer/validator forward path implement
+        this to build any attention masks, apply context-parallel sharding and
+        SPMD annotation as needed, and split ``input``/``labels`` out of the
+        batch. ``input_dict`` is the batch with ``labels`` folded in; return
+        ``(inputs, labels, model_kwargs, loss_kwargs)``. Models with aligned
+        multi-output objectives may return tuples of input and label tensors.
+
+        ``input_dict["loss_kwargs"]``, if present, holds per-microbatch loss
+        arguments, e.g. RL advantages. Its tensors share the ``labels`` token
+        dimension and are CP-sharded and SPMD-annotated like ``labels``;
+        non-tensor values pass through. They are returned as ``loss_kwargs``.
+
+        Additional keyword arguments may provide model-specific preprocessing
+        dependencies that are owned outside the trainable model. The trainer
+        calls this through the ``BaseModel`` interface. There is no meaningful default;
+        every model used by the training engine must implement it.
+
+        ``global_routing_token_counts``: per-depth routing-token counts over the global batch;
+        models with an aux loss return it as the ``aux_loss_denominators`` kwarg.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement preprocess_inputs()."
+        )
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        """Base config for all models.
+
+        Subclasses define model-specific hyperparameters.
+        """
+
+        max_context_length: int
+        """Longest sequence the model trains or serves. The data pipeline splits
+        documents at this length, attention metadata is built for it, and the
+        RL generator uses it as vLLM's ``max_model_len``."""
+
+        local_compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
+        """Configuration for named regions, FlexAttention, and block-mask helpers.
+
+        An empty ``regions`` list runs named regions eagerly.
+        """
+
+        @abstractmethod
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            """Return unique total and architecturally active parameter counts."""
+            raise NotImplementedError
+
+        @abstractmethod
+        def build_flops_estimator(
+            self, model: Module, *, seq_len: int
+        ) -> FlopsEstimator:
+            """Build a CPU estimator for one raw training microbatch."""
+            raise NotImplementedError
+
+    state_dict_adapter_cls: ClassVar[type[BaseStateDictAdapter] | None] = None
+    pipeline_first_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
+    pipeline_last_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
+
+    def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
+        """Partition the model and build its pipeline schedule."""
+        from torchtitan.distributed.pipeline_parallel import (
+            pipeline_llm,
+            pipeline_with_first_last_stage_modules,
+        )
+
+        parallelism = kwargs["parallelism"]
+        if parallelism.pipeline_parallel_module_fqns_per_model_part is None and (
+            self.pipeline_first_stage_module_fqns
+            or self.pipeline_last_stage_module_fqns
+        ):
+            return pipeline_with_first_last_stage_modules(
+                self,
+                first_stage_module_fqns=self.pipeline_first_stage_module_fqns,
+                last_stage_module_fqns=self.pipeline_last_stage_module_fqns,
+                **kwargs,
+            )
+        return pipeline_llm(self, **kwargs)
+
+    def parallelize(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        precision: PrecisionConfig,
+        parallelism: ParallelismConfig,
+        local_compile: LocalCompileConfig,
+        activation_remat: ActivationRematConfig | None,
+        dump_folder: str,
+    ) -> Self:
+        """Apply the ordered model-level parallelization lifecycle."""
+        # Bind local implementations early; torch.compile traces on first use.
+        local_compile.apply()
+        with parallelism_context.activate_spmd():
+            self._parallelize(parallelism_context)
+            if activation_remat is not None:
+                activation_remat.apply(
+                    self, block_container_fqns=self._remat_block_container_fqns()
+                )
+            self._apply_fsdp(
+                parallelism_context=parallelism_context,
+                precision=precision,
+                parallelism=parallelism,
+            )
+        return self
+
+    def _remat_block_container_fqns(self) -> list[str]:
+        """FQNs of the submodules whose children are the transformer blocks
+        that activation remat checkpoints."""
+        return ["layers"]
+
+    @abstractmethod
+    def _apply_fsdp(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        precision: PrecisionConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        pass
+
+    @classmethod
+    def _register_optimizer_hooks(
+        cls,
+        optimizers: OptimizersContainer,
+        model_parts: list[BaseModel],
+        parallelism_context: ParallelismContext,
+    ) -> None:
+        del optimizers, model_parts, parallelism_context

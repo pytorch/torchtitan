@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.protocols.module import Module
+from torchtitan.models.base.module import Module
 
 
 class HcSplitSinkhorn(Module):
@@ -59,9 +59,9 @@ class HcSplitSinkhorn(Module):
             *([1] * (comb.ndim - 2)), hc_mult, hc_mult
         )
 
-        row_max = comb.max(dim=-1, keepdim=True).values
-        comb = torch.exp(comb - row_max)
-        comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)
+        # Same as the reference kernel: eps goes after the softmax, not in its denominator.
+        # https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/60d8d70770c6776ff598c94bb586a859a38244f1/inference/kernel.py#L401
+        comb = torch.softmax(comb, dim=-1) + self.eps
         comb = comb / (comb.sum(dim=-2, keepdim=True) + self.eps)
         for _ in range(self.sinkhorn_iters - 1):
             comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)
@@ -79,6 +79,8 @@ class HcPre(Module):
         sinkhorn_iters: int = 20
         eps: float = 1e-6
         norm_eps: float = 1e-6
+        # The mixing runs in float32.
+        preserve_dtype_params: tuple[str, ...] = ("hc_fn", "hc_base", "hc_scale")
 
     def __init__(self, config: Config):
         super().__init__()
@@ -139,8 +141,11 @@ class HcPost(Module):
         Returns:
             Hidden states of shape ``[T, hc_mult, D]``.
         """
+        # y[j] = post[j] * x + sum_i comb[i, j] * residual[i]: sum over the
+        # residual's branch axis (dim 1 of the [T, hc_mult, hc_mult, D] product;
+        # dim 2 in the reference's [B, S, hc_mult, hc_mult, D] layout).
         y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
-            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
+            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=1
         )
         return y.type_as(x)
 
@@ -154,6 +159,8 @@ class HcHead(Module):
         dim: int
         norm_eps: float = 1e-6
         eps: float = 1e-6
+        # The mixing runs in float32.
+        preserve_dtype_params: tuple[str, ...] = ("hc_fn", "hc_base", "hc_scale")
 
     def __init__(self, config: Config):
         super().__init__()

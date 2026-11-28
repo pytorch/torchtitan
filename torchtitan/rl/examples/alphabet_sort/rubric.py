@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortSample
 from torchtitan.rl.rollout import Rollout
-from torchtitan.rl.rubric import RewardFn
+from torchtitan.rl.rollout.rubric import RewardFn
 
 
 class RewardAlphabetSort(RewardFn):

@@ -48,7 +48,7 @@ from torchtitan.components.data import (
     IndexedJsonlSource,
     SingleDatasetConfig,
 )
-from torchtitan.hf_datasets.text_datasets import TextProcessor
+from torchtitan.components.data.text_datasets import TextProcessor
 
 
 def article_text(row):
@@ -134,7 +134,7 @@ Replace the source path, or construct the source directly:
 from dataclasses import replace
 
 from torchtitan.components.data import HuggingFaceStreamingSource
-from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.components.data.text_datasets import DATASETS
 
 c4 = DATASETS["c4"]
 c4 = replace(c4, source=replace(c4.source, path="/datasets/c4"))
@@ -182,13 +182,7 @@ class PretokenizedMemmapSource(Configurable, RandomAccessDataSource):
         tokens_path: str
         document_offsets_path: str
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ):
-        del dataset_iteration_policy
+    def __init__(self, config: Config):
         self.tokens = np.memmap(config.tokens_path, dtype=np.uint32, mode="r")
         self.offsets = np.load(config.document_offsets_path)
 
@@ -243,7 +237,7 @@ from torchtitan.components.data import (
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
 )
-from torchtitan.hf_datasets.text_datasets import ChatProcessor
+from torchtitan.components.data.text_datasets import ChatProcessor
 
 
 def gsm8k_messages(row):
@@ -368,6 +362,8 @@ pretraining_corpus_ds = DatasetConcatConfig(
 
 Every `books_ds` row now appears three times in the combined finite index space. With `shuffle=True`, TorchTitan shuffles that combined index space before DP sharding.
 
+Each child is built with seed `seed + index`, the same as mixed children, so repeated copies make independent draws in random processors (for example augmentation or random cropping). Inserting or reordering a child therefore changes the draws of every later child.
+
 Use mixing instead when the desired behavior is relative source-selection frequency rather than exact finite duplication:
 
 ```python
@@ -386,6 +382,8 @@ pretraining_mix_ds = DatasetMixConfig(
 
 Images use the same source, dataset, loader, sharding, and checkpoint contracts. Their processors preserve modality-specific sample dictionaries, and their collators create model-specific batches.
 
+Image and video preprocessing is fixed by the model, like the tokenizer: set `Trainer.Config.vision_processor` from the model's settings next to its special tokens, e.g. `VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)`. Its `resize` rule sizes images and its `video_resize` rule sizes video frames (None: the model takes no video). The trainer builds it once and hands it to the dataloader. The dataset's sample processor decodes, resizes and normalizes each image with it (`resize_and_normalize`, or `resize_and_normalize_video` for decoded frames); the collator cuts the microbatch's images and videos into patches with it (`patchify`).
+
 Example for Qwen multimodal:
 
 ```python
@@ -394,14 +392,16 @@ from torchtitan.components.data import (
     HuggingFaceStreamingSource,
     SingleDatasetConfig,
 )
-from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import (
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.mm_datasets import (
     MMSamplePackingConfig,
-    VisionProcessor,
+    VisionSampleProcessor,
     _process_cc12_wd_sample,
 )
+from torchtitan.models.qwen3_5 import QWEN3_5_VISION_PROCESSOR_KWARGS
 
-mm_processor = VisionProcessor.Config(
+mm_processor = VisionSampleProcessor.Config(
     sample_processor=_process_cc12_wd_sample,
 )
 
@@ -419,14 +419,10 @@ packed_mm_ds = MMSamplePackingConfig(
     num_packing_bins=8,
 )
 
+config.vision_processor = VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)
 config.dataloader = GrainDataLoader.Config(
     dataset=packed_mm_ds,
-    collator=MultiModalCollator.Config(
-        build_mrope_positions=True,
-        patch_size=mm_processor.patch_size,
-        temporal_patch_size=mm_processor.temporal_patch_size,
-        spatial_merge_size=mm_processor.spatial_merge_size,
-    ),
+    collator=MultiModalCollator.Config(build_mrope_positions=True),
     streaming_shuffle_buffer_size=128,
 )
 ```
@@ -488,6 +484,54 @@ Each conversion has its own threads and buffer. An all-map mix converts once; a 
 trainer computes batch 10
 background thread prepares batches 11 and 12
 ```
+
+### Balancing microbatches across data-parallel ranks
+
+Data-parallel ranks synchronize every microbatch, so a step runs at the speed of its slowest rank. With document masking, attention cost grows with the sum of squared document lengths, and packers emit rows in arbitrary order, so one rank's full-length document often shares a step with other ranks' short documents. `balancer` buffers each window of `window_size` collated microbatches and decides which microbatch each rank trains at each step. `LocalBalancer` yields each rank's own window heaviest first. All ranks open a window at the same step, so each step pairs microbatches of similar cost, without communication:
+
+```python
+from torchtitan.components.data import LocalBalancer
+
+config.dataloader = GrainDataLoader.Config(
+    dataset=packed_pretraining_ds,
+    balancer=LocalBalancer.Config(window_size=8),
+)
+```
+
+The default cost, `document_attention_cost`, is the sum of squared attention segment lengths, read from `positions` as the varlen attention metadata does: documents plus the padding tail, which attention computes as segments of `max_context_length`. RL's batcher uses the same model (`packed_attention_cost`).
+
+Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. Local balancing works the same for `dp_replicate`, `dp_shard`, CP, and gradient accumulation when FSDP synchronizes every microbatch (the default). It does not help when ranks synchronize once per several microbatches (pipeline parallelism, `defer_fsdp_gradient_reduction`): there each rank's sum over the step matters, and reordering within a window does not balance it.
+
+Costs: each rank holds `window_size` collated microbatches in host memory, and a checkpoint resumes mid-window by re-reading the window from the parent iterator.
+
+The gain depends on how much row costs vary. Long-context datasets that mix many short documents with some full-length ones (for example ProLong, OBELICS, or long-context code corpora) gain the most. Datasets whose rows already cost about the same (C4, short chat SFT) gain little, and so do datasets where most rows are a single full-length document, since no order can split a document.
+
+`LocalBalancer` cannot fix a window in which one rank holds several heavy microbatches. `GlobalBalancer` plans the window across all data-parallel ranks and moves microbatches between them:
+
+1. each rank buffers its window and computes the costs;
+2. the ranks all-gather the costs over gloo;
+3. every rank computes the same plan: sort all microbatches by cost, step `k` gets the `k`-th group of one per rank, and within a step each stays on its own rank when possible;
+4. moved microbatches are pickled and sent point to point over gloo.
+
+```python
+from torchtitan.components.data import GlobalBalancer
+
+config.dataloader = GrainDataLoader.Config(
+    dataset=packed_pretraining_ds,
+    balancer=GlobalBalancer.Config(window_size=8),
+)
+```
+
+It runs on the loader's prefetch thread, so the exchange overlaps training. Any picklable microbatch moves, including `model_kwargs` with image tensors; received tensors are pinned like the collators' output. Ranks that share a data-parallel rank (CP, TP, PP stages) read the same microbatches and compute the same plan; each exchanges over a gloo group of its data-parallel group's global ranks, which the trainer passes to the loader (`dp_ranks`).
+
+If a peer stops producing microbatches (it crashed or hung), the exchange waits up to 30 minutes and then the loader raises. It does not fall back to training the rank's own microbatches: CP and TP peers must train the same microbatch at every step, and each balances in its own gloo group, so a rank that fell back while its peers did not would silently train different data than them.
+
+Limitations:
+
+- Pipeline parallelism is not balanced per step. Ranks synchronize once per step of several microbatches, so what matters is each rank's sum over the step; `GlobalBalancer` balances each microbatch slot instead, which can add pipeline bubbles.
+- A row that is one full-length document stays as heavy as it is: no plan can split a document.
+
+Measured with a prototype of this design that sent int32 tensors instead of pickled microbatches (4 GB300 nodes, Qwen3.5-9B, 1M-token rows of up to 4 documents, DP 8 x CP 2, Ulysses, window 8): 82.0 s per step against 87.1 s for `LocalBalancer` (1.06x); planning took 0.1 ms and the exchange about 50 ms per window, overlapped with training. Pickling keeps the original dtypes, so this implementation sends about twice the bytes.
 
 # Distributed and checkpoint behavior
 

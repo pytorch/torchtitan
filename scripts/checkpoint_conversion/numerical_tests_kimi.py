@@ -8,8 +8,8 @@
 
 Runs the released HF Kimi-VL (``trust_remote_code``) and torchtitan in ONE
 process on the same text+image prompt and compares last-token logits. torchtitan
-does its OWN Kimi image processing (``process_image`` + ``vision_to_patches``,
-raster order), so the full pipeline is exercised (preprocessing + vision +
+does its OWN Kimi image processing (``VisionProcessor`` with
+``KIMI_K2_5_VISION_PROCESSOR_KWARGS``, raster order), so the full pipeline is exercised (preprocessing + vision +
 projector + scatter + DeepSeek-V3 text tower), not just the forward.
 
 The released remote code targets transformers ~4.50.x and does NOT import on 5.x,
@@ -32,36 +32,68 @@ selections (diagnostic: removes the MoE routing-flip divergence).
 
 import argparse
 import os
+from contextlib import nullcontext
+from dataclasses import replace
 
 import torch
 import torch.distributed.checkpoint as dcp
-import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-
+from torch.nn.attention import sdpa_kernel, SDPBackend
 from torchtitan.components.checkpointer import ModelWrapper
-from torchtitan.hf_datasets.multimodal.utils.image import (
-    process_image,
-    resize_to_navit_patch_grid,
-    vision_to_patches,
+from torchtitan.components.data.multimodal.vision_processor import (
+    NaViTPatchGridResize,
+    VisionProcessor,
 )
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
-from torchtitan.models.kimi_k2_7 import build_model_config
+
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.attention import InnerAttention
+from torchtitan.models.common.moe import MoE
+from torchtitan.models.kimi_k2_7 import (
+    build_model_config,
+    KIMI_K2_5_VISION_PROCESSOR_KWARGS,
+)
 from transformers import AutoModelForCausalLM, AutoProcessor
 
 _MEDIA_TOKEN_ID = 163605
-_PATCH_SIZE = 14
 _MERGE_SIZE = 2
 _PROMPT = "<|media_pad|>\nWhat is shown in this image? Describe it briefly."
 
 
-class _VisionSDPA(nn.Module):
-    """Bidirectional SDPA for one image (no padding -> full attention is exact)."""
+class _SDPA(InnerAttention):
+    """SDPA for a single text document or an unpadded image."""
 
-    def forward(self, q, k, v, **kwargs):
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
-        return out.transpose(1, 2)
+    def __init__(self, *, is_causal):
+        super().__init__()
+        self.is_causal = is_causal
+
+    def forward(self, q_BLHK, k_BLHK, v_BLHV, **kwargs):
+        if self.is_causal and kwargs.get("attention_metadata") is not None:
+            raise ValueError(
+                "The checkpoint SDPA reference requires a single document."
+            )
+        backend_context = (
+            sdpa_kernel(
+                [
+                    SDPBackend.CUDNN_ATTENTION,
+                    SDPBackend.FLASH_ATTENTION,
+                    SDPBackend.MATH,
+                ],
+                set_priority=True,
+            )
+            if self.is_causal
+            else nullcontext()
+        )
+        with backend_context:
+            out_BHLV = F.scaled_dot_product_attention(
+                q_BLHK.transpose(1, 2),
+                k_BLHK.transpose(1, 2),
+                v_BLHV.transpose(1, 2),
+                is_causal=self.is_causal,
+                scale=kwargs.get("scale"),
+                enable_gqa=kwargs.get("enable_gqa", False),
+            )
+        return out_BHLV.transpose(1, 2)
 
 
 @torch.no_grad()
@@ -136,11 +168,11 @@ def _force_hf_routing(model, expert_indices, device):
     """
     forced = 0
     for key, layer in model.layers.items():
-        if not getattr(layer, "moe_enabled", False) or int(key) not in expert_indices:
+        if not isinstance(layer.feed_forward, MoE) or int(key) not in expert_indices:
             continue
         ids = expert_indices[int(key)]
         ids = ids.view(1, ids.shape[0], ids.shape[-1]).to(device)  # (1, L, K)
-        router = layer.moe.router
+        router = layer.feed_forward.router
         orig = router.forward
 
         def forced_forward(x_BLD, expert_bias_E=None, _r=router, _o=orig, _ids=ids):
@@ -162,24 +194,22 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
     """torchtitan Kimi-VL: its own image processing + forward on the same image."""
     device = torch.device("cuda")
     print(f"Loading torchtitan Kimi-VL ({model_flavor}) on {device} ...")
-    model_config = build_model_config(model_flavor)
+    model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
     with torch.device("meta"):
         model = model_config.build()
-    model.to_empty(device="cpu")
-    # Cast before init_states so the complex64 ComplexRoPE cache survives.
+    # Set both precisions before materializing and initializing buffers.
     model.to(dtype)
+    model.vision_encoder.to(vision_dtype)
+    model.to_empty(device="cpu")
     model.init_states(buffer_device=torch.device("cpu"))
     state_dict = ModelWrapper(model)._get_state_dict()
     dcp.load(state_dict, checkpoint_id=checkpoint_path)
     model.to(device)
 
-    model.vision_encoder.to(vision_dtype)  # mixed precision: ViT in vision_dtype
     for layer in model.layers.values():
-        layer.attention.inner_attention = (
-            ScaledDotProductInnerAttention.Config().build()
-        )
+        layer.attention.inner_attention.inner_attention = _SDPA(is_causal=True)
     for layer in model.vision_encoder.layers.values():
-        layer.attn.flex_attention = _VisionSDPA()
+        layer.attn.inner_attention = _SDPA(is_causal=False)
     model.eval()
 
     if force_hf_routing:
@@ -187,26 +217,17 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
         print(f"forced HF routing on {n} MoE layers")
 
     # titan's OWN Kimi image processing on the raw image (the real data path).
-    img = process_image(
-        Image.fromarray(ref["raw_image"].numpy()),
-        patch_size=_PATCH_SIZE,
-        merge_size=_MERGE_SIZE,
-        resize_fn=resize_to_navit_patch_grid,
-        max_patches=4096,
-        max_patches_per_side=512,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
+    vision_processor = replace(
+        VisionProcessor.Config(**KIMI_K2_5_VISION_PROCESSOR_KWARGS),
+        resize=NaViTPatchGridResize.Config(max_patches=4096, max_patches_per_side=512),
+    ).build()
+    pixels, _ = vision_processor.resize_and_normalize(
+        Image.fromarray(ref["raw_image"].numpy())
     )
-    # MoonViT3d consumes raster-order patches (matching the released processor).
-    patches, grid = vision_to_patches(
-        img,  # pyrefly: ignore [bad-argument-type]
-        patch_size=_PATCH_SIZE,
-        temporal_patch_size=1,
-        merge_size=_MERGE_SIZE,
-        patch_order="raster",
-    )
+    patches, grid_thw = vision_processor.patchify(pixels)
+    grid_thw = grid_thw.unsqueeze(0)
     pixel_values = patches.unsqueeze(0).to(device=device, dtype=vision_dtype)
-    grid_thw = grid.unsqueeze(0).to(device)
+    grid_thw = grid_thw.to(device)
     tokens = ref["input_ids"].to(device)
 
     # Sanity: titan's grid must yield the same vision-token count as HF produced

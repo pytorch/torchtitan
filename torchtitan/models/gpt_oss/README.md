@@ -13,9 +13,33 @@ asset-path hints without shipping unverified full training recipes.
 - FSDP/HSDP, TP, EP, CP, PP
 - Grouped matrix multiplication for efficient computation
 
+With DeepEP and no expert output postprocess, router scores scale W2's input
+and its per-expert bias. In the equation below, `b2` is expanded along the
+routed-token dimension: each row receives its selected expert's bias, and `s`
+broadcasts over that row's features.
+
+```text
+s * (W2(h) + b2) = W2(s * h) + s * b2
+```
+
+Input and bias scaling multiply in FP32 and cast back to the projection dtype.
+W2 and its bias addition share the `grouped_mm` remat policy. Replaying even a
+cheap bias addition after a saved W2 would require retaining W2's full routed
+output; saving both avoids that dependency. Bias scaling adds pointwise
+operations and reductions, with the same GEMM count as bias-free absorption.
+With an expert output postprocess, scores
+are applied after it instead. Other dispatchers retain post-expert scoring.
+The equality holds in exact arithmetic; moving the scores changes BF16 rounding
+and can change outputs and gradients.
+
 CI already runs CP and PP on the debug model:
 - `gpt_oss_pp+fsdp+cp+ep+sacop` (`gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac`)
-- `gpt_oss_pp+fsdp+ep+sacop`
+- `gpt_oss_pp+fsdp+ep+sacop` (varlen, B200 suite)
+
+The attention sinks rescale the output by `sigmoid(lse - sinks)`, so training
+backpropagates through the attention lse. With the default `varlen` backend
+only FA4 (SM100) supports that backward, and other hardware raises a
+`ValueError`; use the flex recipes (`attn_backend="flex"`) there.
 
 Those jobs use Interleaved1F1B. FlexInnerAttention zero-bubble / split-backward PP
 tests are disabled in `tests/integration_tests/features.py` because

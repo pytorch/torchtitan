@@ -5,10 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-import os
 from typing import cast
 
 import torch
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.config import ConfigLoader
 from torchtitan.observability import structured_logger as sl
@@ -19,6 +19,9 @@ from torchtitan.trainer import Trainer
 logger = logging.getLogger(__name__)
 
 
+# On main(), not Trainer methods, so config loading and seed-checkpoint errors
+# also reach the torchelastic error file.
+@record
 def main() -> None:
     """Main entry point for training."""
     init_logger()
@@ -46,19 +49,23 @@ def main() -> None:
         trainer = config.build()
 
         if config.create_seed_checkpoint:
-            assert (
-                int(os.environ["WORLD_SIZE"]) == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding."
-            assert (
-                config.checkpointer is not None
-            ), "Must configure checkpointer when creating a seed checkpoint."
+            world_size = trainer.engine.parallelism_context.world_size
+            if world_size != 1:
+                raise ValueError(
+                    "Must create a seed checkpoint using a single device, to "
+                    f"disable sharding. Got world size {world_size}."
+                )
             trainer.engine.save_checkpoint(last_step=True)
             logger.info("Created seed checkpoint")
         else:
             trainer.train()
     except Exception:
         if trainer:
-            trainer.close()
+            try:
+                trainer.close()
+            except Exception:
+                # Keep the original failure as the recorded root cause.
+                logger.exception("trainer.close() failed during error cleanup")
         raise
     else:
         trainer.close()

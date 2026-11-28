@@ -17,7 +17,7 @@ from torchao.prototype.moe_training.nvfp4_training.nvfp4_grouped_mm import (
     _to_nvfp4_rht_rs_then_scaled_grouped_mm,
 )
 
-from torchtitan.protocols.module import Module
+from torchtitan.models.base.module import Module
 
 from .linear import _HARDCODED_SIGN_VECTOR
 

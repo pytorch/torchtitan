@@ -1,0 +1,639 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+from __future__ import annotations
+
+import contextlib
+import inspect
+from collections.abc import Callable, Iterator, Sequence, ValuesView
+from dataclasses import dataclass
+from fnmatch import fnmatch
+from typing import Any, Generic, TYPE_CHECKING, TypeVar
+
+import spmd_types as spmd
+import torch
+import torch.nn as nn
+from spmd_types import SpmdType
+from torch.utils._pytree import tree_map
+
+from torchtitan.config import Configurable
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.spmd_types import (
+    _per_axis_types,
+    set_current_spmd_mesh,
+    spmd_axes,
+    spmd_distribute_tensor,
+)
+from torchtitan.models.base.sharding import ShardingConfig
+
+
+class Module(nn.Module, Configurable):
+    """Base class for all configurable nn.Module components.
+    Combines nn.Module with Configurable, so subclasses only inherit from Module.
+
+    ``init_states`` auto-recurses into children, then initializes the current
+    module's parameters (via ``_param_init`` dict lookup) and buffers.
+    Subclasses should NOT override ``init_states`` unless they need custom
+    ordering (e.g., weight tying before init). Override ``_init_self_buffers``
+    for buffer initialization.
+
+    Materialized buffers owned by this module reject dtype changes. Cast a
+    meta-built model before ``to_empty`` and ``init_states``, which rebuild
+    buffers in their intended dtypes. The guard keeps a buffer's current dtype.
+    It does not restore a canonical dtype after direct assignment or loading.
+    A failed cast may leave earlier parameters or children converted.
+    """
+
+    _param_init: dict[str, Callable] | None = None
+    _sharding_config: ShardingConfig | None = None
+    _preserve_dtype_params: tuple[str, ...] = ()
+    _pos_arg_list: list[str] | None = None
+    _parallelized: bool = False
+    # ActivationRematConfig.apply replaces these defaults on every Module in a
+    # checkpointed block.
+    # Outside an enclosing torch_remat checkpoint, they do not affect execution.
+    _remat_module_fqn: str = ""
+    _remat_save_patterns: tuple[str, ...] = ()
+    _remat_recompute_patterns: tuple[str, ...] = ()
+    # Set by ActivationRematConfig.apply on each transformer block it
+    # checkpoints: the block's FQN in the full model (e.g. "layers.3",
+    # "vision_encoder.layers.0"). The activation offloader hooks these blocks.
+    _remat_block_fqn: str = ""
+
+    def remat_region_name(self, local_name: str) -> str:
+        """Return a region's configured qualified name or its local name."""
+        if self._remat_module_fqn:
+            return f"{self._remat_module_fqn}.{local_name}"
+        return local_name
+
+    def remat_should_recompute(self, local_name: str) -> bool:
+        """Return whether a region should be recomputed during backward."""
+        qualified_name = self.remat_region_name(local_name)
+        return not any(
+            fnmatch(qualified_name, pattern) for pattern in self._remat_save_patterns
+        ) or any(
+            fnmatch(qualified_name, pattern)
+            for pattern in self._remat_recompute_patterns
+        )
+
+    def named_preserve_dtype_params(self) -> Iterator[tuple[str, nn.Parameter]]:
+        """Yield ``(fqn, parameter)`` for the ``preserve_dtype_params`` of every
+        module in this tree, with FQNs relative to this module.
+
+        Parameters are looked up when called, so after FSDP these are the sharded
+        parameters.
+        """
+        for module_fqn, module in self.named_modules():
+            if not isinstance(module, Module):
+                continue
+            for name in module._preserve_dtype_params:
+                yield f"{module_fqn}.{name}" if module_fqn else name, getattr(
+                    module, name
+                )
+
+    def configure_remat_regions(
+        self,
+        save_patterns: Sequence[str],
+        recompute_patterns: Sequence[str] = (),
+    ) -> None:
+        """Configure remat region names and save patterns in this module tree.
+
+        Region names are qualified relative to this module. Model code supplies
+        each local region name when it calls ``remat_region_name`` and
+        ``remat_should_recompute``. A region is saved if it matches a save
+        pattern and no recompute pattern.
+        """
+        configured_save_patterns = tuple(save_patterns)
+        configured_recompute_patterns = tuple(recompute_patterns)
+        for module_fqn, module in self.named_modules():
+            if not isinstance(module, Module):
+                continue
+            module._remat_module_fqn = module_fqn
+            module._remat_save_patterns = configured_save_patterns
+            module._remat_recompute_patterns = configured_recompute_patterns
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        param_init: dict | None = None
+        sharding_config: ShardingConfig | None = None
+        preserve_dtype_params: tuple[str, ...] = ()
+        """Names of this module's own parameters that bulk casts never lower in
+        precision: FSDP's mixed precision ``param_dtype`` and the checkpoint
+        ``export_dtype`` keep a parameter's own dtype when it is wider, frozen
+        parameters keep it instead of moving to ``param_dtype`` storage, and the RL
+        weight sync sends it in its own dtype. For parameters whose numerics
+        need master precision, e.g. a linear-attention decay that the reference
+        checkpoint stores in float32."""
+
+        def build(self, **kwargs):
+            # slots=True prevents super().build() from working; call explicitly.
+            # Assignment is done here rather than in Module.__init__ because
+            # there is no common Module.__init__ that all subclasses call.
+            instance = Configurable.Config.build(self, **kwargs)
+            if self.param_init is not None:
+                instance._param_init = self.param_init
+            if self.sharding_config is not None:
+                instance._sharding_config = self.sharding_config
+            if self.preserve_dtype_params:
+                params = {
+                    name for name, p in instance._parameters.items() if p is not None
+                }
+                unknown = set(self.preserve_dtype_params) - params
+                if unknown:
+                    raise ValueError(
+                        f"preserve_dtype_params names {sorted(unknown)}, which are "
+                        f"not parameters of {type(instance).__name__}. Its "
+                        f"parameters are {sorted(params)}."
+                    )
+                instance._preserve_dtype_params = self.preserve_dtype_params
+            return instance
+
+    def init_states(
+        self,
+        *,
+        buffer_device: torch.device | None = None,
+    ) -> None:
+        """Initialize all states in the module tree.
+
+        1. Recursively calls ``init_states`` on all direct Module children.
+        2. Calls ``self._init_self_parameters()``.
+        3. Calls ``self._init_self_buffers(...)``.
+
+        Args:
+            buffer_device: Device for buffer initialization (e.g., RoPE, MoE).
+        """
+
+        queue = list(self.children())
+        while queue:
+            child = queue.pop(0)
+            if isinstance(child, Module):
+                child.init_states(buffer_device=buffer_device)
+            else:
+                # Plain nn.Module (e.g., CheckpointWrapper, torch.compile
+                # wrappers) — look inside for Module descendants.
+                queue.extend(child.children())
+
+        self._init_self_parameters()
+
+        with self._preserve_buffer_spmd_types():
+            self._init_self_buffers(buffer_device=buffer_device)
+
+    def _apply(self, fn, recurse=True):
+        """Preserve SPMD annotations and reject dtype changes to materialized buffers.
+
+        Check each conversion result before PyTorch installs it. The conversion
+        runs once per tensor, with no rollback of earlier changes. Functions that
+        mutate their input in place are outside this guard's contract.
+        """
+        protected = {
+            id(buffer): (name, buffer.dtype)
+            for name, buffer in self.named_buffers(
+                recurse=False, remove_duplicate=False
+            )
+            if not buffer.is_meta
+        }
+
+        def checked_fn(tensor):
+            result = fn(tensor)
+            if (requirement := protected.get(id(tensor))) is not None:
+                name, dtype = requirement
+                if result.dtype != dtype:
+                    raise ValueError(
+                        f"Cannot convert {type(self).__name__}.{name} from "
+                        f"{dtype} to {result.dtype}. "
+                        "torchtitan Module buffers keep their dtype. "
+                        "For a model constructed on meta, apply the dtype cast "
+                        "before to_empty() and init_states(). Earlier tensors may "
+                        "already have changed; recreate the model after failure."
+                    )
+            return result
+
+        with self._preserve_buffer_spmd_types():
+            return super()._apply(checked_fn if protected else fn, recurse=recurse)
+
+    @contextlib.contextmanager
+    def _preserve_buffer_spmd_types(self) -> Iterator[None]:
+        """
+        Preserve SPMD type annotations on buffers across reinitialization.
+
+        ``to_empty()`` and ``_init_self_buffers()`` re-materialize buffer data,
+        clobbering over SPMD annotations. Instead of attempting to typecheck over
+        this, we save-restore annotations on their respective mesh axes.
+        """
+        saved = {
+            fqn: SpmdType(
+                dict(spmd.get_local_type(buf)),
+                spmd.get_partition_spec(buf),
+            )
+            for fqn, buf in self.named_buffers()
+            if spmd.has_local_type(buf)
+        }
+        try:
+            yield
+        finally:
+            for fqn, buf in self.named_buffers():
+                if fqn in saved and not spmd.has_local_type(buf):
+                    spmd.assert_type(buf, saved[fqn])
+
+    def _init_self_parameters(self) -> None:
+        """Initialize this module's own direct parameters.
+
+        Resolution order:
+
+        1. If ``param_init`` is set, use per-parameter dict lookup via
+           ``_init_param``.
+        2. Otherwise, fall back to ``reset_parameters()`` if it is
+           available on ``self`` (typically inherited from the
+           underlying ``nn`` class, but a subclass override is also
+           honored). This is the standard PyTorch convention used by
+           ``nn.Linear``, ``nn.LayerNorm``, ``nn.Conv2d``, etc.
+        3. Otherwise, raise if there are any own parameters.
+        """
+        if self._param_init is not None:
+            for name, param in self.named_parameters(recurse=False):
+                self._init_param(name, param)
+            return
+
+        reset = getattr(self, "reset_parameters", None)
+        if callable(reset):
+            reset()
+            return
+
+        own_param_names = [name for name, _ in self.named_parameters(recurse=False)]
+        if own_param_names:
+            raise ValueError(
+                f"{type(self).__name__} has parameters {own_param_names} "
+                "but neither param_init nor reset_parameters is available. "
+                "Set param_init on the Config or define reset_parameters."
+            )
+
+    def _init_param(self, name: str, param: nn.Parameter) -> None:
+        """Initialize a single parameter via dict lookup in ``_param_init``.
+
+        Raises ``ValueError`` if ``_param_init`` is None or the name is missing.
+        """
+        if self._param_init is None:
+            raise ValueError(
+                f"No param_init found for parameter {name!r} in "
+                f"{type(self).__name__}. Set param_init on this "
+                f"module's Config or use skip_param_init."
+            )
+        if name not in self._param_init:
+            raise ValueError(
+                f"No initializer for parameter {name!r} in "
+                f"{type(self).__name__}. "
+                f"Available: {list(self._param_init.keys())}"
+            )
+        self._param_init[name](param)
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        """Initialize this module's own buffers.
+
+        The default is a no-op. Override for device-aware buffer
+        initialization (e.g., RoPE cache, MoE counters).
+
+        Args:
+            buffer_device: Target device for buffer creation/initialization.
+        """
+        pass
+
+    def _cache_pos_arg_names(self) -> list[str]:
+        """Return positional arg names of ``forward`` (excluding ``self``), cached.
+
+        Must be called once **before** ``forward`` is wrapped in ``_parallelize``
+        so ``inspect.signature`` sees the unwrapped signature. Subsequent
+        calls return the cached list.
+        """
+        if self._pos_arg_list is not None:
+            return self._pos_arg_list
+        # pyrefly sees self.forward = ... in parallelize() and thinks forward
+        # is instance-only, but it's always defined on nn.Module subclasses.
+        sig = inspect.signature(
+            type(self).forward  # pyrefly: ignore[missing-attribute]
+        )
+        self._pos_arg_list = [
+            p.name
+            for p in sig.parameters.values()
+            if p.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+            and p.name != "self"
+        ]
+        return self._pos_arg_list
+
+    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
+        """Parallelize this module and all Module children recursively.
+
+        For each module with a ``sharding_config``:
+
+        1. Shard states (parameters and buffers).
+        2. Wrap the forward with:
+            ``reshard inputs -> [optional local SPMD] forward -> reshard outputs``.
+
+        ``fully_shard`` hooks on ``__call__`` fire around the wrapped ``forward``.
+
+        Each ``ShardingConfig`` field resolves its mesh independently via
+        ``resolve_mesh()``.
+        """
+        if self._parallelized:
+            raise ValueError(
+                f"{type(self).__name__} has already been parallelized. "
+                "Module._parallelize() must be called at most once per instance."
+            )
+        self._parallelized = True
+
+        queue = list(self.named_children())
+        while queue:
+            child_name, child = queue.pop()
+            if isinstance(child, Module):
+                child._parallelize(parallelism_context)
+            else:
+                if (
+                    next(child.parameters(recurse=False), None) is not None
+                    or next(child.buffers(recurse=False), None) is not None
+                ):
+                    raise RuntimeError(
+                        f"{type(self).__name__}.{child_name} owns state but does "
+                        "not implement the Module protocol."
+                    )
+                # Look through stateless containers and wrappers, e.g.
+                # CheckpointWrapper.
+                queue.extend(
+                    (f"{child_name}.{name}", nested)
+                    for name, nested in child.named_children()
+                )
+
+        # TODO(fegin): Change to assert once ALL Models are migrated to use _sharding_config.
+        if self._sharding_config is None:
+            # With TP/EP enabled, a module that owns parameters but declares
+            # no sharding_config would silently replicate them instead of
+            # sharding them. Buffers alone do not trip this: auxiliary
+            # modules such as the MoE load-balance losses own only
+            # per-rank statistics buffers that are intentionally replicated.
+            if (
+                parallelism_context.tp_enabled or parallelism_context.ep_enabled
+            ) and next(self.parameters(recurse=False), None) is not None:
+                raise RuntimeError(
+                    f"{type(self).__name__} owns parameters but declares no "
+                    "sharding_config, so they would be silently replicated "
+                    "over TP/EP. Add a sharding_config or move the parameters "
+                    "into a sharded module."
+                )
+            return
+
+        self._distribute_states(parallelism_context)
+        self._cache_pos_arg_names()
+        fn = self._maybe_wrap_with_local_region(self.forward)
+
+        def forward_with_boundary_checks(*args, **kwargs):
+            self._assert_input_types(args, kwargs)
+            outputs = fn(*args, **kwargs)
+            self._assert_output_type(outputs)
+            return outputs
+
+        self.forward = forward_with_boundary_checks
+
+    def _spmd_distribute_state(
+        self,
+        parallelism_context: ParallelismContext,
+        name: str,
+        tensor: torch.Tensor,
+        layout: SpmdType,
+        *,
+        is_param: bool,
+    ) -> None:
+        # Call get_optional_mesh with include_singleton_axes=True, so we're able to call assert_type()
+        # using all axes, and defer size-1 axis filtering to spmd_types internals.
+        mesh = parallelism_context.get_optional_mesh(
+            [axis.value for axis in spmd_axes(layout)],
+            include_singleton_axes=True,
+        )
+        assert mesh is not None
+        assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
+
+        requires_grad = tensor.requires_grad
+        tensor = spmd_distribute_tensor(tensor, mesh, layout)
+        if is_param:
+            self.register_parameter(
+                name, nn.Parameter(tensor, requires_grad=requires_grad)
+            )
+            registered = self._parameters[name]
+        else:
+            persistent = name not in self._non_persistent_buffers_set
+            self.register_buffer(name, tensor, persistent=persistent)
+            registered = self._buffers[name]
+
+        # assert_type resolves SpmdType's string mesh axis names to concrete
+        # runtime mesh-axis objects, so a mesh context is required here.
+        assert registered is not None
+        with set_current_spmd_mesh(mesh):
+            spmd.assert_type(registered, layout)
+
+    def _validate_even_model_parallel_param_sharding(
+        self,
+        name: str,
+        param: nn.Parameter,
+        layout: SpmdType,
+        parallelism_context: ParallelismContext,
+    ) -> None:
+        """Reject parameter layouts that produce uneven TP or EP local shards."""
+        axis_types = _per_axis_types(layout)
+        axis_sizes = {
+            MeshAxisName.TP: parallelism_context.tp,
+            MeshAxisName.EP: parallelism_context.ep,
+        }
+        for axis_name, axis_size in axis_sizes.items():
+            axis_type = axis_types.get(axis_name)
+            if axis_size == 1 or not isinstance(axis_type, spmd.Shard):
+                continue
+
+            tensor_dim = axis_type.dim
+            if tensor_dim < 0:
+                tensor_dim += param.ndim
+            if tensor_dim < 0 or tensor_dim >= param.ndim:
+                raise ValueError(
+                    f"{type(self).__name__}.{name} has invalid tensor dimension "
+                    f"{axis_type.dim} in its {axis_name.value.upper()} sharding "
+                    f"for parameter shape {tuple(param.shape)}."
+                )
+            if param.shape[tensor_dim] % axis_size == 0:
+                continue
+
+            raise ValueError(
+                "spmd_types does not support uneven model-parallel parameter "
+                f"sharding: {type(self).__name__}.{name} with shape "
+                f"{tuple(param.shape)} "
+                f"cannot be evenly sharded on tensor dimension {tensor_dim} "
+                f"across model-parallel mesh axis {axis_name.value} with size "
+                f"{axis_size}."
+            )
+
+    def _distribute_states(self, parallelism_context: ParallelismContext) -> None:
+        """Distribute params and buffers per ``state_shardings``.
+
+        Each entry resolves its own mesh via ``resolve_mesh``, so different
+        params on the same Module may live on different meshes.
+        """
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+
+        for name, param in self.named_parameters(recurse=False):
+            spmd_layout = sharding_config.state_shardings.get(name)
+            if spmd_layout is None:
+                raise ValueError(
+                    f"{type(self).__name__}.{name} has no placement declared "
+                    "in sharding_config.state_shardings."
+                )
+            self._validate_even_model_parallel_param_sharding(
+                name,
+                param,
+                spmd_layout,
+                parallelism_context,
+            )
+            self._spmd_distribute_state(
+                parallelism_context,
+                name,
+                param,
+                spmd_layout,
+                is_param=True,
+            )
+
+        for name, buffer in self.named_buffers(recurse=False):
+            spmd_layout = sharding_config.state_shardings.get(name)
+            if spmd_layout is None:
+                raise ValueError(
+                    f"{type(self).__name__}.{name} (buffer) has no placement "
+                    "declared in sharding_config.state_shardings."
+                )
+            if buffer is None:
+                # ``register_buffer(name, None)`` reserves a slot to be filled
+                # by ``init_states`` later; nothing to distribute yet.
+                continue
+            self._spmd_distribute_state(
+                parallelism_context,
+                name,
+                buffer,
+                spmd_layout,
+                is_param=False,
+            )
+
+    def _maybe_wrap_with_local_region(
+        self,
+        fn: Callable,
+    ) -> Callable:
+        """Wrap ``fn`` with a local-tensor region if configured.
+
+        Input layouts come from ``input_shardings``; output layouts come
+        from ``output_shardings``.
+        """
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        if not sharding_config.local_spmd:
+            return fn
+
+        input_shardings = sharding_config.input_shardings or {}
+        pos_args = self._cache_pos_arg_names()
+        output_shardings = sharding_config.output_shardings
+        if output_shardings is None:
+            raise AssertionError(
+                f"{type(self).__name__}: local_spmd is set but "
+                "output_shardings is None."
+            )
+        missing_in = [name for name in pos_args if name not in input_shardings]
+        if missing_in:
+            raise AssertionError(
+                f"{type(self).__name__}: local_spmd is set but input_shardings "
+                f"is missing entries for: {missing_in}"
+            )
+        in_named: list[SpmdType] = [input_shardings[name] for name in pos_args]
+
+        return self._spmd_apply_local_region(fn, in_named, output_shardings)
+
+    def _spmd_apply_local_region(
+        self,
+        fn: Callable,
+        in_named: list[SpmdType],
+        output_shardings: SpmdType | tuple[SpmdType | None, ...],
+    ) -> Callable:
+        """Typecheck a local-tensor compute region with ``spmd.local_map``."""
+        in_types = tuple(
+            (layout.local_type, layout.partition_spec) for layout in in_named
+        )
+        out_types = tree_map(
+            lambda layout: (layout.local_type, layout.partition_spec),
+            output_shardings,
+            is_leaf=lambda x: isinstance(x, SpmdType),
+        )
+        return spmd.local_map(
+            in_types=in_types,
+            out_types=out_types,
+        )(fn)
+
+    def _assert_input_types(self, args: tuple, kwargs: dict) -> None:
+        """Assert each tensor input's SPMD type against ``input_shardings``."""
+        assert self._sharding_config is not None
+        input_shardings = self._sharding_config.input_shardings
+        if not input_shardings or not spmd.is_type_checking():
+            return
+        pos_arg_names = [
+            name for name in self._cache_pos_arg_names() if name not in kwargs
+        ]
+        named_inputs = dict(zip(pos_arg_names, args, strict=False))
+        named_inputs.update(kwargs)
+        for name, value in named_inputs.items():
+            layout = input_shardings.get(name)
+            if layout is not None and isinstance(value, torch.Tensor):
+                spmd.assert_type(value, layout)
+
+    def _assert_output_type(self, outputs: Any) -> None:
+        """Assert a single tensor output's SPMD type against ``output_shardings``.
+
+        TODO: Extend to nested outputs (tuples, dicts) once multi-tensor
+        forward returns need a boundary check.
+        """
+        assert self._sharding_config is not None
+        output_shardings = self._sharding_config.output_shardings
+        if output_shardings is None or not isinstance(outputs, torch.Tensor):
+            return
+        if isinstance(output_shardings, tuple):
+            raise ValueError(
+                f"{type(self).__name__}: output_shardings is a tuple but "
+                "forward returned a single tensor."
+            )
+        if spmd.is_type_checking():
+            spmd.assert_type(outputs, output_shardings)
+
+
+_ModuleT = TypeVar("_ModuleT", bound=nn.Module)
+
+
+class ModuleList(nn.ModuleList, Module, Generic[_ModuleT]):
+    """Module-protocol-compatible version of ``nn.ModuleList``."""
+
+    if TYPE_CHECKING:
+
+        def __iter__(self) -> Iterator[_ModuleT]:
+            ...
+
+
+class ModuleDict(nn.ModuleDict, Module, Generic[_ModuleT]):
+    """Module-protocol-compatible version of ``nn.ModuleDict``."""
+
+    if TYPE_CHECKING:
+
+        def __getitem__(self, key: str) -> _ModuleT:
+            ...
+
+        def values(self) -> ValuesView[_ModuleT]:
+            ...
+
+
+class Sequential(nn.Sequential, Module):
+    """Module-protocol-compatible version of ``nn.Sequential``."""
+
+    pass
