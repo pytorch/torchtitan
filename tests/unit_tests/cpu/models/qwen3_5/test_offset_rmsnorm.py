@@ -24,5 +24,4 @@ def test_qwen35_architecture_enables_offset_rmsnorm_local_compile() -> None:
             "attn_output_gate",
             "gdn_gate",
             "score_scale",
-            "moe_gather_sum",
         ]

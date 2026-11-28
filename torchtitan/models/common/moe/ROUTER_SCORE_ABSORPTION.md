@@ -79,6 +79,25 @@ The algebra above holds in exact arithmetic. Casting the scaled input before
 W2 changes rounding relative to scoring W2's output; FP32 multiplication does
 not guarantee identical BF16 outputs, losses, or gradients.
 
+## Compiling score multiplication
+
+Any model using the common dispatcher or scored `GroupedLinear` can enable
+`score_scale` in `model.local_compile.regions`. Qwen3.5 and its derivatives
+enable it by default. To opt in from another recipe, use
+
+```python
+config.model.local_compile.regions.append("score_scale")
+```
+
+With BF16 activations, eager execution writes an FP32 product before the
+downcast. Inductor can fuse those operations and reduce the score gradient
+without storing a full FP32 product per row. The reduction order can change
+the last bits of the score gradient.
+
+Compilation leaves the remat policy unchanged. During block replay, local
+combine and DeepEP score multiplication run outside named remat regions.
+All-to-all scoring follows the dispatcher's `combine` policy.
+
 ## Checkpoint dependencies
 
 Post-W2 scoring needs the unscaled expert output for the score gradient.

@@ -327,7 +327,6 @@ class Qwen35Model(Decoder):
                     "attn_output_gate",
                     "gdn_gate",
                     "score_scale",
-                    "moe_gather_sum",
                 ]
             )
         )

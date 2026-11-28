@@ -215,6 +215,7 @@ class Qwen38FlashNextModel(Qwen35Model):
                     "fp32_to_bf16_split",
                     "attn_output_gate",
                     "gdn_gate",
+                    "score_scale",
                     "gated_residual",
                     "indexer_scores",
                 ]
