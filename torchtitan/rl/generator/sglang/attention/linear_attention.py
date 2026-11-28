@@ -22,7 +22,7 @@ from sglang.srt.layers.attention.hybrid_linear_attn_backend import MambaAttnBack
 from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
 from sglang.srt.mem_cache.kv.router import STATE_PART
 from sglang.srt.model_executor.runner_utils.forward_batch import get_forward_batch
-from sglang.srt.runtime_context import get_parallel, get_schedule
+from sglang.srt.runtime_context import get_schedule
 from transformers import PretrainedConfig
 
 from torchtitan.models.base.module import Module
@@ -201,14 +201,11 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
     def supports_prefill_graph_extend(self) -> bool:
         """Whether SGLang's breakable prefill CUDA graphs capture the extend.
 
-        Off, so each layer breaks the graph and runs eagerly:
-        (a) on SGLang's draft runners (MTP), as with SGLang's own GDN backend;
-        (b) under attention DP > 1.
+        Off on SGLang's draft runners (MTP), as with SGLang's own GDN backend: each
+        layer there breaks the graph and runs eagerly. Under attention DP, SGLang
+        replays the graphs only on steps where no DP rank decodes.
         """
-        # TODO: capture the extend under attention DP too: mask an idle rank's made-up
-        # request (rows past ForwardBatch._original_batch_size) and add a DP 2 test.
-        # SGLang replays prefill graphs there only on steps where no DP rank decodes.
-        return not self.is_draft_worker and get_parallel().attn_dp_size == 1
+        return not self.is_draft_worker
 
     def prefill_graph_extend_active(self) -> bool:
         return self.prefill_graph_metadata is not None
