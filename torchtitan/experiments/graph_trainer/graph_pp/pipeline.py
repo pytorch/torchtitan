@@ -59,6 +59,9 @@ from torchtitan.models.base.model import BaseModel
 
 
 if TYPE_CHECKING:
+    from torchtitan.experiments.graph_trainer.traced_optimizer import (
+        TracedOptimizerUpdate,
+    )
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
 
@@ -434,6 +437,7 @@ def _register_graph_runtime(
     loss_fn: LossFunction,
     parallelism_context: ParallelismContext,
     liveness_schedule: _PipelineScheduleRuntime | None = None,
+    optimizer_update: "TracedOptimizerUpdate | None",
 ) -> GraphRuntime:
     """Bind GraphTrainer graph construction to an already chosen schedule."""
     graph_provider = GraphTrainerStageGraphProvider(
@@ -441,6 +445,7 @@ def _register_graph_runtime(
         config=config,
         plan=plan,
         parallelism_context=parallelism_context,
+        optimizer_update=optimizer_update,
     )
     return register_graph_schedule(
         schedule,
@@ -457,6 +462,7 @@ def _make_spmd_graph_runtime(
     trainer_config: "GraphTrainer.Config",
     loss_fn: LossFunction,
     parallelism_context: ParallelismContext,
+    optimizer_update: "TracedOptimizerUpdate | None",
 ) -> GraphRuntime:
     """Build the runtime for either SPMD path."""
     if (
@@ -482,6 +488,7 @@ def _make_spmd_graph_runtime(
         config=trainer_config,
         loss_fn=loss_fn,
         parallelism_context=parallelism_context,
+        optimizer_update=optimizer_update,
     )
 
 
@@ -508,6 +515,7 @@ def _make_pipeline_parallel_graph_runtime(
         loss_fn=loss_fn,
         parallelism_context=parallelism_context,
         liveness_schedule=liveness_schedule,
+        optimizer_update=None,
     )
 
 
@@ -518,6 +526,7 @@ def make_graph_runtime(
     parallelism_context: ParallelismContext,
     config: "GraphTrainer.Config | GraphTrainerConfigView",
     loss_fn: LossFunction,
+    optimizer_update: "TracedOptimizerUpdate | None" = None,
 ) -> GraphRuntime:
     """Build the GraphTrainer schedule and runtime with a stage-graph provider.
 
@@ -719,6 +728,7 @@ def make_graph_runtime(
             the generic pipelining API and supplies only its compile,
             parallelism, and model fields.
         loss_fn: Loss function used by the schedule and graph provider.
+        optimizer_update: Optimizer update to trace into the SPMD joint graph.
     """
     pp_enabled = parallelism_context.pp_enabled
     if not pp_enabled and len(stages) != 1:
@@ -748,6 +758,7 @@ def make_graph_runtime(
         trainer_config=config,
         loss_fn=loss_fn,
         parallelism_context=parallelism_context,
+        optimizer_update=optimizer_update,
     )
 
 
@@ -759,6 +770,7 @@ def make_spmd_graph_runtime(
     device: torch.device,
     loss_fn: LossFunction,
     trainer_config: "GraphTrainer.Config",
+    optimizer_update: "TracedOptimizerUpdate | None" = None,
 ) -> GraphRuntime:
     """Represent one SPMD model as a single-stage graph runtime."""
     # PipelineStage treats `group=None` as the world group.
@@ -778,6 +790,7 @@ def make_spmd_graph_runtime(
         parallelism_context=parallelism_context,
         config=trainer_config,
         loss_fn=loss_fn,
+        optimizer_update=optimizer_update,
     )
 
 

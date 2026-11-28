@@ -91,6 +91,7 @@ def llama3_fsdp_tp_sac_and_offload():
 def llama3_fsdp_tp_regional_inductor():
     config = llama3_fsdp_tp()
     config.compile.inductor_compilation = "regional"
+    config.optim.enable_accelerator_graph = True
     return config
 
 
