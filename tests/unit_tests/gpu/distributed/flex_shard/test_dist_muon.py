@@ -114,10 +114,10 @@ class TestDistMuon(DTensorTestBase):
         torch.testing.assert_close(output_tensor, expected)
 
     @parametrize("block_sizes", [(4,), (4, 2)])
-    @parametrize("use_triton", [False, True])
+    @parametrize("local_kernels", [None, "triton"])
     @with_comms(eager_init=True)
     def test_matches_plain_muon_across_flat_checkpoint(
-        self, block_sizes: tuple[int, ...], use_triton: bool
+        self, block_sizes: tuple[int, ...], local_kernels: Literal["triton"] | None
     ):
         lr = 0.03
         num_repeats = 3
@@ -184,7 +184,7 @@ class TestDistMuon(DTensorTestBase):
                 momentum=0.8,
                 nesterov=True,
                 ns_steps=ns_steps,
-                use_triton=use_triton,
+                local_kernels=local_kernels,
             )
 
         # Each rank owns 2 * 513 elements, exercising multiple blocks and a tail.

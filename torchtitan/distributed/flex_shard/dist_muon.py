@@ -230,8 +230,10 @@ class DistMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
         ns_device: Literal["accelerator"] | None = None,
-        use_triton: bool = False,
+        local_kernels: Literal["triton"] | None = None,
     ) -> None:
+        if local_kernels not in (None, "triton"):
+            raise ValueError(f"Unsupported local kernels: {local_kernels!r}")
         self._ns_device = self._resolve_ns_device(ns_device)
         self._prepare_input = _prepare_muon_input
         self._compute_direction = _compute_muon_direction
@@ -256,7 +258,7 @@ class DistMuon(Optimizer):
             compute_sharding_by_fqn=compute_sharding_by_fqn,
             bucket_configs=bucket_configs,
         )
-        if use_triton:
+        if local_kernels == "triton":
             from .kernels.cuda.triton import muon
 
             muon.check_supported(
@@ -1886,15 +1888,15 @@ def _compute_muon_direction(
     )
     for view in matrix_views:
         matrices = view.view_as_matrix_batch(prepared)
-        direction = _zeropower_via_newtonschulz(
-            matrices,
-            ns_coefficients=ns_coefficients,
-            ns_steps=ns_steps,
-            eps=eps,
-            normalizer=normalizer,
+        matrices.copy_(
+            _zeropower_via_newtonschulz(
+                matrices,
+                ns_coefficients=ns_coefficients,
+                ns_steps=ns_steps,
+                eps=eps,
+                normalizer=normalizer,
+            )
         )
-        matrices.copy_(direction)
-        del direction
         if reference_ratio is None:
             continue
         ratio = _adjust_muon_learning_rate(1.0, adjust_lr_fn, matrices.shape[-2:])

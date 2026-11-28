@@ -93,10 +93,10 @@ Enable Triton local momentum preparation, Newton-Schulz normalization, and
 parameter updates in the TorchTitan optimizer config:
 
 ```python
-DistMuon.Config(..., use_triton=True)
+DistMuon.Config(..., local_kernels="triton")
 ```
 
-The standalone FlexShard `DistMuon` constructor also accepts `use_triton=True`.
+The standalone FlexShard `DistMuon` constructor also accepts `local_kernels="triton"`.
 The default is PyTorch updates. The Triton path requires CUDA FP32 or BF16 storage.
 Norm reduction, NS matrix multiplications, writeback and redistribution retain their
 PyTorch implementations.
