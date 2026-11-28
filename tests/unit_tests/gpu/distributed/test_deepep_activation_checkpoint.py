@@ -7,6 +7,7 @@
 import itertools
 import unittest
 
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import pytest
@@ -271,9 +272,11 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     and output_postprocess is None
                 )
                 w2_saved_storages = {}
+                saved_kinds = set()
 
                 def pack(tensor):
                     info = remat.current_saved_tensor_info()
+                    saved_kinds.add(info.kind)
                     if (
                         info.kind is remat.SavedTensorKind.BACKWARD
                         and info.region is not None
@@ -283,13 +286,12 @@ class _EPActivationCheckpointing(DTensorTestBase):
                         w2_saved_storages[storage.data_ptr()] = storage.nbytes()
                     return tensor.detach()
 
-                if check_w2_saved_bytes:
-                    activation_remat.apply(
-                        ac_model,
-                        saved_tensors_hooks=lambda _, __: (pack, lambda tensor: tensor),
-                    )
-                else:
-                    activation_remat.apply(ac_model)
+                hooks = (
+                    remat.saved_tensors_hooks(pack, lambda tensor: tensor)
+                    if check_w2_saved_bytes
+                    else nullcontext()
+                )
+                activation_remat.apply(ac_model)
                 # As in training, the buffer is created after AC is applied. All
                 # models share it, so the baseline also runs deterministic when
                 # the AC model replays.
@@ -351,7 +353,8 @@ class _EPActivationCheckpointing(DTensorTestBase):
                             actual = _run_forward_backward(ac_model, x_TD)
                         graph.replay()
                     else:
-                        actual = _run_forward_backward(ac_model, x_TD)
+                        with hooks:
+                            actual = _run_forward_backward(ac_model, x_TD)
 
                 if reference is not None:
                     reference_values = _run_forward_backward(reference, x_TD)
@@ -390,6 +393,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     1 + int(not absorbed and w2.remat_should_recompute("grouped_mm")),
                 )
                 if check_w2_saved_bytes and absorbed:
+                    self.assertIn(remat.SavedTensorKind.CHECKPOINT_INPUT, saved_kinds)
                     self.assertEqual(sum(w2_saved_storages.values()), 0)
                 if exact:
                     for actual_grad, expected_grad in zip(actual, expected):
