@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import itertools
+import os
 import unittest
 
 from unittest.mock import patch
@@ -213,6 +214,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
             # Filling empty outputs must stay off: it races with comm streams.
             with (
                 DeterministicGuard(True, fill_uninitialized_memory=False),
+                patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":4096:8"}),
                 self.subTest(
                     ac=type(activation_remat).__qualname__,
                     linear=grouped_linear_cls.__name__,
@@ -438,19 +440,27 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
                 self._check_ep_activation_checkpointing(
                     ac_configs,
                     num_dispatch_replays=num_replays,
-                    num_combine_replays=num_replays,
+                    num_combine_replays=0,
                     dispatcher_config=HybridEPTokenDispatcher.Config(
                         num_experts=4 * self.world_size,
                         top_k=_TOP_K,
                         hidden_dim=_MODEL_DIM,
                         num_max_tokens_per_rank=_NUM_TOKENS,
                         non_blocking_capacity_factor=capacity_factor,
+                        # Pad blocking rows; leave unused capacity in nonblocking mode.
+                        pad_multiple=64 if capacity_factor is None else None,
                     ),
                     expert_configs=(
                         (GroupedLinear, SwiGLU.Config(), None),
+                        (GptOssGroupedLinear, ClampedSwiGLU.Config(), None),
                         (
                             GroupedLinear,
                             SwiGLU.Config(),
+                            RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                        ),
+                        (
+                            GptOssGroupedLinear,
+                            ClampedSwiGLU.Config(),
                             RMSNorm.Config(normalized_shape=_MODEL_DIM),
                         ),
                     ),

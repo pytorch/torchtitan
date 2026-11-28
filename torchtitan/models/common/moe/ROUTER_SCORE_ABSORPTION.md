@@ -1,7 +1,7 @@
 # Router-score absorption
 
-[`RoutedExperts`](moe.py) absorbs DeepEP router scores into W2's input when
-`output_postprocess` is absent. Local, AllToAll, and HybridEP keep post-expert
+[`RoutedExperts`](moe.py) absorbs DeepEP and HybridEP router scores into W2's
+input when `output_postprocess` is absent. Local and AllToAll keep post-expert
 scoring; Dist-MoE owns its compute and communication optimizations.
 
 `R` is the number of routed rows on this rank, `D` the model dimension, `F` the
@@ -15,8 +15,8 @@ Without absorption, each expert output is multiplied by its router score:
 ```mermaid
 flowchart LR
     H["h [R,F]"] --> W["W2"] --> A["Add expanded bias B [R,D]"]
-    A --> S["FP32 score multiply + cast back"]
-    S --> C["Unpermute + DeepEP combine"]
+    A --> S["Multiply by router scores"]
+    S --> C["Unpermute + EP combine"]
 ```
 
 For a linear W2, scores can instead multiply its input:
@@ -27,7 +27,7 @@ flowchart LR
     B["Expanded bias B [R,D]"] --> BS["FP32 score multiply + cast back"]
     W --> A["Add"]
     BS --> A
-    A --> C["Unpermute + DeepEP combine"]
+    A --> C["Unpermute + EP combine"]
 ```
 
 Each score multiplication broadcasts scores as `[R, 1]`. The bias branch is
@@ -52,13 +52,13 @@ Padding rows receive zero bias.
 ## Output postprocessing
 
 A postprocess such as expert-output normalization need not commute with score
-multiplication. DeepEP retains post-expert scoring when it is configured:
+multiplication. Both backends retain post-expert scoring when it is configured:
 
 ```mermaid
 flowchart LR
     H["h [R,F]"] --> W["W2"] --> A["Add expanded bias B [R,D]"]
-    A --> P["Output postprocess"] --> S["FP32 score multiply + cast back"]
-    S --> C["Unpermute + DeepEP combine"]
+    A --> P["Output postprocess"] --> S["Multiply by router scores"]
+    S --> C["Unpermute + EP combine"]
 ```
 
 Thus `s * output_postprocess(W2(h) + B)` keeps the original operation order.
@@ -66,7 +66,9 @@ The combine backend receives weighted outputs in both paths.
 
 ## Precision
 
-Score products compute in FP32 and then convert back to the activation dtype.
+Absorbed score products compute in FP32 and then convert back to the activation
+dtype. With a postprocess, DeepEP also uses an FP32 product, while HybridEP
+casts scores to the dispatched activation dtype before multiplying.
 For example, [`GroupedLinear`](../linear/linear.py) uses type promotion:
 
 ```python
@@ -90,6 +92,9 @@ Replaying unpermute would require retaining or rebuilding W2's output. Saving
 it instead retains the routing indices needed by unpermute backward: `R`
 int64 indices occupy `8R` bytes, or 256 KiB at `R = 32768`. This counts index
 storage, not the opaque DeepEP handle or other retained tensors.
+
+HybridEP also saves its complete combine region; backward uses the forward
+dispatch handle instead of W2's output.
 
 Scores are supplied by replayed dispatch/permutation or retained dispatch
 outputs. The optimized combine does not consume scores. W2 follows its
