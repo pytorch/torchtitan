@@ -101,6 +101,17 @@ def test_a_group_larger_than_rollouts_per_worker_raises(
         )
 
 
+def test_greedy_training_sampling_raises() -> None:
+    # The batcher hands this temperature to the loss, which divides the logits by it.
+    config = _controller_config_with_groups(num_groups=16, group_size=8)
+    generator = dataclasses.replace(
+        config.generator,
+        sampling=dataclasses.replace(config.generator.sampling, temperature=0.0),
+    )
+    with pytest.raises(ValueError, match="generator.sampling.temperature"):
+        dataclasses.replace(config, generator=generator)
+
+
 def test_rollout_loop_keeps_the_metrics_a_worker_sent_with_its_group() -> None:
     """A rollout worker adds its own metrics to each training group (e.g. its event-loop lag).
     The controller adds the rollout metrics next to them."""

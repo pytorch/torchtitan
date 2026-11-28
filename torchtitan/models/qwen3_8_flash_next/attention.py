@@ -694,16 +694,26 @@ class QSAAttention(Qwen35Attention):
             # A causal query at document position p can see p + 1 keys.
             num_keys = positions + 1
             num_compressed_keys = num_keys // self.indexer.compress_ratio
-            return quadratic_attention_flops(
+            attention_flops = quadratic_attention_flops(
                 num_heads=self.n_heads,
                 qk_head_dim=self.head_dim,
                 v_head_dim=self.head_dim,
                 num_keys=num_keys.clamp(
                     max=self.indexer.token_budget + self.indexer.compress_ratio - 1
                 ),
-            ) + 6 * self.indexer.num_heads * self.indexer.head_dim * int(
-                num_compressed_keys.sum()
             )
+
+            # Scoring every compressed key runs without grad: forward only.
+            index_dim = self.indexer.num_heads * self.indexer.head_dim
+            indexer_flops = 2 * index_dim * int(num_compressed_keys.sum())
+            # The indexer loss recomputes the selected scores with grad. The
+            # forward repeats the scoring pass, so only the backward is new work.
+            if self.inner_attention.indexer_loss is not None:
+                num_selected_keys = num_compressed_keys.clamp(
+                    max=self.indexer.token_budget // self.indexer.compress_ratio
+                )
+                indexer_flops += 4 * index_dim * int(num_selected_keys.sum())
+            return attention_flops + indexer_flops
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -757,5 +767,5 @@ class QSAAttention(Qwen35Attention):
             aux_loss_denominator=aux_loss_denominator,
         )
         remat.recompute_needs_tensor(output_THV, gate_THV)
-        output_TD = (output_THV * gate_THV.sigmoid()).flatten(-2)
+        output_TD = self._apply_output_gate(output_THV, gate_THV)
         return self.wo(output_TD)

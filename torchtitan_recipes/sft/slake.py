@@ -33,6 +33,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers, RendererConfig
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.components.validator import Validator
+from torchtitan.config import CallableFunction
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, LoRATransform
 from torchtitan.models.muse_glimmer import (
@@ -416,7 +417,12 @@ def _muse_glimmer_30b_slake_sft(variant: _SlakeVariant) -> Trainer.Config:
     transform = _slake_lora_transform(
         variant, decoder_targets=_MUSE_GLIMMER_LORA_DECODER_TARGETS
     )
-    return apply_transforms(config, [transform])
+    config = apply_transforms(config, [transform])
+    assert config.checkpointer is not None
+    config.checkpointer.model_param_checkpoint_type_map = CallableFunction.Config(
+        fn=transform.param_checkpoint_type
+    )
+    return config
 
 
 def muse_glimmer_30b_slake_lora_decoder_sft() -> Trainer.Config:

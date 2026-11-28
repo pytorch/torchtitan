@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
-from vllm.config import CompilationConfig
+from vllm.config import CompilationConfig, KVTransferConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 
 logger = logging.getLogger(__name__)
@@ -200,3 +200,73 @@ def _default_capture_sizes(cap: int, max_num_seqs: int) -> list[int]:
         cap,
     }
     return sorted(size for size in sizes if size <= cap)
+
+
+@dataclass(kw_only=True, slots=True)
+class SimpleCPUKVOffloadConfig:
+    """Save GPU prefix KV to each GPU process's CPU DRAM with vLLM's
+    SimpleCPUOffloadConnector and reload it on a later prefix hit. See
+    ``SIMPLE_CPU_OFFLOAD.md``."""
+
+    cpu_bytes_per_rank: int
+    """CPU DRAM for KV per GPU process (TP=2 uses twice this)."""
+
+    lazy_offload: bool = True
+    """Save a block only when it nears eviction from the GPU cache, so CPU holds blocks
+    the GPU is dropping instead of copies of blocks still on GPU, with fewer copies.
+    False (vLLM's default) saves every full block as it is computed; this only helps
+    when the GPU prefix cache is dropped without eviction (e.g. ``reset_prefix_cache``),
+    which RL with KV offload never does (it rejects
+    ``reset_kv_cache_on_model_state_dict_load=True``)."""
+
+    def __post_init__(self) -> None:
+        if self.cpu_bytes_per_rank <= 0:
+            raise ValueError(
+                f"cpu_bytes_per_rank must be positive, got {self.cpu_bytes_per_rank}"
+            )
+
+    def get_vllm_kv_transfer_config(self) -> KVTransferConfig:
+        """vLLM's connector config, with Titan's subclass of the connector, which
+        scopes save completion to one TP group and takes session release hints."""
+        return KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector",
+            kv_role="kv_both",
+            kv_connector_module_path=(
+                "torchtitan.rl.generator.vllm.simple_cpu_offload_connector"
+            ),
+            kv_connector_extra_config={
+                "cpu_bytes_to_use_per_rank": self.cpu_bytes_per_rank,
+                "lazy_offload": self.lazy_offload,
+            },
+        )
+
+
+@dataclass(kw_only=True, slots=True)
+class MooncakeStoreKVOffloadConfig:
+    """Share GPU prefix KV across generators through a Mooncake Store with vLLM's
+    MooncakeStoreConnector. See ``MOONCAKE_STORE.md``."""
+
+    cache_prefix: str
+    """Namespace of every Store key. Use a new value for each launch, including
+    checkpoint resume: the Store outlives a run and policy versions restart."""
+
+    save_decode_cache: bool = False
+    """Also save generated tokens' KV, so the next turn reuses the previous
+    completion."""
+
+    def __post_init__(self) -> None:
+        if not self.cache_prefix:
+            raise ValueError("Mooncake Store requires a non-empty cache_prefix")
+
+    def get_vllm_kv_transfer_config(self) -> KVTransferConfig:
+        """vLLM's connector config, with Titan's subclass of the connector, which
+        coordinates Store lookups and saves across TP ranks."""
+        return KVTransferConfig(
+            kv_connector="MooncakeStoreConnector",
+            kv_role="kv_both",
+            kv_connector_module_path="torchtitan.rl.generator.vllm.mooncake",
+            kv_connector_extra_config={
+                "cache_prefix": self.cache_prefix,
+                "save_decode_cache": self.save_decode_cache,
+            },
+        )

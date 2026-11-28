@@ -34,7 +34,7 @@ Setting `profiler.trace` to `CuspyTraceProfiler` instead of `KinetoTraceProfiler
 
 * GPU performance metrics sampled with CUPTI PM sampling, e.g. SM activity, DRAM and NVLink bandwidth.
 * GPU power, clock and thermal counters (`enable_environment_counters`).
-* CUDA graph dependency edges and event-node ids.
+* CUDA graph dependency edges (`enable_graph_dependencies`) and graph event-node spans (with `enable_cuda_sync_events`).
 * Perfetto protobuf output (`trace_format="pftrace"`), which is smaller than JSON.
 
 See [`torch.profiler.CuspyConfig`](https://docs.pytorch.org/docs/main/profiler.html#torch.profiler.CuspyConfig) for the underlying options.
@@ -84,3 +84,66 @@ print(sorted(supported_metrics()))  # e.g. "sm__cycles_active" -> "sm__cycles_ac
 The trace gets the PM samples still in the buffer when profiling ends. If the warmup and active steps together take longer than the lookback window, the earliest samples are dropped.
 
 The sample buffer is held in process memory while profiling, not written to the trace. CUPTI stores raw hardware counters for every sample (several KB each, depending on the metrics), so it grows with lookback / interval: e.g. about 1.1 GiB at 100 s / 2 ms with 7 metrics.
+
+## Always-on kernel spans
+
+torchtitan supports always-on profiling through the Cuspy backend. On Llama 3
+8B (seq 8192, FSDP over 4 GB300s, CUDA graphs) it lowered tokens/s by 0.3-0.5%
+with a file written every 20 steps. Every step, each rank records
+every CUDA kernel's GPU start/end time and keeps the most recent steps on disk,
+so a slow step can be inspected after the fact. It stays cheap because:
+
+* each kernel is recorded as a few integers (graph node id, start, end, stream);
+* the host collects records without a device sync, while it waits on the GPU;
+* kernel names come from the CUDA graph node table, recorded once per graph
+  and joined offline, not per kernel during training;
+* steps are written in batches of `steps_per_file`, and old files are deleted
+  so each rank keeps the last `num_steps_retained` steps.
+
+```python
+from torchtitan.observability.kernel_spans import KernelSpanRecorder
+
+config.profiler.kernel_spans = KernelSpanRecorder.Config(num_steps_retained=1000)
+```
+
+```
+<dump_folder>/profiling/kernel_spans/
+  rank0/
+    steps_000000000901_000000001000.npz   # steps_per_file (100) steps each, oldest deleted first
+    steps_000000001001_000000001100.npz
+  rank1/
+    ...
+```
+
+To look at steps, convert them into a trace for <https://ui.perfetto.dev>,
+passing the file that holds them from each rank you want:
+
+```bash
+python scripts/kernel_spans_to_trace.py \
+    outputs/profiling/kernel_spans/rank{0..3}/steps_000000001001_000000001100.npz \
+    --steps 1050-1052 --output trace.json.gz
+```
+
+Caveats:
+
+* Steps are cut on the GPU, not the host: each step ends with a one-kernel
+  marker CUDA graph replayed on the current stream, and a step holds the
+  kernels that started between the previous step's marker and its own. A
+  kernel on another stream whose record arrives after the next step's marker
+  is filed into a later step.
+* Step N also holds the checkpoint and validation kernels of step N.
+* On restart, files holding steps after the resumed step are deleted, since
+  those steps will be recorded again.
+* Kernels launched outside CUDA graphs are recorded without names.
+* Steps not yet written to a file are lost if the process is killed.
+* It can run alongside `CuspyTraceProfiler`, but not `KinetoTraceProfiler`.
+
+The file format is described in [`kernel_spans.py`](kernel_spans.py).
+
+Requirements:
+
+* Accelerator graphs (the default), since kernels are named from graph nodes.
+* The Cuspy requirements above (libcupti 13.3 or newer).
+* CUDA graph node ids: a CUDA 13.1 or newer driver, or cuda-compat 13.1 or
+  newer on `LD_LIBRARY_PATH` (see `torch.cuda.graph_annotations.is_available`).
+  CUDA 13.5 is not required.

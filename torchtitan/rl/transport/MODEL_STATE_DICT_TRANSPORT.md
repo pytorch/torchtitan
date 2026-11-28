@@ -1,6 +1,6 @@
 # Model state dict transport
 
-`ModelStateDictTransport` (`model_state_dict_transport.py`) moves the trainer's
+`ModelStateDictTransport` (`model_state_dict.py`) moves the trainer's
 model state dict into the generators' prefetched model state dicts with
 one-sided RDMA reads over a `torch.distributed._transport` backend
 (`backend="nixl"`, the default, or `"mooncake"`). It is the default
@@ -88,8 +88,8 @@ does not cover every element of a generator shard, or on `Partial` and uneven
 2. Push: the trainer casts its shards and copies them into the staging buffer
    (`stage`), with no collectives.
 3. Pull: each generator rank issues its reads (`read`) and waits for them,
-   raising after `read_timeout_s` (600 s). A timeout leaves the reads in flight;
-   restart the job.
+   raising after 60s plus the time its bytes take at `min_read_bytes_per_s`. A
+   timeout leaves the reads in flight; restart the job.
 4. Load: the generator copies its weights from the prefetch buffers, unpacking
    packed keys (`copy_prefetched_`).
 

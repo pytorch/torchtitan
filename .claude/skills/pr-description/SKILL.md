@@ -12,6 +12,10 @@ torchtitan but not your context.
 
 ## Rules
 
+- Before drafting, run the `pr-review` skill in branch mode on the change. Fix
+  its must-fix items, or keep them and say why in the "Self-review" section.
+  Rerun it after substantial changes and update the section's sha.
+
 - Never write the "Summary (human-written)" section. Leave its placeholder for
   the author, and tell the user to fill it in before review. Don't draft text
   for them to paste. With ghstack the PR body is the commit message, so keep the
@@ -77,4 +81,8 @@ each new test, the regression it catches.>
 
 ## Known issues / follow-ups
 <Failures that reproduce on main; TODOs left in code; next PR in the stack.>
+
+## Self-review
+pr-review (branch mode) at <sha>: <verdict>. Not addressed:
+- <must-fix item> -- <why not>
 ```

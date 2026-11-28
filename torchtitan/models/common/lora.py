@@ -44,10 +44,10 @@ __all__ = [
 ]
 
 
-# TODO: Support checkpoint interoperability for LoRA adapter state. Native DCP
-# base checkpoints cannot initialize LoRA models because lora_a/lora_b keys are
-# absent. HF export raises in BaseCheckpointManager._validate_hf_export until a
-# PEFT adapter export exists.
+# TODO: Support checkpoint interoperability for LoRA adapter state. Without
+# checkpointer.model_param_checkpoint_type_map, native base checkpoints cannot
+# initialize LoRA models because lora_a/lora_b keys are absent. HF export raises
+# in BaseCheckpointManager._validate_hf_export until a PEFT adapter export exists.
 class _LoRAMixin:
     _lora_scaling: float
 
