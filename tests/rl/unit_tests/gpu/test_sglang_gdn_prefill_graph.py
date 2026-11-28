@@ -121,6 +121,8 @@ def _batch(extend_lens, prefix_lens, track=None):
         forward_mode=ForwardMode.EXTEND,
         logical_forward_mode=ForwardMode.EXTEND,
         batch_size=batch_size,
+        # Set by SGLang's attention-DP padding only.
+        _original_batch_size=None,
         req_pool_indices=torch.arange(batch_size, device="cuda"),
         out_cache_loc=torch.zeros(sum(extend_lens), dtype=torch.int64, device="cuda"),
         extend_seq_lens=torch.tensor(extend_lens, device="cuda"),

@@ -181,9 +181,11 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
         # TODO(https://github.com/sgl-project/sglang/issues/48463): SGLang has no
         # public hooks for the extra_buffer prefix cache. The backends rely on its
         # internals: conv_states_shape below, the forward_metadata track fields read
-        # in track_extend_states, the forward_batch track fields and the private
-        # _translate_mamba_indices in refresh_prefill_graph_metadata, and the private
-        # _track_mamba_state_decode in decode.
+        # in track_extend_states, the forward_batch track fields, the private
+        # _translate_mamba_indices and the private ForwardBatch._original_batch_size in
+        # _fill_prefill_graph_metadata, mamba_track_seqlens_cpu in
+        # refresh_prefill_graph_metadata, and the private _track_mamba_state_decode in
+        # decode.
         # SGLang's extend tracking reads the conv window length (W - 1) as the last
         # dim of conv_states_shape; the pool keeps [W - 1, C] per slot, as SGLang's KDA
         # backend does, which exposes the transposed shape too.
@@ -232,40 +234,68 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
             ),
             padding_tokens=zeros(num_tokens, dtype=torch.bool),
         )
-        self.refresh_prefill_graph_metadata(metadata, forward_batch)
+        self._fill_prefill_graph_metadata(metadata, forward_batch)
         return metadata
 
     def refresh_prefill_graph_metadata(
         self, metadata: PrefillGraphMetadata, forward_batch
     ) -> None:
+        """Before a replay, refill ``metadata`` with the live batch's requests."""
+        # Non-speculative decode rows run as 1-token extends keep a track mask but no
+        # prefill track lengths, so their prefix-cache snapshots would be lost. SGLang's
+        # capture batch has the same fields, so only replays check.
+        if (
+            forward_batch.mamba_track_mask is not None
+            and forward_batch.mamba_track_seqlens_cpu is None
+        ):
+            raise RuntimeError(
+                f"A batch of {forward_batch.batch_size} decode rows run as 1-token "
+                "extends reached a captured linear attention extend: it tracks "
+                "prefix-cache snapshots but has no prefill track lengths, so they "
+                "would be lost. TorchTitan relies on SGLang's attention DP vote to keep "
+                "such steps eager: check it after an SGLang bump."
+            )
+        self._fill_prefill_graph_metadata(metadata, forward_batch)
+
+    def _fill_prefill_graph_metadata(
+        self, metadata: PrefillGraphMetadata, forward_batch
+    ) -> None:
         """Fill ``metadata`` with the batch's requests, as the eager metadata would hold
-        them, with device copies only (no host sync). The rows past the batch are
-        padding."""
+        them, with device copies only (no host sync). The rows past them are padding.
+
+        Example: an idle attention-DP rank replays with one made-up request and
+        ``_original_batch_size`` 0, so every row is padding and the extend writes
+        nothing.
+        """
         self.prefill_graph_metadata = metadata
         # HiCache loads a request's states back from host memory layer by layer. A
         # captured extend can't wait for its own layer, so the replay waits for all of
         # them: a stream wait, the host does not block.
         self.token_to_kv_pool.layer_router.wait_for_part(STATE_PART)
 
-        batch_size = forward_batch.batch_size
-        num_tokens = sum(forward_batch.extend_seq_lens_cpu)
+        # The real requests: an idle attention-DP rank runs one made-up request, with
+        # _original_batch_size 0.
+        num_requests = forward_batch._original_batch_size
+        if num_requests is None:
+            num_requests = forward_batch.batch_size
+        num_tokens = sum(forward_batch.extend_seq_lens_cpu[:num_requests])
 
         # Each request's tokens and state slot; padding rows are empty sequences.
-        metadata.cu_seqlens[:batch_size].copy_(
-            forward_batch.extend_start_loc[:batch_size]
+        metadata.cu_seqlens[:num_requests].copy_(
+            forward_batch.extend_start_loc[:num_requests]
         )
-        metadata.cu_seqlens[batch_size:].fill_(num_tokens)
+        metadata.cu_seqlens[num_requests:].fill_(num_tokens)
         state_indices = self._translate_mamba_indices(
             self.req_to_token_pool.get_mamba_indices(forward_batch.req_pool_indices)
         )
-        metadata.state_indices[:batch_size].copy_(state_indices[:batch_size])
-        metadata.state_indices[batch_size:].fill_(self.pad_slot_id)
+        metadata.state_indices[:num_requests].copy_(state_indices[:num_requests])
+        metadata.state_indices[num_requests:].fill_(self.pad_slot_id)
         torch.gt(
-            forward_batch.extend_prefix_lens[:batch_size],
+            forward_batch.extend_prefix_lens[:num_requests],
             0,
-            out=metadata.has_initial_state[:batch_size],
+            out=metadata.has_initial_state[:num_requests],
         )
-        metadata.has_initial_state[batch_size:].fill_(False)
+        metadata.has_initial_state[num_requests:].fill_(False)
         metadata.padding_tokens[:num_tokens].fill_(False)
         metadata.padding_tokens[num_tokens:].fill_(True)
 
@@ -286,13 +316,13 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
         if aligned_lens is None:
             return
 
-        track_mask = forward_batch.mamba_track_mask[:batch_size]
-        track_indices = forward_batch.mamba_track_indices[:batch_size]
-        metadata.checkpoint_slots[:batch_size].copy_(
+        track_mask = forward_batch.mamba_track_mask[:num_requests]
+        track_indices = forward_batch.mamba_track_indices[:num_requests]
+        metadata.checkpoint_slots[:num_requests].copy_(
             torch.where(track_mask, track_indices, self.pad_slot_id)
         )
-        metadata.checkpoint_lens[:batch_size].copy_(aligned_lens[:batch_size])
-        metadata.conv_history_slots[:batch_size].copy_(
+        metadata.checkpoint_lens[:num_requests].copy_(aligned_lens[:num_requests])
+        metadata.conv_history_slots[:num_requests].copy_(
             torch.where(track_mask, track_indices, 0)
         )
 
@@ -300,15 +330,15 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
         # clamps them: untracked rows hold garbage lengths.
         window = self.conv_states_shape[-1]
         starts = (
-            forward_batch.extend_start_loc[:batch_size]
-            + aligned_lens[:batch_size]
+            forward_batch.extend_start_loc[:num_requests]
+            + aligned_lens[:num_requests]
             - window
         )
         torch.clamp(
             starts[:, None] + torch.arange(window, device=starts.device),
             min=0,
             max=num_tokens - 1,
-            out=metadata.conv_history_rows[:batch_size],
+            out=metadata.conv_history_rows[:num_requests],
         )
 
     def track_extend_states(
